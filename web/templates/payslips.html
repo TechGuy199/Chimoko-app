@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}Payslips — {% endblock %}
+{% block content %}
+<div class="toolbar no-print">
+    <a class="btn" href="{{ url_for('hr') }}">&larr; HR &amp; Payroll</a>
+    <button class="btn primary" onclick="window.print()">Print / Save as PDF</button>
+</div>
+
+{% for slip in slips %}
+<article class="invoice payslip">
+    <header>
+        <h1>{{ user.business_name }}</h1>
+        <p class="doc-type">Official Payslip — {{ slip.pay_month|month }}</p>
+    </header>
+
+    <dl>
+        <dt>Employee</dt><dd>{{ slip.employee_name }}</dd>
+        <dt>Full basic salary</dt><dd>{{ slip.basic_salary|money }}</dd>
+        <dt>Expected work days</dt><dd>{{ '%g'|format(slip.expected_days) }}</dd>
+        <dt>Actual days worked</dt><dd>{{ '%g'|format(slip.worked_days) }}</dd>
+        <dt>Pro-rata basic pay</dt><dd>{{ slip.calculated_basic|money }}</dd>
+    </dl>
+
+    <table>
+        <thead><tr><th>Additions &amp; bonuses</th><th class="num">Amount</th></tr></thead>
+        <tbody>
+        {% for name, amount in slip.bonuses.items() %}
+            <tr><td>{{ name }}</td><td class="num">{{ amount|money }}</td></tr>
+        {% else %}
+            <tr><td colspan="2" class="muted">None</td></tr>
+        {% endfor %}
+        </tbody>
+        <thead><tr><th>Statutory &amp; custom deductions</th><th class="num">Amount</th></tr></thead>
+        <tbody>
+            <tr><td>NAPSA contribution</td><td class="num">{{ slip.napsa_amt|money }}</td></tr>
+            <tr><td>NHIMA contribution</td><td class="num">{{ slip.nhima_amt|money }}</td></tr>
+        {% for name, amount in slip.deductions.items() %}
+            <tr><td>{{ name }}</td><td class="num">{{ amount|money }}</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+
+    <dl class="totals">
+        <dt>Net payable salary</dt><dd>{{ slip.net_payable|money }}</dd>
+    </dl>
+</article>
+{% else %}
+<p class="muted center">Those payslips could not be found.</p>
+{% endfor %}
+{% endblock %}

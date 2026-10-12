@@ -1,13 +1,17 @@
+import calendar
+import csv
 import datetime
 import functools
 import hmac
+import io
 import json
 import math
 import os
+import re
 import secrets
 from zoneinfo import ZoneInfo
 
-from flask import Flask, abort, flash, g, redirect, render_template, request, session, url_for
+from flask import Flask, Response, abort, flash, g, redirect, render_template, request, session, url_for
 from markupsafe import Markup
 from werkzeug.security import check_password_hash, generate_password_hash
 
@@ -18,6 +22,8 @@ ON_VERCEL = bool(os.environ.get("VERCEL"))
 TZ = ZoneInfo(os.environ.get("APP_TIMEZONE", "Africa/Lusaka"))
 PAYMENT_STATUSES = ("Paid", "Partial Payment", "Unpaid")
 PERMISSIONS = ("sell", "procure", "transfer", "delete")
+WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
+HR_DEFAULTS = {"non_working_days": "saturday,sunday", "napsa_pct": 5.0, "nhima_pct": 2.0, "napsa_bearer": "employee", "nhima_bearer": "employee"}
 
 if ON_VERCEL and not IS_POSTGRES:
     raise RuntimeError("DATABASE_URL is not set. Connect a Postgres database to this Vercel project.")
@@ -147,6 +153,39 @@ def number(key, kind=float, default=None):
 
 def now():
     return datetime.datetime.now(TZ)
+
+
+@app.template_filter("month")
+def month_label(value):
+    try:
+        return datetime.datetime.strptime(value, "%Y-%m").strftime("%B %Y")
+    except (ValueError, TypeError):
+        return value
+
+
+def csv_safe(value):
+    # A leading = or @ (or a +/- that is not a number or phone) makes spreadsheet apps run the cell as a formula
+    if value is None:
+        return ""
+    if isinstance(value, str) and value and (
+        value[0] in "=@\t\r" or (value[0] in "+-" and not re.fullmatch(r"[+-][\d\s().,-]*", value))
+    ):
+        return "'" + value
+    return value
+
+
+def csv_response(filename, header, rows):
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(header)
+    for row in rows:
+        writer.writerow([csv_safe(value) for value in row])
+    # utf-8-sig adds the marker Excel needs to read accented characters correctly
+    return Response(
+        buffer.getvalue().encode("utf-8-sig"),
+        mimetype="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 def department_names(db, biz):
@@ -551,11 +590,7 @@ def delete_item(item_id):
 
 
 # --- SALES & INVOICES HISTORY ---
-@app.get("/history")
-@need(None)
-def history():
-    db, biz = get_db(), g.user["business_id"]
-    q = request.args.get("q", "").strip()
+def history_rows(db, biz, q, limit):
     sql = """SELECT id, invoice_no, kind, customer_name, customer_phone, payment_status, total, amount_paid, balance_due, created_at
              FROM invoices WHERE business_id=?"""
     params = [biz]
@@ -564,8 +599,31 @@ def history():
         sql += """ AND (LOWER(invoice_no) LIKE ? OR LOWER(customer_name) LIKE ? OR LOWER(customer_phone) LIKE ?
                    OR EXISTS (SELECT 1 FROM invoice_items ii WHERE ii.invoice_id = invoices.id AND LOWER(ii.item_name) LIKE ?))"""
         params += [like, like, like, like]
-    sql += " ORDER BY id DESC LIMIT 500"
-    return render_template("history.html", invoices=db.all(sql, params), q=q)
+    sql += " ORDER BY id DESC LIMIT ?"
+    return db.all(sql, params + [limit])
+
+
+@app.get("/history")
+@need(None)
+def history():
+    q = request.args.get("q", "").strip()
+    return render_template("history.html", invoices=history_rows(get_db(), g.user["business_id"], q, 500), q=q)
+
+
+@app.get("/history.csv")
+@need(None)
+def history_csv():
+    q = request.args.get("q", "").strip()
+    rows = history_rows(get_db(), g.user["business_id"], q, 50000)
+    return csv_response(
+        "sales-invoices.csv",
+        ["Invoice No", "Date/Time", "Type", "Customer", "Phone", "Total", "Paid", "Balance", "Status"],
+        [
+            (r["invoice_no"], r["created_at"], "Farm use" if r["kind"] == "FARM_USE" else "Sale", r["customer_name"],
+             r["customer_phone"], r["total"], r["amount_paid"], r["balance_due"], r["payment_status"])
+            for r in rows
+        ],
+    )
 
 
 @app.get("/invoices/<int:invoice_id>")
@@ -584,6 +642,248 @@ def invoice(invoice_id):
         (invoice_id, biz),
     )
     return render_template("invoice.html", inv=inv, lines=lines)
+
+
+# --- PROCUREMENTS ---
+def procurement_rows(db, biz, category):
+    sql = """SELECT purchase_date, supplier_name, invoice_no, item_code, name, category, department, quantity, unit_cost, total_cost, expiry_date
+             FROM procurements WHERE business_id=?"""
+    params = [biz]
+    if category:
+        sql += " AND category=?"
+        params.append(category)
+    return db.all(sql + " ORDER BY id DESC", params)
+
+
+@app.get("/procurements")
+@need(None)
+def procurements():
+    db, biz = get_db(), g.user["business_id"]
+    category = request.args.get("category", "").strip()
+    rows = procurement_rows(db, biz, category)
+    by_category = {}
+    for r in rows:
+        label = r["category"] or "Uncategorised"
+        by_category[label] = by_category.get(label, 0.0) + (r["total_cost"] or 0.0)
+    categories = [c["category"] for c in db.all("SELECT DISTINCT category FROM procurements WHERE business_id=? ORDER BY category", (biz,))]
+    return render_template(
+        "procurements.html", rows=rows, category=category, categories=categories,
+        by_category=sorted(by_category.items()), grand_total=sum(by_category.values()),
+    )
+
+
+@app.get("/procurements.csv")
+@need(None)
+def procurements_csv():
+    rows = procurement_rows(get_db(), g.user["business_id"], request.args.get("category", "").strip())
+    return csv_response(
+        "procurements.csv",
+        ["Date", "Supplier", "Invoice No", "Item Code", "Product Name", "Category", "Dept", "Qty", "Unit Cost", "Total Cost", "Expiry"],
+        [
+            (r["purchase_date"], r["supplier_name"], r["invoice_no"], r["item_code"], r["name"], r["category"], r["department"],
+             r["quantity"], r["unit_cost"], r["total_cost"], r["expiry_date"])
+            for r in rows
+        ],
+    )
+
+
+# --- HR & PAYROLL (ADMIN) ---
+def hr_settings_for(db, biz):
+    return db.one("SELECT non_working_days, napsa_pct, nhima_pct, napsa_bearer, nhima_bearer FROM hr_settings WHERE business_id=?", (biz,)) or dict(HR_DEFAULTS)
+
+
+def expected_work_days(year, month, non_working):
+    days_in_month = calendar.monthrange(year, month)[1]
+    return sum(1 for day in range(1, days_in_month + 1) if WEEKDAYS[datetime.date(year, month, day).weekday()] not in non_working)
+
+
+def named_amounts(prefix):
+    """Reads the repeated name/amount rows of the payslip form into {name: amount}."""
+    result = {}
+    for name, raw in zip(request.form.getlist(prefix + "_name"), request.form.getlist(prefix + "_amount")):
+        name, raw = name.strip(), raw.strip().replace(",", "")
+        if not name and not raw:
+            continue
+        amount = float(raw or 0)
+        if not name or not math.isfinite(amount) or amount < 0:
+            raise ValueError(prefix)
+        if amount:
+            result[name] = round(result.get(name, 0.0) + amount, 2)
+    return result
+
+
+@app.get("/hr")
+@need("admin")
+def hr():
+    db, biz = get_db(), g.user["business_id"]
+    employees = db.all(
+        "SELECT id, full_name, nrc_number, employment_type, basic_salary, expected_days_week, start_date FROM employees WHERE business_id=? ORDER BY full_name",
+        (biz,),
+    )
+    payslips = db.all(
+        """SELECT id, pay_month, employee_name, basic_salary, expected_days, worked_days, napsa_amt, nhima_amt, net_payable
+           FROM payroll WHERE business_id=? ORDER BY id DESC LIMIT 500""",
+        (biz,),
+    )
+    summary = db.all(
+        """SELECT pay_month, COUNT(id) AS slips, COALESCE(SUM(calculated_basic), 0) AS basic,
+                  COALESCE(SUM(napsa_amt), 0) AS emp_napsa, COALESCE(SUM(nhima_amt), 0) AS emp_nhima,
+                  COALESCE(SUM(employer_napsa), 0) AS empr_napsa, COALESCE(SUM(employer_nhima), 0) AS empr_nhima,
+                  COALESCE(SUM(net_payable), 0) AS net
+           FROM payroll WHERE business_id=? GROUP BY pay_month ORDER BY pay_month DESC""",
+        (biz,),
+    )
+    return render_template("hr.html", employees=employees, payslips=payslips, summary=summary, today=now().strftime("%Y-%m-%d"))
+
+
+@app.post("/hr/employees")
+@need("admin")
+def add_employee():
+    db, biz = get_db(), g.user["business_id"]
+    name, nrc = text("full_name"), text("nrc_number")
+    try:
+        salary = number("basic_salary")
+        age = number("age", int, default=0) or None
+        days_week = number("expected_days_week", int, default=5)
+    except ValueError:
+        flash("Salary, age and days per week must be numbers.", "error")
+        return redirect(url_for("hr"))
+    if not name or not nrc or salary < 0 or not 1 <= days_week <= 7:
+        flash("Full name and NRC number are required, salary cannot be negative and days per week must be 1 to 7.", "error")
+        return redirect(url_for("hr"))
+
+    employment_type = text("employment_type")
+    if employment_type not in ("Permanent", "Casual Worker"):
+        employment_type = "Permanent"
+    db.execute(
+        """INSERT INTO employees (business_id, full_name, nrc_number, basic_salary, employment_type, address, age, start_date, expected_days_week)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (biz, name, nrc, round(salary, 2), employment_type, text("address"), age, text("start_date"), days_week),
+    )
+    db.commit()
+    flash(f"Employee '{name}' registered.", "ok")
+    return redirect(url_for("hr"))
+
+
+@app.post("/hr/employees/<int:employee_id>/delete")
+@need("admin")
+def delete_employee(employee_id):
+    db = get_db()
+    # Past payslips keep the employee's name, so the payroll history stays intact
+    db.execute("DELETE FROM employees WHERE id=? AND business_id=?", (employee_id, g.user["business_id"]))
+    db.commit()
+    flash("Employee removed. Their past payslips are kept.", "ok")
+    return redirect(url_for("hr"))
+
+
+@app.route("/hr/settings", methods=["GET", "POST"])
+@need("admin")
+def hr_settings():
+    db, biz = get_db(), g.user["business_id"]
+    if request.method == "POST":
+        non_working = ",".join(day for day in WEEKDAYS if request.form.get("day_" + day))
+        napsa_bearer, nhima_bearer = text("napsa_bearer"), text("nhima_bearer")
+        try:
+            napsa, nhima = number("napsa_pct"), number("nhima_pct")
+        except ValueError:
+            napsa = nhima = -1
+        if not (0 <= napsa <= 100 and 0 <= nhima <= 100) or napsa_bearer not in ("employee", "employer") or nhima_bearer not in ("employee", "employer"):
+            flash("Rates must be percentages between 0 and 100.", "error")
+        elif len(non_working.split(",")) == 7:
+            flash("At least one day of the week must be a working day.", "error")
+        else:
+            values = (non_working, napsa, nhima, napsa_bearer, nhima_bearer, biz)
+            if db.one("SELECT business_id FROM hr_settings WHERE business_id=?", (biz,)):
+                db.execute("UPDATE hr_settings SET non_working_days=?, napsa_pct=?, nhima_pct=?, napsa_bearer=?, nhima_bearer=? WHERE business_id=?", values)
+            else:
+                db.execute("INSERT INTO hr_settings (non_working_days, napsa_pct, nhima_pct, napsa_bearer, nhima_bearer, business_id) VALUES (?, ?, ?, ?, ?, ?)", values)
+            db.commit()
+            flash("HR settings saved. They apply to payslips computed from now on.", "ok")
+            return redirect(url_for("hr"))
+        return redirect(url_for("hr_settings"))
+
+    settings_row = hr_settings_for(db, biz)
+    return render_template("hr_settings.html", s=settings_row, weekdays=WEEKDAYS, non_working=settings_row["non_working_days"].split(","))
+
+
+@app.route("/hr/payslips/new", methods=["GET", "POST"])
+@need("admin")
+def new_payslip():
+    db, biz = get_db(), g.user["business_id"]
+    employees = db.all("SELECT id, full_name, basic_salary FROM employees WHERE business_id=? ORDER BY full_name", (biz,))
+    if not employees:
+        flash("Register an employee first.", "error")
+        return redirect(url_for("hr"))
+    hr_set = hr_settings_for(db, biz)
+    non_working = hr_set["non_working_days"].split(",")
+
+    if request.method == "POST":
+        employee = next((e for e in employees if e["id"] == request.form.get("employee_id", type=int)), None)
+        try:
+            period = datetime.datetime.strptime(text("pay_month"), "%Y-%m")
+            expected = number("expected_days", default=float(expected_work_days(period.year, period.month, non_working)))
+            worked = number("worked_days")
+            bonuses, deductions = named_amounts("bonus"), named_amounts("deduction")
+        except ValueError:
+            flash("Check the pay month (YYYY-MM), the day counts, and that every bonus or deduction has a name and a positive amount.", "error")
+            return redirect(url_for("new_payslip"))
+        if employee is None or expected <= 0 or worked < 0:
+            flash("Choose an employee; expected days must be above zero and days worked cannot be negative.", "error")
+            return redirect(url_for("new_payslip"))
+
+        basic = employee["basic_salary"]
+        calculated_basic = round(basic / expected * worked, 2)
+        napsa = round(calculated_basic * hr_set["napsa_pct"] / 100.0, 2)
+        nhima = round(calculated_basic * hr_set["nhima_pct"] / 100.0, 2)
+        # A contribution is deducted from pay only when the employee bears it; otherwise it is an employer cost
+        emp_napsa, employer_napsa = (napsa, 0.0) if hr_set["napsa_bearer"] == "employee" else (0.0, napsa)
+        emp_nhima, employer_nhima = (nhima, 0.0) if hr_set["nhima_bearer"] == "employee" else (0.0, nhima)
+        net = round(calculated_basic + sum(bonuses.values()) - sum(deductions.values()) - emp_napsa - emp_nhima, 2)
+
+        payslip_id = db.insert(
+            """INSERT INTO payroll (business_id, employee_id, employee_name, pay_month, basic_salary, expected_days, worked_days, calculated_basic,
+                                    bonuses_json, deductions_json, napsa_amt, nhima_amt, employer_napsa, employer_nhima, net_payable, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                biz, employee["id"], employee["full_name"], period.strftime("%Y-%m"), basic, expected, worked, calculated_basic,
+                json.dumps(bonuses), json.dumps(deductions), emp_napsa, emp_nhima, employer_napsa, employer_nhima, net,
+                now().strftime("%Y-%m-%d %H:%M:%S"),
+            ),
+        )
+        db.commit()
+        return redirect(url_for("payslips", id=payslip_id))
+
+    return render_template("payslip_new.html", employees=employees, hr=hr_set, this_month=now().strftime("%Y-%m"))
+
+
+@app.get("/hr/payslips")
+@need("admin")
+def payslips():
+    db, biz = get_db(), g.user["business_id"]
+    ids = request.args.getlist("id", type=int)[:200]
+    if not ids:
+        flash("Tick at least one payslip to print.", "error")
+        return redirect(url_for("hr"))
+    marks = ",".join("?" for _ in ids)
+    slips = db.all(
+        f"""SELECT id, employee_name, pay_month, basic_salary, expected_days, worked_days, calculated_basic, bonuses_json, deductions_json,
+                   napsa_amt, nhima_amt, net_payable FROM payroll WHERE business_id=? AND id IN ({marks}) ORDER BY id""",
+        [biz] + ids,
+    )
+    for slip in slips:
+        slip["bonuses"] = json.loads(slip["bonuses_json"] or "{}")
+        slip["deductions"] = json.loads(slip["deductions_json"] or "{}")
+    return render_template("payslips.html", slips=slips)
+
+
+@app.post("/hr/payslips/<int:payslip_id>/delete")
+@need("admin")
+def delete_payslip(payslip_id):
+    db = get_db()
+    db.execute("DELETE FROM payroll WHERE id=? AND business_id=?", (payslip_id, g.user["business_id"]))
+    db.commit()
+    flash("Payslip deleted.", "ok")
+    return redirect(url_for("hr"))
 
 
 # --- SETTINGS (ADMIN) ---

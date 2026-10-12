@@ -1,0 +1,126 @@
+{% extends "base.html" %}
+{% block title %}HR &amp; Payroll — {% endblock %}
+{% block content %}
+<div class="toolbar">
+    <h1 class="grow-title">Human Resources &amp; Payroll</h1>
+    <a class="btn primary" href="{{ url_for('new_payslip') }}">Compute Payslip</a>
+    <a class="btn" href="{{ url_for('hr_settings') }}">HR Settings</a>
+</div>
+
+<div class="split">
+    <section class="card grow">
+        <h2>Registered Employees</h2>
+        <div class="table-wrap">
+            <table>
+                <thead><tr><th>Full name</th><th>NRC</th><th>Type</th><th class="num">Basic salary</th><th class="num">Days/wk</th><th>Start date</th><th></th></tr></thead>
+                <tbody>
+                {% for e in employees %}
+                    <tr>
+                        <td>{{ e.full_name }}</td>
+                        <td>{{ e.nrc_number }}</td>
+                        <td>{{ e.employment_type }}</td>
+                        <td class="num">{{ e.basic_salary|money }}</td>
+                        <td class="num">{{ e.expected_days_week }}</td>
+                        <td>{{ e.start_date or '—' }}</td>
+                        <td class="num">
+                            <form method="post" action="{{ url_for('delete_employee', employee_id=e.id) }}" onsubmit="return confirm('Remove this employee? Past payslips are kept.');">
+                                {{ csrf_field() }}
+                                <button class="btn danger small">Remove</button>
+                            </form>
+                        </td>
+                    </tr>
+                {% else %}
+                    <tr><td colspan="7" class="muted center">No employees registered yet.</td></tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </section>
+
+    <section class="card side">
+        <h2>Register Employee</h2>
+        <form method="post" action="{{ url_for('add_employee') }}">
+            {{ csrf_field() }}
+            <label>Full name <input name="full_name" required></label>
+            <label>NRC number <input name="nrc_number" required></label>
+            <label>Basic monthly salary ({{ user.currency|trim }}) <input name="basic_salary" type="number" min="0" step="0.01" required></label>
+            <label>Employment status
+                <select name="employment_type"><option>Permanent</option><option>Casual Worker</option></select>
+            </label>
+            <label>Address <input name="address"></label>
+            <label>Age <input name="age" type="number" min="15" max="100" step="1"></label>
+            <label>Start date <input name="start_date" type="date" value="{{ today }}"></label>
+            <label>Expected work days per week <input name="expected_days_week" type="number" min="1" max="7" step="1" value="5"></label>
+            <button class="btn success wide">Save Employee</button>
+        </form>
+    </section>
+</div>
+
+<section class="card block">
+    <h2>Payroll History</h2>
+    <form id="print-form" method="get" action="{{ url_for('payslips') }}" class="toolbar">
+        <button class="btn success">Print Selected Payslips</button>
+        <label class="check"><input type="checkbox" id="select-all"> Select all</label>
+    </form>
+    <div class="table-wrap">
+        <table>
+            <thead><tr><th></th><th>Month</th><th>Employee</th><th class="num">Basic</th><th class="num">Exp. days</th><th class="num">Worked</th><th class="num">NAPSA</th><th class="num">NHIMA</th><th class="num">Net pay</th><th></th></tr></thead>
+            <tbody>
+            {% for p in payslips %}
+                <tr>
+                    <td><input type="checkbox" name="id" value="{{ p.id }}" form="print-form" class="slip-check"></td>
+                    <td>{{ p.pay_month|month }}</td>
+                    <td>{{ p.employee_name }}</td>
+                    <td class="num">{{ p.basic_salary|money }}</td>
+                    <td class="num">{{ '%g'|format(p.expected_days) }}</td>
+                    <td class="num">{{ '%g'|format(p.worked_days) }}</td>
+                    <td class="num">{{ p.napsa_amt|money }}</td>
+                    <td class="num">{{ p.nhima_amt|money }}</td>
+                    <td class="num ok">{{ p.net_payable|money }}</td>
+                    <td class="num">
+                        <form method="post" action="{{ url_for('delete_payslip', payslip_id=p.id) }}" onsubmit="return confirm('Delete this payslip?');">
+                            {{ csrf_field() }}
+                            <button class="btn danger small">Delete</button>
+                        </form>
+                    </td>
+                </tr>
+            {% else %}
+                <tr><td colspan="10" class="muted center">No payslips computed yet.</td></tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+
+<section class="card block">
+    <h2>Monthly Payroll &amp; Statutory Summary</h2>
+    <div class="table-wrap">
+        <table>
+            <thead><tr><th>Month</th><th class="num">Slips</th><th class="num">Total basic</th><th class="num">Employee NAPSA</th><th class="num">Employee NHIMA</th><th class="num">Employer NAPSA</th><th class="num">Employer NHIMA</th><th class="num">Net payout</th></tr></thead>
+            <tbody>
+            {% for m in summary %}
+                <tr>
+                    <td>{{ m.pay_month|month }}</td>
+                    <td class="num">{{ m.slips }}</td>
+                    <td class="num">{{ m.basic|money }}</td>
+                    <td class="num">{{ m.emp_napsa|money }}</td>
+                    <td class="num">{{ m.emp_nhima|money }}</td>
+                    <td class="num">{{ m.empr_napsa|money }}</td>
+                    <td class="num">{{ m.empr_nhima|money }}</td>
+                    <td class="num ok">{{ m.net|money }}</td>
+                </tr>
+            {% else %}
+                <tr><td colspan="8" class="muted center">Nothing to summarise yet.</td></tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endblock %}
+{% block scripts %}
+<script>
+    document.getElementById("select-all").addEventListener("change", function () {
+        document.querySelectorAll(".slip-check").forEach(function (box) { box.checked = this.checked; }, this);
+    });
+</script>
+{% endblock %}

@@ -13,7 +13,9 @@
     <a href="{{ url_for('pos') }}" class="{{ 'active' if request.endpoint == 'pos' }}">Sales &amp; POS</a>
     <a href="{{ url_for('inventory') }}" class="{{ 'active' if request.endpoint in ('inventory', 'item') }}">Inventory</a>
     <a href="{{ url_for('history') }}" class="{{ 'active' if request.endpoint in ('history', 'invoice') }}">Sales &amp; Invoices</a>
+    <a href="{{ url_for('procurements') }}" class="{{ 'active' if request.endpoint == 'procurements' }}">Procurements</a>
     {% if user.role == 'admin' %}
+    <a href="{{ url_for('hr') }}" class="{{ 'active' if request.endpoint in ('hr', 'hr_settings', 'new_payslip', 'payslips') }}">HR &amp; Payroll</a>
     <a href="{{ url_for('operators') }}" class="{{ 'active' if request.endpoint == 'operators' }}">Operators</a>
     <a href="{{ url_for('settings') }}" class="{{ 'active' if request.endpoint == 'settings' }}">Settings</a>
     {% endif %}

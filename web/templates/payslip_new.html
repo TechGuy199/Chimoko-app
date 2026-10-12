@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block title %}Compute Payslip — {% endblock %}
+{% block content %}
+<p><a href="{{ url_for('hr') }}">&larr; Back to HR &amp; Payroll</a></p>
+<div class="card narrow-form">
+    <h1>Monthly Payslip Calculator</h1>
+    <p class="muted">
+        NAPSA {{ '%g'|format(hr.napsa_pct) }}% paid by the {{ hr.napsa_bearer }}, NHIMA {{ '%g'|format(hr.nhima_pct) }}% paid by the {{ hr.nhima_bearer }}.
+        <a href="{{ url_for('hr_settings') }}">Change</a>
+    </p>
+    <form method="post" id="payslip-form" data-non-working="{{ hr.non_working_days }}">
+        {{ csrf_field() }}
+        <label>Employee
+            <select name="employee_id" required>
+                {% for e in employees %}<option value="{{ e.id }}">{{ e.full_name }} (basic {{ e.basic_salary|money }})</option>{% endfor %}
+            </select>
+        </label>
+        <label>Pay month <input name="pay_month" id="pay-month" type="month" value="{{ this_month }}" pattern="\d{4}-\d{2}" placeholder="YYYY-MM" required></label>
+        <label>Expected work days (filled in from the pay month) <input name="expected_days" id="expected-days" type="number" min="0.5" step="0.5" required></label>
+        <label>Actual days worked <input name="worked_days" id="worked-days" type="number" min="0" step="0.5" required></label>
+
+        <h2 class="spaced">Bonuses &amp; additions</h2>
+        <div id="bonus-rows">
+            <div class="pair"><input name="bonus_name" value="Transport Allowance" placeholder="Name"><input name="bonus_amount" type="number" min="0" step="0.01" placeholder="0.00"></div>
+        </div>
+        <button type="button" class="btn small" data-add="bonus">+ Add bonus</button>
+
+        <h2 class="spaced">Custom deductions</h2>
+        <div id="deduction-rows">
+            <div class="pair"><input name="deduction_name" value="Advance Repayment" placeholder="Name"><input name="deduction_amount" type="number" min="0" step="0.01" placeholder="0.00"></div>
+        </div>
+        <button type="button" class="btn small" data-add="deduction">+ Add deduction</button>
+
+        <button class="btn success wide spaced">Generate &amp; Save Payslip</button>
+    </form>
+</div>
+{% endblock %}
+{% block scripts %}<script src="{{ url_for('static', filename='payroll.js') }}"></script>{% endblock %}

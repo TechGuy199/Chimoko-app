@@ -62,6 +62,23 @@ SCHEMA = [
         department TEXT, batch_no TEXT, qty INTEGER NOT NULL,
         unit_price DOUBLE PRECISION NOT NULL DEFAULT 0, line_total DOUBLE PRECISION NOT NULL DEFAULT 0
     )""",
+    """CREATE TABLE IF NOT EXISTS employees (
+        id {pk}, business_id INTEGER NOT NULL, full_name TEXT NOT NULL, nrc_number TEXT NOT NULL,
+        basic_salary DOUBLE PRECISION NOT NULL DEFAULT 0, employment_type TEXT DEFAULT 'Permanent', address TEXT DEFAULT '',
+        age INTEGER, start_date TEXT DEFAULT '', expected_days_week INTEGER DEFAULT 5
+    )""",
+    """CREATE TABLE IF NOT EXISTS hr_settings (
+        business_id INTEGER PRIMARY KEY, non_working_days TEXT NOT NULL, napsa_pct DOUBLE PRECISION NOT NULL,
+        nhima_pct DOUBLE PRECISION NOT NULL, napsa_bearer TEXT NOT NULL, nhima_bearer TEXT NOT NULL
+    )""",
+    """CREATE TABLE IF NOT EXISTS payroll (
+        id {pk}, business_id INTEGER NOT NULL, employee_id INTEGER, employee_name TEXT NOT NULL, pay_month TEXT NOT NULL,
+        basic_salary DOUBLE PRECISION NOT NULL, expected_days DOUBLE PRECISION NOT NULL, worked_days DOUBLE PRECISION NOT NULL,
+        calculated_basic DOUBLE PRECISION NOT NULL, bonuses_json TEXT NOT NULL, deductions_json TEXT NOT NULL,
+        napsa_amt DOUBLE PRECISION NOT NULL DEFAULT 0, nhima_amt DOUBLE PRECISION NOT NULL DEFAULT 0,
+        employer_napsa DOUBLE PRECISION NOT NULL DEFAULT 0, employer_nhima DOUBLE PRECISION NOT NULL DEFAULT 0,
+        net_payable DOUBLE PRECISION NOT NULL, created_at TEXT
+    )""",
 ]
 
 

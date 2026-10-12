@@ -1,6 +1,6 @@
 {
     "app_settings": {
-        "title": "Beaver Passion & Skill",
+        "title": "ChimokoInvestment LTD",
         "currency": "ZMW ",
         "low_stock_threshold": 10
     },
@@ -8,13 +8,13 @@
         "db_name": "pos_system.db"
     },
     "labels": {
-        "pos_tab": "🛒 Sales & POS",
-        "inventory_tab": "📋 Inventory",
+        "pos_tab": "\ud83d\uded2 Sales & POS",
+        "inventory_tab": "\ud83d\udccb Inventory",
         "available_products_header": "Available Products"
     },
     "receipt_header": {
-        "company_name": "BEAVER PASSION & SKILL",
-        "subtitle": "Official Sales Invoice",
-        "contact": ""
+        "company_name": "ChimokoInvestment LTD",
+        "subtitle": "Official Sales Invoice1000038263",
+        "contact": "+260 972047233"
     }
 }

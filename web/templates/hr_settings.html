@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}HR Settings — {% endblock %}
+{% block content %}
+<p><a href="{{ url_for('hr') }}">&larr; Back to HR &amp; Payroll</a></p>
+<div class="card narrow-form">
+    <h1>HR &amp; Statutory Settings</h1>
+    <form method="post">
+        {{ csrf_field() }}
+        <h2>Non-working days</h2>
+        {% for day in weekdays %}
+        <label class="check"><input type="checkbox" name="day_{{ day }}" {{ 'checked' if day in non_working }}> {{ day|capitalize }}</label>
+        {% endfor %}
+
+        <h2 class="spaced">Statutory contributions</h2>
+        <label>NAPSA rate (%) <input name="napsa_pct" type="number" min="0" max="100" step="0.01" value="{{ s.napsa_pct }}" required></label>
+        <label>NAPSA paid by
+            <select name="napsa_bearer">
+                <option value="employee" {{ 'selected' if s.napsa_bearer == 'employee' }}>Employee (deducted from pay)</option>
+                <option value="employer" {{ 'selected' if s.napsa_bearer == 'employer' }}>Employer</option>
+            </select>
+        </label>
+        <label>NHIMA rate (%) <input name="nhima_pct" type="number" min="0" max="100" step="0.01" value="{{ s.nhima_pct }}" required></label>
+        <label>NHIMA paid by
+            <select name="nhima_bearer">
+                <option value="employee" {{ 'selected' if s.nhima_bearer == 'employee' }}>Employee (deducted from pay)</option>
+                <option value="employer" {{ 'selected' if s.nhima_bearer == 'employer' }}>Employer</option>
+            </select>
+        </label>
+        <button class="btn primary">Save Settings</button>
+    </form>
+</div>
+{% endblock %}

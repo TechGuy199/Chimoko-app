@@ -164,7 +164,20 @@ td form { margin: 0; display: inline; }
 .invoice dl.totals dd { text-align: right; font-weight: 700; }
 .invoice footer { margin-top: 24px; text-align: center; color: var(--text-muted); }
 
+/* HR & payroll */
+.card.block { margin-top: 16px; }
+.card.narrow-form { max-width: 560px; }
+.grow-title { flex: 1; margin: 0; }
+.spaced { margin-top: 18px; }
+.pair { display: flex; gap: 8px; margin-bottom: 6px; }
+.pair input { margin-top: 0; }
+.pair input:last-child { flex: 0 0 130px; }
+.toolbar label.check { margin: 0; }
+.toolbar select { width: auto; margin-top: 0; }
+.payslip { margin-bottom: 20px; break-inside: avoid; }
+
 @media print {
+    .payslip { border-bottom: 1px dashed #999999; border-radius: 0; margin-bottom: 18px; padding-bottom: 18px; }
     .no-print { display: none !important; }
     body, .invoice { background: #ffffff; color: #000000; }
     main { padding: 0; }
