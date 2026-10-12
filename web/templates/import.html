@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% block title %}Import — {% endblock %}
+{% block content %}
+<h1>Import Data from CSV</h1>
+<p class="muted">
+    Save your spreadsheet as CSV (in Excel: File &rarr; Save As &rarr; "CSV UTF-8"). Up to {{ max_rows }} rows per file.
+    A file is checked completely before anything is saved: if any row has a problem, nothing is imported and the problems are listed here.
+</p>
+
+{% if errors %}
+<section class="card block error-list">
+    <h2>Nothing was imported: {{ error_count }} problem(s) in the {{ error_kind }} file</h2>
+    <ul>
+        {% for e in errors %}<li>{{ e }}</li>{% endfor %}
+    </ul>
+    {% if error_count > errors|length %}<p class="muted">Showing the first {{ errors|length }}. Fix these and upload again to see the rest.</p>{% endif %}
+</section>
+{% endif %}
+
+<div class="split spaced">
+    <section class="card grow">
+        <h2>Purchases</h2>
+        <p>Each row is one purchase. It is added to inventory and to the Procurements log, exactly like the "Log a Purchase" form.</p>
+        <ul class="muted">
+            <li><strong>Required:</strong> Item Code, Quantity, Unit Cost. Name is required when the item code is new.</li>
+            <li><strong>Optional:</strong> Category, Department, Selling Price, Supplier, Invoice No, Purchase Date, Batch No, Date Planted, Expiry Date.</li>
+            <li>An item code you already have adds the quantity to that item's stock.</li>
+            <li>A blank Selling Price keeps the item's current price (a new item uses the unit cost).</li>
+            <li>Departments that do not exist yet are created.</li>
+            <li>Importing the same file twice adds the stock twice.</li>
+        </ul>
+        <p><a href="{{ url_for('import_template', kind='purchases') }}">Download the purchases template</a></p>
+        <form method="post" action="{{ url_for('import_purchases') }}" enctype="multipart/form-data">
+            {{ csrf_field() }}
+            <label>CSV file <input type="file" name="file" accept=".csv,text/csv" required></label>
+            <button class="btn success">Import Purchases</button>
+        </form>
+    </section>
+
+    <section class="card grow">
+        <h2>Sales</h2>
+        <p>Each row is one item sold. Rows with the same Invoice No become one invoice; rows with no Invoice No each get their own, numbered automatically.</p>
+        <ul class="muted">
+            <li><strong>Required:</strong> Quantity, plus an Item Name or an Item Code you already have.</li>
+            <li><strong>Optional:</strong> Invoice No, Date, Customer, Phone, Unit Price, Payment Status, Amount Paid.</li>
+            <li>A blank Unit Price uses the item's POS price. A blank Date uses today.</li>
+            <li>Payment Status is Paid (default), Unpaid or Partial Payment. Partial Payment needs an Amount Paid.</li>
+            <li>For a multi-row invoice, the customer, date and payment details are read from its first row.</li>
+            <li>An Invoice No that already exists is rejected, which protects against importing a file twice.</li>
+        </ul>
+        <p><a href="{{ url_for('import_template', kind='sales') }}">Download the sales template</a></p>
+        <form method="post" action="{{ url_for('import_sales') }}" enctype="multipart/form-data">
+            {{ csrf_field() }}
+            <label>CSV file <input type="file" name="file" accept=".csv,text/csv" required></label>
+            <label class="check"><input type="checkbox" name="deduct_stock"> Also deduct these quantities from current POS stock</label>
+            <p class="muted">Leave unticked for past sales whose stock is already gone. Tick it only if these items are still counted in your POS stock.</p>
+            <button class="btn success">Import Sales</button>
+        </form>
+    </section>
+</div>
+
+<p class="muted">Dates can be written as 2026-10-01 or 01/10/2026 (day first). Amounts may include commas or a currency prefix.</p>
+{% endblock %}

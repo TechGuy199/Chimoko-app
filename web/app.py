@@ -194,8 +194,9 @@ def department_names(db, biz):
 
 def next_invoice_no(db, biz):
     year = now().strftime("%Y")
+    # Longest then highest = the largest sequence, whatever order invoices were entered or imported in
     last = db.one(
-        "SELECT invoice_no FROM invoices WHERE business_id=? AND invoice_no LIKE ? ORDER BY id DESC LIMIT 1",
+        "SELECT invoice_no FROM invoices WHERE business_id=? AND invoice_no LIKE ? ORDER BY LENGTH(invoice_no) DESC, invoice_no DESC LIMIT 1",
         (biz, f"INV-{year}-%"),
     )
     seq = 1
@@ -204,6 +205,9 @@ def next_invoice_no(db, biz):
             seq = int(last["invoice_no"].rsplit("-", 1)[1]) + 1
         except (ValueError, IndexError):
             pass
+    # Imported invoices can carry any number, so make sure the candidate really is free
+    while db.one("SELECT id FROM invoices WHERE business_id=? AND invoice_no=?", (biz, f"INV-{year}-{seq:04d}")):
+        seq += 1
     return f"INV-{year}-{seq:04d}"
 
 
@@ -425,49 +429,68 @@ def purchase():
     try:
         qty = number("quantity", int)
         unit_cost = number("unit_cost")
-        price = number("price", default=unit_cost)
+        price = number("price") if text("price") else None
     except ValueError:
         flash("Quantity must be a whole number; unit cost and selling price must be numbers.", "error")
         return redirect(url_for("inventory"))
-    if not code or not name or qty <= 0 or unit_cost < 0 or price < 0:
+    if not code or not name or qty <= 0 or unit_cost < 0 or (price is not None and price < 0):
         flash("Item code and name are required, quantity must be above zero and prices cannot be negative.", "error")
         return redirect(url_for("inventory"))
 
-    category, dept = text("category") or "General", chosen_department(db, biz)
-    supplier, invoice_no, expiry, batch = text("supplier_name"), text("invoice_no"), text("expiry_date"), text("batch_no")
-    purchase_date = text("purchase_date") or now().strftime("%Y-%m-%d")
-
-    existing = db.one("SELECT id, name FROM products WHERE business_id=? AND item_code=?", (biz, code))
     try:
-        if existing:
-            db.execute(
-                """UPDATE products SET quantity = quantity + ?, unit_cost=?, price=?, batch_no=?, supplier_name=?, invoice_no=?, purchase_date=?, expiry_date=?
-                   WHERE id=? AND business_id=?""",
-                (qty, unit_cost, price, batch, supplier, invoice_no, purchase_date, expiry, existing["id"], biz),
-            )
-        else:
-            db.execute(
-                """INSERT INTO products (business_id, item_code, name, category, department, batch_no, date_planted, quantity, unit_cost, price, supplier_name, invoice_no, purchase_date, expiry_date)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (biz, code, name, category, dept, batch, text("date_planted"), qty, unit_cost, price, supplier, invoice_no, purchase_date, expiry),
-            )
-        db.execute(
-            """INSERT INTO procurements (business_id, item_code, name, category, department, supplier_name, invoice_no, purchase_date, quantity, unit_cost, total_cost, expiry_date)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (biz, code, existing["name"] if existing else name, category, dept, supplier, invoice_no, purchase_date, qty, unit_cost, round(qty * unit_cost, 2), expiry),
-        )
-        db.execute("UPDATE pos_products SET price=? WHERE business_id=? AND item_code=?", (price, biz, code))
+        existing_name = record_purchase(db, biz, {
+            "item_code": code, "name": name, "category": text("category") or "General", "department": chosen_department(db, biz),
+            "quantity": qty, "unit_cost": unit_cost, "price": price, "supplier_name": text("supplier_name"),
+            "invoice_no": text("invoice_no"), "purchase_date": text("purchase_date") or now().strftime("%Y-%m-%d"),
+            "batch_no": text("batch_no"), "date_planted": text("date_planted"), "expiry_date": text("expiry_date"),
+        })
         db.commit()
     except DB_ERRORS:
         db.rollback()
         flash("The purchase could not be saved. Please try again.", "error")
         return redirect(url_for("inventory"))
 
-    if existing:
-        flash(f"Added {qty} unit(s) to the existing stock of '{existing['name']}' (code {code}).", "ok")
+    if existing_name:
+        flash(f"Added {qty} unit(s) to the existing stock of '{existing_name}' (code {code}).", "ok")
     else:
         flash(f"Purchase logged for '{name}' and added to inventory.", "ok")
     return redirect(url_for("inventory"))
+
+
+def record_purchase(db, biz, p):
+    """Adds one purchase to stock and to the procurement log. Shared by the purchase form and the CSV import.
+
+    A blank price (None) keeps an existing item's selling price and uses the unit cost for a new item.
+    Returns the existing item's name when the code was already in stock, otherwise None. The caller commits.
+    """
+    existing = db.one("SELECT id, name, price FROM products WHERE business_id=? AND item_code=?", (biz, p["item_code"]))
+    if existing:
+        price = existing["price"] if p["price"] is None else p["price"]
+        db.execute(
+            """UPDATE products SET quantity = quantity + ?, unit_cost=?, price=?, batch_no=?, supplier_name=?, invoice_no=?, purchase_date=?, expiry_date=?
+               WHERE id=? AND business_id=?""",
+            (p["quantity"], p["unit_cost"], price, p["batch_no"], p["supplier_name"], p["invoice_no"], p["purchase_date"], p["expiry_date"], existing["id"], biz),
+        )
+    else:
+        price = p["unit_cost"] if p["price"] is None else p["price"]
+        db.execute(
+            """INSERT INTO products (business_id, item_code, name, category, department, batch_no, date_planted, quantity, unit_cost, price, supplier_name, invoice_no, purchase_date, expiry_date)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                biz, p["item_code"], p["name"], p["category"], p["department"], p["batch_no"], p["date_planted"], p["quantity"],
+                p["unit_cost"], price, p["supplier_name"], p["invoice_no"], p["purchase_date"], p["expiry_date"],
+            ),
+        )
+    db.execute(
+        """INSERT INTO procurements (business_id, item_code, name, category, department, supplier_name, invoice_no, purchase_date, quantity, unit_cost, total_cost, expiry_date)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            biz, p["item_code"], existing["name"] if existing else p["name"], p["category"], p["department"], p["supplier_name"],
+            p["invoice_no"], p["purchase_date"], p["quantity"], p["unit_cost"], round(p["quantity"] * p["unit_cost"], 2), p["expiry_date"],
+        ),
+    )
+    db.execute("UPDATE pos_products SET price=? WHERE business_id=? AND item_code=?", (price, biz, p["item_code"]))
+    return existing["name"] if existing else None
 
 
 @app.get("/inventory/<int:item_id>")
@@ -884,6 +907,403 @@ def delete_payslip(payslip_id):
     db.commit()
     flash("Payslip deleted.", "ok")
     return redirect(url_for("hr"))
+
+
+# --- CSV IMPORT (ADMIN) ---
+IMPORT_MAX_ROWS = 2000
+IMPORT_MAX_ERRORS_SHOWN = 50
+
+# Field -> accepted column headings (compared in lower case, with underscores read as spaces)
+PURCHASE_COLUMNS = {
+    "item_code": ("item code", "code", "sku", "barcode"),
+    "name": ("name", "item name", "product name", "product", "item"),
+    "category": ("category",),
+    "department": ("department", "dept"),
+    "quantity": ("quantity", "qty", "quantity bought"),
+    "unit_cost": ("unit cost", "cost"),
+    "price": ("selling price", "sell price", "price"),
+    "supplier_name": ("supplier", "supplier name"),
+    "invoice_no": ("invoice no", "invoice number", "invoice", "supplier invoice"),
+    "purchase_date": ("date", "purchase date"),
+    "batch_no": ("batch no", "batch number", "batch"),
+    "date_planted": ("date planted",),
+    "expiry_date": ("expiry", "expiry date"),
+}
+SALES_COLUMNS = {
+    "invoice_no": ("invoice no", "invoice number", "invoice"),
+    "date": ("date", "date/time", "date time", "sale date"),
+    "customer_name": ("customer", "customer name"),
+    "customer_phone": ("phone", "customer phone", "phone number"),
+    "item_code": ("item code", "code", "sku", "barcode"),
+    "item_name": ("item name", "product name", "product", "item", "name"),
+    "quantity": ("quantity", "qty"),
+    "unit_price": ("unit price", "price"),
+    "payment_status": ("payment status", "status"),
+    "amount_paid": ("amount paid", "paid"),
+}
+IMPORT_TEMPLATES = {
+    "purchases": (
+        ["Item Code", "Name", "Category", "Department", "Quantity", "Unit Cost", "Selling Price", "Supplier", "Invoice No", "Purchase Date", "Batch No", "Date Planted", "Expiry Date"],
+        ["SEED-001", "Maize Seed 10kg", "Seeds", "General", 50, 450, 600, "Agro Supplies Ltd", "SUP-1001", "2026-10-01", "B-22", "", "2027-10-01"],
+    ),
+    "sales": (
+        ["Invoice No", "Date", "Customer", "Phone", "Item Code", "Item Name", "Quantity", "Unit Price", "Payment Status", "Amount Paid"],
+        ["", "2026-10-01 09:30", "Jane Banda", "0977123456", "SEED-001", "Maize Seed 10kg", 2, 600, "Paid", ""],
+    ),
+}
+DATE_FORMATS = (
+    "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d", "%d/%m/%Y %H:%M:%S", "%d/%m/%Y %H:%M", "%d/%m/%Y",
+    "%d-%m-%Y %H:%M:%S", "%d-%m-%Y %H:%M", "%d-%m-%Y", "%Y/%m/%d",
+)
+app.config["MAX_CONTENT_LENGTH"] = 2 * 1024 * 1024
+
+
+class ImportProblem(Exception):
+    pass
+
+
+def read_csv_upload(columns, required):
+    """Returns the uploaded file's rows as dicts keyed by field name, each with its spreadsheet row number in '_row'."""
+    upload = request.files.get("file")
+    if upload is None or not upload.filename:
+        raise ImportProblem("Choose a CSV file first.")
+    raw = upload.read()
+    try:
+        content = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        content = raw.decode("cp1252", errors="replace")
+
+    # Excel saves CSV with semicolons in some regional settings
+    first_line = content.split("\n", 1)[0]
+    delimiter = max(",;\t", key=first_line.count)
+    rows = list(csv.reader(io.StringIO(content, newline=""), delimiter=delimiter))
+    if not rows:
+        raise ImportProblem("That file is empty.")
+
+    lookup = {alias: field for field, aliases in columns.items() for alias in aliases}
+    fields = [lookup.get(" ".join(heading.replace("_", " ").lower().split())) for heading in rows[0]]
+    missing = [columns[field][0].title() for field in required if field not in fields]
+    if missing:
+        raise ImportProblem("The file is missing these column headings: " + ", ".join(missing) + ". Download the template to see the expected layout.")
+
+    records = []
+    for row_no, cells in enumerate(rows[1:], start=2):
+        if not any(cell.strip() for cell in cells):
+            continue
+        record = dict.fromkeys(columns, "")
+        for field, cell in zip(fields, cells):
+            if field:
+                cell = cell.strip()
+                # Undo the apostrophe our own exports put in front of formula-like text
+                record[field] = cell[1:] if len(cell) > 1 and cell[0] == "'" and cell[1] in "=@+-" else cell
+        record["_row"] = row_no
+        records.append(record)
+    if not records:
+        raise ImportProblem("The file has headings but no data rows.")
+    if len(records) > IMPORT_MAX_ROWS:
+        raise ImportProblem(f"The file has {len(records)} rows. Import at most {IMPORT_MAX_ROWS} at a time by splitting it into smaller files.")
+    return records
+
+
+def parse_amount(raw):
+    """Reads '1,250.50', 'ZMW 1250.5' or 'K1250.50' as a number."""
+    # '12,5' or '12,50' with no dot is a decimal comma (common in semicolon-separated files); '1,250' is a thousands comma
+    if "." not in raw and re.search(r",\d{1,2}$", raw.strip()):
+        raw = raw.replace(".", "").replace(",", ".")
+    value = float(re.sub(r"[^\d.\-]", "", raw))
+    if not math.isfinite(value):
+        raise ValueError(raw)
+    return value
+
+
+def parse_whole(raw):
+    value = parse_amount(raw)
+    if value != int(value):
+        raise ValueError(raw)
+    return int(value)
+
+
+def parse_date(raw):
+    for fmt in DATE_FORMATS:
+        try:
+            return datetime.datetime.strptime(raw, fmt)
+        except ValueError:
+            continue
+    raise ValueError(raw)
+
+
+def import_errors(kind, errors):
+    return render_template(
+        "import.html", max_rows=IMPORT_MAX_ROWS, error_kind=kind, errors=errors[:IMPORT_MAX_ERRORS_SHOWN], error_count=len(errors),
+    )
+
+
+@app.get("/import")
+@need("admin")
+def import_data():
+    return render_template("import.html", max_rows=IMPORT_MAX_ROWS)
+
+
+@app.get("/import/template/<kind>.csv")
+@need("admin")
+def import_template(kind):
+    if kind not in IMPORT_TEMPLATES:
+        abort(404)
+    header, example = IMPORT_TEMPLATES[kind]
+    return csv_response(f"{kind}-import-template.csv", header, [example])
+
+
+@app.post("/import/purchases")
+@need("admin")
+def import_purchases():
+    db, biz = get_db(), g.user["business_id"]
+    try:
+        records = read_csv_upload(PURCHASE_COLUMNS, ("item_code", "quantity", "unit_cost"))
+    except ImportProblem as e:
+        flash(str(e), "error")
+        return redirect(url_for("import_data"))
+
+    known_names = {r["item_code"]: r["name"] for r in db.all("SELECT item_code, name FROM products WHERE business_id=?", (biz,))}
+    departments = set(department_names(db, biz))
+    today = now().strftime("%Y-%m-%d")
+    errors, purchases, new_departments = [], [], []
+
+    for rec in records:
+        problems = []
+        code = rec["item_code"]
+        name = rec["name"] or known_names.get(code, "")
+        if not code:
+            problems.append("item code is missing")
+        elif not name:
+            problems.append("name is missing (needed because this item code is new)")
+
+        qty = unit_cost = 0
+        price = None
+        try:
+            qty = parse_whole(rec["quantity"])
+            if qty <= 0:
+                raise ValueError
+        except ValueError:
+            problems.append(f"quantity '{rec['quantity']}' is not a whole number above zero")
+        try:
+            unit_cost = parse_amount(rec["unit_cost"])
+            if unit_cost < 0:
+                raise ValueError
+        except ValueError:
+            problems.append(f"unit cost '{rec['unit_cost']}' is not a valid amount")
+        if rec["price"]:
+            try:
+                price = parse_amount(rec["price"])
+                if price < 0:
+                    raise ValueError
+            except ValueError:
+                problems.append(f"selling price '{rec['price']}' is not a valid amount")
+
+        dates = {}
+        for field, label in (("purchase_date", "purchase date"), ("date_planted", "date planted"), ("expiry_date", "expiry date")):
+            dates[field] = ""
+            if rec[field]:
+                try:
+                    dates[field] = parse_date(rec[field]).strftime("%Y-%m-%d")
+                except ValueError:
+                    problems.append(f"{label} '{rec[field]}' is not a date (use YYYY-MM-DD or DD/MM/YYYY)")
+
+        if problems:
+            errors.append(f"Row {rec['_row']}: " + "; ".join(problems))
+            continue
+
+        known_names.setdefault(code, name)
+        dept = rec["department"] or "General"
+        if dept not in departments:
+            departments.add(dept)
+            new_departments.append(dept)
+        purchases.append({
+            "item_code": code, "name": name, "category": rec["category"] or "General", "department": dept,
+            "quantity": qty, "unit_cost": round(unit_cost, 2), "price": None if price is None else round(price, 2),
+            "supplier_name": rec["supplier_name"], "invoice_no": rec["invoice_no"], "purchase_date": dates["purchase_date"] or today,
+            "batch_no": rec["batch_no"], "date_planted": dates["date_planted"], "expiry_date": dates["expiry_date"],
+        })
+
+    if errors:
+        return import_errors("purchases", errors)
+
+    restocked = 0
+    try:
+        for dept in new_departments:
+            db.execute("INSERT INTO departments (business_id, name) VALUES (?, ?)", (biz, dept))
+        for p in purchases:
+            if record_purchase(db, biz, p):
+                restocked += 1
+        db.commit()
+    except DB_ERRORS:
+        db.rollback()
+        flash("The import failed while saving, so nothing was imported. Please try again.", "error")
+        return redirect(url_for("import_data"))
+
+    flash(f"Imported {len(purchases)} purchase row(s): {len(purchases) - restocked} new item(s) created, {restocked} added to existing stock.", "ok")
+    return redirect(url_for("procurements"))
+
+
+@app.post("/import/sales")
+@need("admin")
+def import_sales():
+    db, biz = get_db(), g.user["business_id"]
+    try:
+        records = read_csv_upload(SALES_COLUMNS, ("quantity",))
+    except ImportProblem as e:
+        flash(str(e), "error")
+        return redirect(url_for("import_data"))
+
+    deduct = bool(request.form.get("deduct_stock"))
+    listed = {r["item_code"]: r for r in db.all("SELECT id, item_code, name, department, batch_no, quantity, price FROM pos_products WHERE business_id=?", (biz,))}
+    inventory_names = {r["item_code"]: r["name"] for r in db.all("SELECT item_code, name FROM products WHERE business_id=?", (biz,))}
+    taken_numbers = {r["invoice_no"] for r in db.all("SELECT invoice_no FROM invoices WHERE business_id=?", (biz,))}
+
+    # Rows sharing an invoice number form one invoice; rows without a number each become their own
+    groups, by_number = [], {}
+    for rec in records:
+        number_given = rec["invoice_no"]
+        if number_given and number_given in by_number:
+            by_number[number_given].append(rec)
+        else:
+            rows = [rec]
+            groups.append((number_given, rows))
+            if number_given:
+                by_number[number_given] = rows
+
+    errors, invoices, needed = [], [], {}
+    for number_given, rows in groups:
+        first = rows[0]
+        problems = []
+        if number_given and number_given in taken_numbers:
+            problems.append(f"invoice number '{number_given}' already exists (was this file imported before?)")
+
+        when = now()
+        if first["date"]:
+            try:
+                when = parse_date(first["date"])
+            except ValueError:
+                problems.append(f"date '{first['date']}' is not a date (use YYYY-MM-DD or DD/MM/YYYY)")
+
+        lines, total = [], 0.0
+        for rec in rows:
+            row_problems = []
+            code = rec["item_code"]
+            pos_item = listed.get(code) if code else None
+            name = rec["item_name"] or (pos_item["name"] if pos_item else inventory_names.get(code, ""))
+            if not name:
+                row_problems.append("item name is missing and the item code is not one of yours")
+
+            qty, unit_price = 0, 0.0
+            try:
+                qty = parse_whole(rec["quantity"])
+                if qty <= 0:
+                    raise ValueError
+            except ValueError:
+                row_problems.append(f"quantity '{rec['quantity']}' is not a whole number above zero")
+            if rec["unit_price"]:
+                try:
+                    unit_price = parse_amount(rec["unit_price"])
+                    if unit_price < 0:
+                        raise ValueError
+                except ValueError:
+                    row_problems.append(f"unit price '{rec['unit_price']}' is not a valid amount")
+            elif pos_item:
+                unit_price = pos_item["price"]
+            else:
+                row_problems.append("unit price is missing")
+            if deduct and not pos_item:
+                row_problems.append(f"item code '{code}' is not listed in the POS, so its stock cannot be deducted")
+
+            if row_problems:
+                errors.append(f"Row {rec['_row']}: " + "; ".join(row_problems))
+                continue
+            line_total = round(qty * unit_price, 2)
+            total += line_total
+            lines.append((code, name, pos_item["department"] if pos_item else "General", pos_item["batch_no"] if pos_item else "", qty, round(unit_price, 2), line_total))
+            if deduct:
+                needed[code] = needed.get(code, 0) + qty
+        total = round(total, 2)
+
+        status_text = first["payment_status"].lower()
+        if status_text in ("", "paid"):
+            status, amount_paid = "Paid", total
+        elif status_text == "unpaid":
+            status, amount_paid = "Unpaid", 0.0
+        elif status_text.startswith("partial"):
+            status, amount_paid = "Partial Payment", 0.0
+            try:
+                amount_paid = round(parse_amount(first["amount_paid"]), 2)
+                if len(lines) == len(rows) and not 0 < amount_paid < total:
+                    raise ValueError
+            except ValueError:
+                problems.append(f"amount paid '{first['amount_paid']}' must be more than zero and less than the invoice total for a partial payment")
+        else:
+            status, amount_paid = "Paid", total
+            problems.append(f"payment status '{first['payment_status']}' must be Paid, Partial Payment or Unpaid")
+
+        if problems:
+            errors.append(f"Row {first['_row']}: " + "; ".join(problems))
+        invoices.append((number_given, first, when, status, total, amount_paid, lines))
+
+    for code, qty in needed.items():
+        if qty > listed[code]["quantity"]:
+            errors.append(f"Stock: the file sells {qty} of '{code}' but only {listed[code]['quantity']} are listed in the POS.")
+
+    if errors:
+        return import_errors("sales", errors)
+
+    year, seq = now().strftime("%Y"), 1
+    try:
+        for number_given, first, when, status, total, amount_paid, lines in invoices:
+            invoice_no = number_given
+            while not invoice_no:
+                candidate = f"INV-{year}-{seq:04d}"
+                seq += 1
+                if candidate not in taken_numbers:
+                    invoice_no = candidate
+            taken_numbers.add(invoice_no)
+
+            invoice_id = db.insert(
+                """INSERT INTO invoices (business_id, invoice_no, kind, customer_name, customer_phone, payment_status, total, amount_paid, balance_due, created_by, created_at)
+                   VALUES (?, ?, 'SALE', ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    biz, invoice_no, first["customer_name"] or "Walk-in Customer", first["customer_phone"], status, total, amount_paid,
+                    round(total - amount_paid, 2), g.user["username"] + " (import)", when.strftime("%Y-%m-%d %H:%M:%S"),
+                ),
+            )
+            for code, name, dept, batch, qty, unit_price, line_total in lines:
+                db.execute(
+                    """INSERT INTO invoice_items (invoice_id, business_id, item_code, item_name, department, batch_no, qty, unit_price, line_total)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (invoice_id, biz, code, name, dept, batch, qty, unit_price, line_total),
+                )
+        for code, qty in needed.items():
+            moved = db.execute(
+                "UPDATE pos_products SET quantity = quantity - ? WHERE id=? AND business_id=? AND quantity >= ?",
+                (qty, listed[code]["id"], biz, qty),
+            )
+            if moved.rowcount != 1:
+                raise StockError(code)
+        db.commit()
+    except StockError:
+        db.rollback()
+        flash("POS stock changed during the import, so nothing was imported. Please try again.", "error")
+        return redirect(url_for("import_data"))
+    except DB_ERRORS:
+        db.rollback()
+        flash("The import failed while saving, so nothing was imported. Please try again.", "error")
+        return redirect(url_for("import_data"))
+
+    stock_note = " POS stock was reduced to match." if deduct else " Stock levels were not changed."
+    flash(f"Imported {len(invoices)} invoice(s) from {len(records)} row(s).{stock_note}", "ok")
+    return redirect(url_for("history"))
+
+
+@app.errorhandler(413)
+def upload_too_large(error):
+    flash("That file is too large. The limit is 2 MB; split it into smaller files.", "error")
+    return redirect(url_for("import_data"))
 
 
 # --- SETTINGS (ADMIN) ---

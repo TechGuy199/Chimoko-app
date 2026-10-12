@@ -18,7 +18,7 @@
             </label>
             <label>Quantity bought <input name="quantity" type="number" min="1" step="1" required></label>
             <label>Unit cost <input name="unit_cost" type="number" min="0" step="0.01" required></label>
-            <label>Selling price (blank = unit cost) <input name="price" type="number" min="0" step="0.01"></label>
+            <label>Selling price (blank = keep current, or unit cost if new) <input name="price" type="number" min="0" step="0.01"></label>
             <label>Supplier name <input name="supplier_name"></label>
             <label>Supplier invoice number <input name="invoice_no"></label>
             <label>Purchase date <input name="purchase_date" type="date" value="{{ today }}"></label>
