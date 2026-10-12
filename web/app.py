@@ -1038,6 +1038,257 @@ def delete_payslip(payslip_id):
     return redirect(url_for("hr"))
 
 
+# --- REPORTS ---
+REPORT_PERIODS = (
+    ("this_month", "This month"), ("last_month", "Last month"), ("last_30", "Last 30 days"),
+    ("this_year", "This year"), ("all", "All time"), ("custom", "Custom range"),
+)
+REPORT_PARAMS = ("period", "from", "to", "view", "dept")
+
+
+def report_period():
+    """Returns (choice, first day, last day) from the query string; both days are None for 'all time'."""
+    today = now().date()
+    choice = request.args.get("period", "this_month")
+    start = end = None
+    if choice == "custom":
+        try:
+            start = datetime.date.fromisoformat(request.args.get("from", ""))
+            end = datetime.date.fromisoformat(request.args.get("to", ""))
+            if end < start:
+                start, end = end, start
+        except ValueError:
+            choice = "this_month"
+
+    if choice == "last_month":
+        end = today.replace(day=1) - datetime.timedelta(days=1)
+        start = end.replace(day=1)
+    elif choice == "last_30":
+        start, end = today - datetime.timedelta(days=29), today
+    elif choice == "this_year":
+        start, end = today.replace(month=1, day=1), today.replace(month=12, day=31)
+    elif choice not in ("all", "custom"):
+        choice = "this_month"
+        start = today.replace(day=1)
+        end = today.replace(day=calendar.monthrange(today.year, today.month)[1])
+    return choice, start, end
+
+
+def report_url(endpoint="reports", **changes):
+    """Link to a report page that keeps the current period and view."""
+    params = {key: value for key, value in request.args.items() if key in REPORT_PARAMS}
+    params.update(changes)
+    if endpoint == "reports":
+        params.pop("dept", None)
+    return url_for(endpoint, **{key: value for key, value in params.items() if value})
+
+
+def gather_report(db, biz, start, end, dept=None):
+    """Sale lines and purchases dated inside the period, optionally for one department."""
+    low = start.isoformat() if start else "0000-00-00"
+    high = (end + datetime.timedelta(days=1)).isoformat() if end else "9999-99-99"
+    sale_sql = """SELECT ii.department, ii.item_code, ii.item_name, ii.qty, ii.unit_price, ii.line_total,
+                         i.id AS invoice_id, i.invoice_no, i.kind, i.customer_name, i.created_at, i.total, i.amount_paid
+                  FROM invoice_items ii JOIN invoices i ON i.id = ii.invoice_id
+                  WHERE ii.business_id=? AND i.created_at >= ? AND i.created_at < ?"""
+    buy_sql = """SELECT id, department, item_code, name, supplier_name, purchase_date, quantity, total_cost, amount_paid
+                 FROM procurements WHERE business_id=? AND purchase_date >= ? AND purchase_date < ?"""
+    params = [biz, low, high]
+    if dept is not None:
+        sale_sql += " AND ii.department=?"
+        buy_sql += " AND department=?"
+        params.append(dept)
+    return db.all(sale_sql + " ORDER BY i.created_at, ii.id", params), db.all(buy_sql + " ORDER BY purchase_date, id", params)
+
+
+def blank_totals():
+    return {"sales": 0.0, "received": 0.0, "purchases": 0.0, "paid": 0.0, "units_in": 0, "units_sold": 0, "units_farm": 0}
+
+
+def summarise(sales, buys, sale_key, buy_key):
+    """Totals of money and stock in and out, grouped by whatever the key functions return."""
+    groups = {}
+    for r in sales:
+        t = groups.setdefault(sale_key(r), blank_totals())
+        if r["kind"] == "FARM_USE":
+            t["units_farm"] += r["qty"]
+        else:
+            t["sales"] += r["line_total"]
+            t["units_sold"] += r["qty"]
+            # An invoice's payment is shared across its lines in proportion to their value
+            t["received"] += r["line_total"] * r["amount_paid"] / r["total"] if r["total"] else 0.0
+    for r in buys:
+        t = groups.setdefault(buy_key(r), blank_totals())
+        t["purchases"] += r["total_cost"] or 0.0
+        t["paid"] += r["amount_paid"] or 0.0
+        t["units_in"] += r["quantity"] or 0
+    return groups
+
+
+def time_buckets(start, end, sales, buys):
+    """Picks daily, monthly or yearly steps for the period. Returns ([(key, label)], key length)."""
+    if start is None:
+        seen = [r["created_at"][:10] for r in sales] + [r["purchase_date"][:10] for r in buys]
+        try:
+            start, end = datetime.date.fromisoformat(min(seen)), datetime.date.fromisoformat(max(seen))
+        except ValueError:
+            start = end = now().date()
+
+    months = (end.year - start.year) * 12 + end.month - start.month + 1
+    if (end - start).days < 62:
+        days = [start + datetime.timedelta(days=i) for i in range((end - start).days + 1)]
+        return [(d.isoformat(), d.strftime("%d %b")) for d in days], 10
+    if months <= 36:
+        firsts = [datetime.date(start.year + (start.month - 1 + i) // 12, (start.month - 1 + i) % 12 + 1, 1) for i in range(months)]
+        return [(d.strftime("%Y-%m"), d.strftime("%b %Y")) for d in firsts], 7
+    return [(str(year), str(year)) for year in range(start.year, end.year + 1)], 4
+
+
+def timeline_rows(start, end, sales, buys):
+    buckets, length = time_buckets(start, end, sales, buys)
+    by_time = summarise(sales, buys, lambda r: r["created_at"][:length], lambda r: r["purchase_date"][:length])
+    return [dict(by_time.get(key, blank_totals()), label=label) for key, label in buckets]
+
+
+def compact(n):
+    """1250 -> 1.3K, for axis ticks."""
+    for limit, suffix in ((1e9, "B"), (1e6, "M"), (1e3, "K")):
+        if abs(n) >= limit:
+            return f"{n / limit:.1f}".rstrip("0").rstrip(".") + suffix
+    return f"{n:.2f}".rstrip("0").rstrip(".")
+
+
+def nice_ceiling(value):
+    if value <= 0:
+        return 1.0
+    magnitude = 10 ** math.floor(math.log10(value))
+    return next(step * magnitude for step in (1, 2, 4, 8, 10) if value <= step * magnitude)
+
+
+def column_chart(labels, series, fmt):
+    """Geometry for a grouped column chart drawn as SVG by _chart.html. series is a list of (name, values)."""
+    width, height, left, right, top, bottom = 720, 250, 56, 8, 10, 30
+    plot_w, plot_h, base = width - left - right, height - top - bottom, height - bottom
+    peak = max([v for _, values in series for v in values] + [0])
+    ceiling = nice_ceiling(peak)
+    count = max(len(labels), 1)
+    band = plot_w / count
+    gap = 2
+    bar_w = max(1.5, min(24.0, (band * 0.72 - gap * (len(series) - 1)) / len(series)))
+    group_w = len(series) * bar_w + gap * (len(series) - 1)
+
+    bars, hits = [], []
+    for i, label in enumerate(labels):
+        group_x = left + i * band + (band - group_w) / 2
+        tip = [label]
+        for j, (name, values) in enumerate(series):
+            tip.append(f"{name}: {fmt(values[i])}")
+            h = plot_h * values[i] / ceiling
+            if h <= 0:
+                continue
+            h = max(h, 1.0)
+            x, y, r = group_x + j * (bar_w + gap), base - h, min(4.0, h, bar_w / 2)
+            # Rounded at the data end, square on the baseline
+            bars.append({"series": j + 1, "d": (
+                f"M{x:.1f},{base:.1f}V{y + r:.1f}Q{x:.1f},{y:.1f} {x + r:.1f},{y:.1f}"
+                f"H{x + bar_w - r:.1f}Q{x + bar_w:.1f},{y:.1f} {x + bar_w:.1f},{y + r:.1f}V{base:.1f}Z"
+            )})
+        hits.append({"x": round(left + i * band, 1), "w": round(band, 1), "tip": "\n".join(tip)})
+
+    every = math.ceil(count / 12)
+    limit = 14 if count > 6 else 24
+    return {
+        "width": width, "height": height, "left": left, "right": width - right, "top": top, "plot_h": plot_h, "base": base,
+        "series": [name for name, _ in series], "bars": bars, "hits": hits, "empty": peak <= 0,
+        "ticks": [{"y": round(base - plot_h * i / 4, 1), "label": compact(ceiling * i / 4)} for i in range(5)],
+        "xlabels": [
+            {"x": round(left + i * band + band / 2, 1), "label": label if len(label) <= limit else label[:limit - 1] + "…"}
+            for i, label in enumerate(labels) if i % every == 0
+        ],
+    }
+
+
+def whole(value):
+    return f"{int(value):,}"
+
+
+def report_charts(rows):
+    """The money and stock charts for a list of rows that each carry a 'label'."""
+    labels = [r["label"] for r in rows]
+    return {
+        "money": column_chart(labels, [("Sales", [r["sales"] for r in rows]), ("Purchases", [r["purchases"] for r in rows])], money),
+        "units": column_chart(
+            labels,
+            [("Units in (purchased)", [r["units_in"] for r in rows]), ("Units out (sold + farm use)", [r["units_sold"] + r["units_farm"] for r in rows])],
+            whole,
+        ),
+    }
+
+
+def report_context(choice, start, end):
+    return {
+        "periods": REPORT_PERIODS, "period": choice, "start": start, "end": end,
+        "view": "table" if request.args.get("view") == "table" else "visual", "report_url": report_url,
+    }
+
+
+def sum_rows(rows):
+    total = blank_totals()
+    for r in rows:
+        for key in total:
+            total[key] += r[key]
+    return total
+
+
+@app.get("/reports")
+@need(None)
+def reports():
+    db, biz = get_db(), g.user["business_id"]
+    choice, start, end = report_period()
+    sales, buys = gather_report(db, biz, start, end)
+
+    by_dept = summarise(sales, buys, lambda r: r["department"] or "General", lambda r: r["department"] or "General")
+    names = sorted(set(department_names(db, biz)) | set(by_dept))
+    departments = [dict(by_dept.get(name, blank_totals()), label=name) for name in names]
+    timeline = timeline_rows(start, end, sales, buys)
+    return render_template(
+        "reports.html", departments=departments, totals=sum_rows(departments), timeline=timeline,
+        dept_charts=report_charts(departments), time_charts=report_charts(timeline), **report_context(choice, start, end),
+    )
+
+
+@app.get("/reports/department")
+@need(None)
+def report_department():
+    db, biz = get_db(), g.user["business_id"]
+    dept = request.args.get("dept", "").strip()
+    if not dept:
+        return redirect(report_url("reports"))
+    choice, start, end = report_period()
+    sales, buys = gather_report(db, biz, start, end, dept)
+
+    timeline = timeline_rows(start, end, sales, buys)
+    products = {}
+    for r in sales:
+        p = products.setdefault((r["item_code"], r["item_name"]), {"code": r["item_code"], "name": r["item_name"], "sold": 0, "value": 0.0, "farm": 0})
+        if r["kind"] == "FARM_USE":
+            p["farm"] += r["qty"]
+        else:
+            p["sold"] += r["qty"]
+            p["value"] += r["line_total"]
+    products = sorted(products.values(), key=lambda p: (-p["value"], -p["sold"], p["name"] or ""))
+    best = [p for p in products if p["value"] > 0][:8]
+    top_value = best[0]["value"] if best else 0.0
+
+    return render_template(
+        "report_department.html", dept=dept, totals=sum_rows(timeline), timeline=timeline, time_charts=report_charts(timeline),
+        products=products, best=[dict(p, pct=round(100 * p["value"] / top_value, 1)) for p in best],
+        purchases=[with_payment_state(dict(r)) for r in buys],
+        sale_lines=[r for r in sales if r["kind"] != "FARM_USE"], farm_lines=[r for r in sales if r["kind"] == "FARM_USE"],
+        **report_context(choice, start, end),
+    )
+
+
 # --- CSV IMPORT (ADMIN) ---
 IMPORT_MAX_ROWS = 2000
 IMPORT_MAX_ERRORS_SHOWN = 50

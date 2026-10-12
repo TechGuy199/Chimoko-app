@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block title %}Reports — {% endblock %}
+{% block content %}
+<h1>Reports</h1>
+{% with action=url_for('reports') %}{% include "_report_filters.html" %}{% endwith %}
+
+<h2>Departments</h2>
+<div class="dept-tiles">
+    {% for d in departments %}
+    <a class="dept-tile" href="{{ report_url('report_department', dept=d.label) }}">
+        <strong>{{ d.label }}</strong>
+        <small>In {{ d.sales|money }}</small>
+        <small>Out {{ d.purchases|money }}</small>
+    </a>
+    {% endfor %}
+</div>
+
+<div class="stats spaced">
+    <div class="stat"><span>Sales</span><strong>{{ totals.sales|money }}</strong><small>Received: {{ totals.received|money }}</small></div>
+    <div class="stat"><span>Purchases</span><strong>{{ totals.purchases|money }}</strong><small>Paid: {{ totals.paid|money }}</small></div>
+    <div class="stat"><span>Sales minus purchases</span><strong>{{ (totals.sales - totals.purchases)|money }}</strong><small>Cash received minus paid: {{ (totals.received - totals.paid)|money }}</small></div>
+    <div class="stat"><span>Stock movement</span><strong>{{ totals.units_in }} in &middot; {{ totals.units_sold + totals.units_farm }} out</strong><small>{{ totals.units_sold }} sold, {{ totals.units_farm }} farm use</small></div>
+</div>
+
+{% if view == 'visual' %}
+<div class="chart-grid">
+    <section class="card">{% with chart=dept_charts.money, title='Sales and purchases by department' %}{% include "_chart.html" %}{% endwith %}</section>
+    <section class="card">{% with chart=dept_charts.units, title='Stock in and out by department (units)' %}{% include "_chart.html" %}{% endwith %}</section>
+    <section class="card">{% with chart=time_charts.money, title='Sales and purchases over time, all departments' %}{% include "_chart.html" %}{% endwith %}</section>
+    <section class="card">{% with chart=time_charts.units, title='Stock in and out over time, all departments (units)' %}{% include "_chart.html" %}{% endwith %}</section>
+</div>
+{% else %}
+<section class="card block">
+    <h2>By Department</h2>
+    <div class="table-wrap">
+        <table>
+            <thead><tr><th>Department</th><th class="num">Sales</th><th class="num">Received</th><th class="num">Purchases</th><th class="num">Paid</th><th class="num">Sales &minus; purchases</th><th class="num">Units in</th><th class="num">Units sold</th><th class="num">Farm use</th></tr></thead>
+            <tbody>
+            {% for d in departments %}
+                <tr>
+                    <td><a href="{{ report_url('report_department', dept=d.label) }}">{{ d.label }}</a></td>
+                    <td class="num">{{ d.sales|money }}</td>
+                    <td class="num">{{ d.received|money }}</td>
+                    <td class="num">{{ d.purchases|money }}</td>
+                    <td class="num">{{ d.paid|money }}</td>
+                    <td class="num">{{ (d.sales - d.purchases)|money }}</td>
+                    <td class="num">{{ d.units_in }}</td>
+                    <td class="num">{{ d.units_sold }}</td>
+                    <td class="num">{{ d.units_farm }}</td>
+                </tr>
+            {% endfor %}
+                <tr class="total-row">
+                    <td>All departments</td>
+                    <td class="num">{{ totals.sales|money }}</td>
+                    <td class="num">{{ totals.received|money }}</td>
+                    <td class="num">{{ totals.purchases|money }}</td>
+                    <td class="num">{{ totals.paid|money }}</td>
+                    <td class="num">{{ (totals.sales - totals.purchases)|money }}</td>
+                    <td class="num">{{ totals.units_in }}</td>
+                    <td class="num">{{ totals.units_sold }}</td>
+                    <td class="num">{{ totals.units_farm }}</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+</section>
+{% with rows=timeline, heading='Over Time, All Departments' %}{% include "_report_timeline.html" %}{% endwith %}
+{% endif %}
+{% endblock %}
+{% block scripts %}<script src="{{ url_for('static', filename='reports.js') }}"></script>{% endblock %}

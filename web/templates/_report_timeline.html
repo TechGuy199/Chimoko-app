@@ -1,0 +1,25 @@
+{# Period-by-period table. Expects: rows (each with a label and the totals), heading. Periods with no activity are left out. #}
+<section class="card block">
+    <h2>{{ heading }}</h2>
+    <div class="table-wrap">
+        <table>
+            <thead><tr><th>Period</th><th class="num">Sales</th><th class="num">Received</th><th class="num">Purchases</th><th class="num">Paid</th><th class="num">Units in</th><th class="num">Units sold</th><th class="num">Farm use</th></tr></thead>
+            <tbody>
+            {% for r in rows if r.sales or r.purchases or r.units_in or r.units_sold or r.units_farm %}
+                <tr>
+                    <td>{{ r.label }}</td>
+                    <td class="num">{{ r.sales|money }}</td>
+                    <td class="num">{{ r.received|money }}</td>
+                    <td class="num">{{ r.purchases|money }}</td>
+                    <td class="num">{{ r.paid|money }}</td>
+                    <td class="num">{{ r.units_in }}</td>
+                    <td class="num">{{ r.units_sold }}</td>
+                    <td class="num">{{ r.units_farm }}</td>
+                </tr>
+            {% else %}
+                <tr><td colspan="8" class="muted center">No activity in this period.</td></tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>

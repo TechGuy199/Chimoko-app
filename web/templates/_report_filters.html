@@ -1,0 +1,23 @@
+{# Period picker and Visual / Table switch shared by the report pages. Expects: periods, period, start, end, view, action, dept (optional). #}
+<form method="get" action="{{ action }}" class="toolbar report-filters no-print" id="report-filters">
+    {% if dept %}<input type="hidden" name="dept" value="{{ dept }}">{% endif %}
+    <input type="hidden" name="view" value="{{ view }}">
+    <select name="period" id="report-period" aria-label="Period">
+        {% for value, label in periods %}<option value="{{ value }}" {{ 'selected' if value == period }}>{{ label }}</option>{% endfor %}
+    </select>
+    <span id="custom-range" {{ 'hidden' if period != 'custom' }}>
+        <input type="date" name="from" value="{{ start.isoformat() if start and period == 'custom' }}" aria-label="From">
+        <span class="muted">to</span>
+        <input type="date" name="to" value="{{ end.isoformat() if end and period == 'custom' }}" aria-label="To">
+        <button class="btn primary">Apply</button>
+    </span>
+    <span class="spacer"></span>
+    <span class="segmented" role="group" aria-label="Report view">
+        <a href="{{ report_url(request.endpoint, view='visual') }}" class="{{ 'active' if view == 'visual' }}">Visual</a>
+        <a href="{{ report_url(request.endpoint, view='table') }}" class="{{ 'active' if view == 'table' }}">Table</a>
+    </span>
+    <button type="button" class="btn" onclick="window.print()">Print</button>
+</form>
+<p class="muted period-line">
+    {% if start %}{{ start.strftime('%d %b %Y') }} to {{ end.strftime('%d %b %Y') }}{% else %}All time{% endif %}
+</p>
