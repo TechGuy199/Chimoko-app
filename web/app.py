@@ -130,18 +130,50 @@ def need(perm):
 
 @app.context_processor
 def template_globals():
-    return {"csrf_field": csrf_field, "user": g.get("user"), "can": can, "look": appearance_of(g.get("user")), "themes": THEMES}
+    return {
+        "csrf_field": csrf_field, "user": g.get("user"), "can": can, "look": appearance_of(g.get("user")), "themes": THEMES,
+        "asset": asset,
+    }
 
 
 THEMES = (("dark", "Dark"), ("light", "Light"), ("system", "Match my device"))
 DEFAULT_GLASS = 50
+# Changes with every deployment, so browsers never keep using an older stylesheet or script
+ASSET_VERSION = os.environ.get("VERCEL_GIT_COMMIT_SHA", "")[:10] or datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+
+
+def asset(filename):
+    return url_for("static", filename=filename, v=ASSET_VERSION)
 
 
 def appearance_of(user):
-    """The signed-in user's theme and transparency (0-100), falling back to the defaults for anything unset or invalid."""
-    theme = user["theme"] if user and user["theme"] in dict(THEMES) else "dark"
-    glass = user["glass"] if user and isinstance(user["glass"], int) and 0 <= user["glass"] <= 100 else DEFAULT_GLASS
-    return {"theme": theme, "glass": glass}
+    """The theme and transparency (0-100) to draw the page with.
+
+    A signed-in user's saved choice wins. Signed-out pages (login) reuse the look last used on this
+    device, kept in a cookie. Anything unset or invalid falls back to the defaults.
+    """
+    theme = glass = None
+    if user:
+        theme, glass = user["theme"], user["glass"]
+    else:
+        remembered = request.cookies.get("look", "").split(":")
+        if len(remembered) == 2 and remembered[1].isdigit():
+            theme, glass = remembered[0], int(remembered[1])
+    return {
+        "theme": theme if theme in dict(THEMES) else "dark",
+        "glass": glass if isinstance(glass, int) and 0 <= glass <= 100 else DEFAULT_GLASS,
+    }
+
+
+@app.after_request
+def remember_look(response):
+    user = g.get("user")
+    if user:
+        look = appearance_of(user)
+        value = f"{look['theme']}:{look['glass']}"
+        if request.cookies.get("look") != value:
+            response.set_cookie("look", value, max_age=365 * 24 * 3600, samesite="Lax", secure=ON_VERCEL, httponly=True)
+    return response
 
 
 @app.route("/appearance", methods=["GET", "POST"])
@@ -149,18 +181,25 @@ def appearance_of(user):
 def appearance():
     """Every user chooses their own look; it follows them to whichever device they sign in on."""
     if request.method == "POST":
+        # The page saves in the background the moment a choice is made; the plain form post is the fallback
+        background = request.headers.get("X-Requested-With") == "fetch"
         theme = text("theme")
         try:
             glass = number("glass", int)
         except ValueError:
             glass = -1
-        if theme not in dict(THEMES) or not 0 <= glass <= 100:
-            flash("Choose a theme and a transparency between 0 and 100.", "error")
-        else:
+        valid = theme in dict(THEMES) and 0 <= glass <= 100
+        if valid:
             db = get_db()
             db.execute("UPDATE users SET theme=?, glass=? WHERE id=?", (theme, glass, g.user["id"]))
             db.commit()
+            g.user["theme"], g.user["glass"] = theme, glass
+        if background:
+            return ("", 204) if valid else ("Choose a theme and a transparency between 0 and 100.", 400)
+        if valid:
             flash("Appearance saved.", "ok")
+        else:
+            flash("Choose a theme and a transparency between 0 and 100.", "error")
         back_to_settings = request.form.get("back") == "settings" and g.user["role"] == "admin"
         return redirect(url_for("settings" if back_to_settings else "appearance"))
     return render_template("appearance.html")
@@ -563,7 +602,26 @@ def chosen_department(db, biz):
 def inventory():
     db, biz = get_db(), g.user["business_id"]
     items = db.all(f"SELECT {ITEM_COLUMNS} FROM products WHERE business_id=? ORDER BY name", (biz,))
-    return render_template("inventory.html", items=items, departments=department_names(db, biz), today=now().strftime("%Y-%m-%d"))
+
+    # Category is its own field on each item (Seeds, Fertiliser, Feed...), separate from the department
+    # "Fertiliser", "fertiliser " and "FERTILISER" are one group, shown under its most used spelling
+    # (a capitalised one wins a tie).
+    by_category = {}
+    for item in items:
+        label = " ".join((item["category"] or "").split()) or "Uncategorised"
+        group = by_category.setdefault(label.lower(), {"spellings": {}, "entries": [], "units": 0, "value": 0.0, "low": 0})
+        group["spellings"][label] = group["spellings"].get(label, 0) + 1
+        group["name"] = max(group["spellings"], key=lambda spelling: (group["spellings"][spelling], spelling[:1].isupper(), spelling))
+        group["entries"].append(item)
+        group["units"] += item["quantity"]
+        group["value"] += item["quantity"] * item["unit_cost"]
+        group["low"] += 1 if item["quantity"] < g.user["low_stock_threshold"] else 0
+    categories = [group for _, group in sorted(by_category.items())]
+
+    return render_template(
+        "inventory.html", items=items, categories=categories, view="list" if request.args.get("view") == "list" else "category",
+        departments=department_names(db, biz), today=now().strftime("%Y-%m-%d"),
+    )
 
 
 @app.post("/inventory/purchase")

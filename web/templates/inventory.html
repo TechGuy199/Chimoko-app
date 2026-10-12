@@ -36,33 +36,64 @@
     </section>
     {% endif %}
 
+    {# One item row; the grouped view leaves out the Category column because the group heading says it #}
+    {% macro item_row(i, show_category) %}
+    <tr>
+        <td>{{ i.item_code }}</td>
+        <td>{{ i.name }}</td>
+        {% if show_category %}<td>{{ i.category or '—' }}</td>{% endif %}
+        <td>{{ i.department }}</td>
+        <td>{{ i.supplier_name or '—' }}</td>
+        <td class="num {{ 'warn' if i.quantity < user.low_stock_threshold }}">{{ i.quantity }}</td>
+        <td class="num">{{ i.unit_cost|money }}</td>
+        <td class="num">{{ i.price|money }}</td>
+        <td>{{ i.expiry_date or '—' }}</td>
+        <td class="num"><a class="btn small" href="{{ url_for('item', item_id=i.id) }}">Manage</a></td>
+    </tr>
+    {% endmacro %}
+
     <section class="card grow">
-        <h2>Company Inventory</h2>
+        <div class="page-head">
+            <h2>Company Inventory</h2>
+            <span class="segmented" role="group" aria-label="Inventory view">
+                <a href="{{ url_for('inventory') }}" class="{{ 'active' if view == 'category' }}">By category</a>
+                <a href="{{ url_for('inventory', view='list') }}" class="{{ 'active' if view == 'list' }}">Single list</a>
+            </span>
+        </div>
+
+        {% if not items %}
+        <p class="muted center">No inventory yet. Log your first purchase to get started.</p>
+        {% elif view == 'category' %}
+        {% for c in categories %}
+        <details class="group" open>
+            <summary>
+                <strong>{{ c.name }}</strong>
+                <span class="muted">{{ c.entries|length }} item(s) &middot; {{ c.units }} unit(s) &middot; {{ c.value|money }} at cost{% if c.low %} &middot; <span class="warn">{{ c.low }} low on stock</span>{% endif %}</span>
+            </summary>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr><th>Code</th><th>Name</th><th>Dept</th><th>Supplier</th><th class="num">Qty</th><th class="num">Unit cost</th><th class="num">Sell price</th><th>Expiry</th><th></th></tr>
+                    </thead>
+                    <tbody>
+                    {% for i in c.entries %}{{ item_row(i, false) }}{% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </details>
+        {% endfor %}
+        {% else %}
         <div class="table-wrap">
             <table>
                 <thead>
                     <tr><th>Code</th><th>Name</th><th>Category</th><th>Dept</th><th>Supplier</th><th class="num">Qty</th><th class="num">Unit cost</th><th class="num">Sell price</th><th>Expiry</th><th></th></tr>
                 </thead>
                 <tbody>
-                {% for i in items %}
-                    <tr>
-                        <td>{{ i.item_code }}</td>
-                        <td>{{ i.name }}</td>
-                        <td>{{ i.category }}</td>
-                        <td>{{ i.department }}</td>
-                        <td>{{ i.supplier_name or '—' }}</td>
-                        <td class="num {{ 'warn' if i.quantity < user.low_stock_threshold }}">{{ i.quantity }}</td>
-                        <td class="num">{{ i.unit_cost|money }}</td>
-                        <td class="num">{{ i.price|money }}</td>
-                        <td>{{ i.expiry_date or '—' }}</td>
-                        <td class="num"><a class="btn small" href="{{ url_for('item', item_id=i.id) }}">Manage</a></td>
-                    </tr>
-                {% else %}
-                    <tr><td colspan="10" class="muted center">No inventory yet. Log your first purchase to get started.</td></tr>
-                {% endfor %}
+                {% for i in items %}{{ item_row(i, true) }}{% endfor %}
                 </tbody>
             </table>
         </div>
+        {% endif %}
     </section>
 </div>
 {% endblock %}
