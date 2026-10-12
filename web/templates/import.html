@@ -58,6 +58,30 @@
             <button class="btn success">Import Sales</button>
         </form>
     </section>
+
+    <section class="card grow">
+        <h2>Salaries &amp; Wages</h2>
+        <p>Each row is one payslip for one employee for one month. Imported payslips appear under HR &amp; Payroll, in the monthly summary, and can be printed.</p>
+        <ul class="muted">
+            <li><strong>Required:</strong> Employee Name, Pay Month, Basic Salary.</li>
+            <li><strong>Optional:</strong> NRC Number, Employment Type, Expected Days, Worked Days, Bonuses, Deductions, NAPSA, NHIMA, Net Pay.</li>
+            <li>Name each bonus or deduction with its own column, headed like <strong>Bonus: Transport</strong> or <strong>Deduction: Advance</strong>. Add as many as you need.</li>
+            <li>Employees are matched by NRC Number when the file has one, otherwise by name. Anyone not yet registered is registered with the salary in the file.</li>
+            <li>Blank Expected Days are counted from the pay month and your HR settings; blank Worked Days mean a full month.</li>
+            <li>Blank NAPSA and NHIMA are worked out from your HR settings. Amounts you provide are used as they are, as employee deductions.</li>
+            <li>Blank Net Pay is calculated. A Net Pay you provide is stored as given, even if it differs from the calculation.</li>
+            <li>Pay Month can be 2026-10, October 2026 or Oct-26.</li>
+            <li>An employee who already has a payslip for that month is rejected, which protects against importing a file twice.</li>
+        </ul>
+        <p><a href="{{ url_for('import_template', kind='payroll') }}">Download the salaries &amp; wages template</a></p>
+        <form method="post" action="{{ url_for('import_payroll') }}" enctype="multipart/form-data">
+            {{ csrf_field() }}
+            <label>CSV file <input type="file" name="file" accept=".csv,text/csv" required></label>
+            <label class="check"><input type="checkbox" name="allow_repeats"> Allow extra payslips for a month that already has one</label>
+            <p class="muted">Tick this for weekly or fortnightly wages, where one employee has several payslips in the same month.</p>
+            <button class="btn success">Import Salaries &amp; Wages</button>
+        </form>
+    </section>
 </div>
 
 <p class="muted">Dates can be written as 2026-10-01 or 01/10/2026 (day first). Amounts may include commas or a currency prefix.</p>

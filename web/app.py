@@ -1867,7 +1867,27 @@ IMPORT_TEMPLATES = {
         ["Invoice No", "Date", "Customer", "Phone", "Item Code", "Item Name", "Quantity", "Unit Price", "Payment Status", "Amount Paid"],
         ["", "2026-10-01 09:30", "Jane Banda", "0977123456", "SEED-001", "Maize Seed 10kg", 2, 600, "Paid", ""],
     ),
+    "payroll": (
+        ["Employee Name", "NRC Number", "Employment Type", "Pay Month", "Basic Salary", "Expected Days", "Worked Days", "Bonus: Transport", "Deduction: Advance", "NAPSA", "NHIMA", "Net Pay"],
+        ["Mary Banda", "123456/10/1", "Permanent", "2026-10", 4400, 22, 22, 100, 0, "", "", ""],
+    ),
 }
+PAYROLL_COLUMNS = {
+    "employee": ("employee name", "employee", "full name", "name"),
+    "nrc": ("nrc number", "nrc", "nrc no"),
+    "employment_type": ("employment type", "employment status", "type"),
+    "pay_month": ("pay month", "month", "pay period", "period", "date"),
+    "basic_salary": ("basic salary", "basic", "salary", "basic wage", "wage"),
+    "expected_days": ("expected days", "expected work days", "exp days"),
+    "worked_days": ("worked days", "days worked", "work days", "actual days worked"),
+    "bonuses": ("bonuses", "bonus", "allowances", "additions"),
+    "deductions": ("deductions", "deduction", "other deductions"),
+    "napsa": ("napsa",),
+    "nhima": ("nhima",),
+    "net_pay": ("net pay", "net payable", "net salary", "net"),
+}
+# Excel likes to turn "2026-10" into "Oct-26", so that spelling is accepted too
+PAY_MONTH_FORMATS = ("%Y-%m", "%B %Y", "%b %Y", "%m/%Y", "%Y/%m", "%B-%Y", "%b-%Y", "%b-%y", "%B-%y")
 DATE_FORMATS = (
     "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d", "%d/%m/%Y %H:%M:%S", "%d/%m/%Y %H:%M", "%d/%m/%Y",
     "%d-%m-%Y %H:%M:%S", "%d-%m-%Y %H:%M", "%d-%m-%Y", "%Y/%m/%d",
@@ -1899,6 +1919,8 @@ def read_csv_upload(columns, required):
 
     lookup = {alias: field for field, aliases in columns.items() for alias in aliases}
     fields = [lookup.get(" ".join(heading.replace("_", " ").lower().split())) for heading in rows[0]]
+    # Headings such as "Bonus: Transport" or "Deduction: Loan" are free-form named amounts (payroll files)
+    named = [re.fullmatch(r"\s*(bonus|deduction)\s*:\s*(.+?)\s*", heading, re.I) for heading in rows[0]]
     missing = [columns[field][0].title() for field in required if field not in fields]
     if missing:
         raise ImportProblem("The file is missing these column headings: " + ", ".join(missing) + ". Download the template to see the expected layout.")
@@ -1908,11 +1930,14 @@ def read_csv_upload(columns, required):
         if not any(cell.strip() for cell in cells):
             continue
         record = dict.fromkeys(columns, "")
-        for field, cell in zip(fields, cells):
+        record["_named"] = []
+        for field, extra, cell in zip(fields, named, cells):
+            cell = cell.strip()
             if field:
-                cell = cell.strip()
                 # Undo the apostrophe our own exports put in front of formula-like text
                 record[field] = cell[1:] if len(cell) > 1 and cell[0] == "'" and cell[1] in "=@+-" else cell
+            elif extra and cell:
+                record["_named"].append((extra.group(1).lower(), extra.group(2), cell))
         record["_row"] = row_no
         records.append(record)
     if not records:
@@ -2225,6 +2250,171 @@ def import_sales():
     stock_note = " POS stock was reduced to match." if deduct else " Stock levels were not changed."
     flash(f"Imported {len(invoices)} invoice(s) from {len(records)} row(s).{stock_note}", "ok")
     return redirect(url_for("history"))
+
+
+def parse_pay_month(raw):
+    for fmt in PAY_MONTH_FORMATS:
+        try:
+            return datetime.datetime.strptime(raw.strip(), fmt)
+        except ValueError:
+            continue
+    return parse_date(raw.strip())
+
+
+@app.post("/import/payroll")
+@need("admin")
+def import_payroll():
+    db, biz = get_db(), g.user["business_id"]
+    try:
+        records = read_csv_upload(PAYROLL_COLUMNS, ("employee", "pay_month", "basic_salary"))
+    except ImportProblem as e:
+        flash(str(e), "error")
+        return redirect(url_for("import_data"))
+
+    allow_repeats = bool(request.form.get("allow_repeats"))
+    hr_set = hr_settings_for(db, biz)
+    non_working = hr_set["non_working_days"].split(",")
+    staff = db.all("SELECT id, full_name, nrc_number FROM employees WHERE business_id=?", (biz,))
+    already_paid = {(r["employee_id"], r["pay_month"]) for r in db.all("SELECT employee_id, pay_month FROM payroll WHERE business_id=?", (biz,))}
+
+    def tidy_nrc(value):
+        return re.sub(r"\s+", "", value).upper()
+
+    def optional_amount(rec, field, label, problems, minimum=0.0):
+        """A blank cell means 'work it out'; anything else must be a valid amount."""
+        if not rec[field]:
+            return None
+        try:
+            value = parse_amount(rec[field])
+            if minimum is not None and value < minimum:
+                raise ValueError
+            return value
+        except ValueError:
+            problems.append(f"{label} '{rec[field]}' is not a valid amount")
+            return None
+
+    errors, slips, hires = [], [], {}
+    for rec in records:
+        problems = []
+        name, nrc = rec["employee"], tidy_nrc(rec["nrc"])
+        if not name:
+            problems.append("employee name is missing")
+
+        period = None
+        try:
+            period = parse_pay_month(rec["pay_month"])
+        except ValueError:
+            problems.append(f"pay month '{rec['pay_month']}' is not a month (use YYYY-MM or October 2026)")
+
+        basic = 0.0
+        try:
+            basic = parse_amount(rec["basic_salary"])
+            if basic < 0:
+                raise ValueError
+        except ValueError:
+            problems.append(f"basic salary '{rec['basic_salary']}' is not a valid amount")
+
+        expected = optional_amount(rec, "expected_days", "expected days", problems)
+        worked = optional_amount(rec, "worked_days", "worked days", problems)
+        napsa = optional_amount(rec, "napsa", "NAPSA", problems)
+        nhima = optional_amount(rec, "nhima", "NHIMA", problems)
+        net = optional_amount(rec, "net_pay", "net pay", problems, minimum=None)
+        if expected is not None and expected <= 0:
+            problems.append("expected days must be above zero")
+
+        named = {"bonus": {}, "deduction": {}}
+        totals = (("bonus", "Bonuses", rec["bonuses"]), ("deduction", "Deductions", rec["deductions"]))
+        for kind, label, raw in list(totals) + rec["_named"]:
+            if not raw:
+                continue
+            try:
+                value = parse_amount(raw)
+                if value < 0:
+                    raise ValueError
+            except ValueError:
+                problems.append(f"{kind} '{label}' amount '{raw}' is not a valid amount")
+                continue
+            if value:
+                named[kind][label] = round(named[kind].get(label, 0.0) + value, 2)
+
+        # Find the employee by NRC when the file has one, otherwise by name; unknown people are registered
+        employee_id, hire_key = None, None
+        if name:
+            if nrc:
+                matches = [e for e in staff if tidy_nrc(e["nrc_number"] or "") == nrc]
+            else:
+                matches = [e for e in staff if " ".join(e["full_name"].lower().split()) == " ".join(name.lower().split())]
+            if len(matches) > 1:
+                problems.append(f"more than one employee matches '{name}'; add an NRC Number column to tell them apart")
+            elif matches:
+                employee_id = matches[0]["id"]
+            else:
+                hire_key = nrc or " ".join(name.lower().split())
+
+        if period and employee_id and not allow_repeats and (employee_id, period.strftime("%Y-%m")) in already_paid:
+            problems.append(f"{name} already has a payslip for {period.strftime('%B %Y')} (was this file imported before?)")
+
+        if problems:
+            errors.append(f"Row {rec['_row']}: " + "; ".join(problems))
+            continue
+
+        if expected is None:
+            expected = float(expected_work_days(period.year, period.month, non_working)) or 22.0
+        if worked is None:
+            worked = expected
+        calculated_basic = round(basic / expected * worked, 2)
+        # Amounts given in the file are taken as deducted from the employee; blanks follow the HR settings
+        employer_napsa = employer_nhima = 0.0
+        if napsa is None:
+            napsa = round(calculated_basic * hr_set["napsa_pct"] / 100.0, 2)
+            if hr_set["napsa_bearer"] != "employee":
+                napsa, employer_napsa = 0.0, napsa
+        if nhima is None:
+            nhima = round(calculated_basic * hr_set["nhima_pct"] / 100.0, 2)
+            if hr_set["nhima_bearer"] != "employee":
+                nhima, employer_nhima = 0.0, nhima
+        if net is None:
+            net = calculated_basic + sum(named["bonus"].values()) - sum(named["deduction"].values()) - napsa - nhima
+
+        if hire_key and hire_key not in hires:
+            casual = rec["employment_type"].lower().startswith(("casual", "temp", "part"))
+            hires[hire_key] = {"name": name, "nrc": rec["nrc"], "salary": round(basic, 2), "type": "Casual Worker" if casual else "Permanent", "since": period.strftime("%Y-%m-01")}
+        slips.append({
+            "employee_id": employee_id, "hire_key": hire_key, "name": name, "month": period.strftime("%Y-%m"), "basic": round(basic, 2),
+            "expected": expected, "worked": worked, "calculated_basic": calculated_basic, "bonuses": named["bonus"], "deductions": named["deduction"],
+            "napsa": round(napsa, 2), "nhima": round(nhima, 2), "employer_napsa": employer_napsa, "employer_nhima": employer_nhima, "net": round(net, 2),
+        })
+
+    if errors:
+        return import_errors("salaries and wages", errors)
+
+    stamp = now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        new_ids = {}
+        for key, hire in hires.items():
+            new_ids[key] = db.insert(
+                """INSERT INTO employees (business_id, full_name, nrc_number, basic_salary, employment_type, address, age, start_date, expected_days_week)
+                   VALUES (?, ?, ?, ?, ?, '', NULL, ?, 5)""",
+                (biz, hire["name"], hire["nrc"], hire["salary"], hire["type"], hire["since"]),
+            )
+        for s in slips:
+            db.execute(
+                """INSERT INTO payroll (business_id, employee_id, employee_name, pay_month, basic_salary, expected_days, worked_days, calculated_basic,
+                                        bonuses_json, deductions_json, napsa_amt, nhima_amt, employer_napsa, employer_nhima, net_payable, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    biz, s["employee_id"] or new_ids[s["hire_key"]], s["name"], s["month"], s["basic"], s["expected"], s["worked"], s["calculated_basic"],
+                    json.dumps(s["bonuses"]), json.dumps(s["deductions"]), s["napsa"], s["nhima"], s["employer_napsa"], s["employer_nhima"], s["net"], stamp,
+                ),
+            )
+        db.commit()
+    except DB_ERRORS:
+        db.rollback()
+        flash("The import failed while saving, so nothing was imported. Please try again.", "error")
+        return redirect(url_for("import_data"))
+
+    flash(f"Imported {len(slips)} payslip(s). {len(hires)} new employee(s) were registered from the file.", "ok")
+    return redirect(url_for("hr"))
 
 
 @app.errorhandler(413)
