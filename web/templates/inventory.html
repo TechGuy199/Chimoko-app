@@ -25,6 +25,12 @@
             <label>Batch number <input name="batch_no"></label>
             <label>Date planted <input name="date_planted" type="date"></label>
             <label>Expiry date <input name="expiry_date" type="date"></label>
+            <label>Payment to supplier
+                <select name="payment_status" onchange="document.getElementById('purchase-paid').hidden = this.value !== 'Partial Payment'">
+                    <option>Paid</option><option>Partial Payment</option><option>Unpaid</option>
+                </select>
+            </label>
+            <label id="purchase-paid" hidden>Amount paid so far <input name="amount_paid" type="number" min="0" step="0.01"></label>
             <button class="btn success wide">Log Purchase &amp; Add</button>
         </form>
     </section>

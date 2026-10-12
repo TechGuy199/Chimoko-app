@@ -155,6 +155,53 @@ def now():
     return datetime.datetime.now(TZ)
 
 
+def payment_status_for(total, paid):
+    if paid >= total - 0.005:
+        return "Paid"
+    return "Partial Payment" if paid > 0.005 else "Unpaid"
+
+
+def amount_for_status(status_text, amount_text, total):
+    """Works out the amount paid from a Paid / Partial Payment / Unpaid choice. Raises ValueError with the reason."""
+    status = status_text.strip().lower()
+    if status in ("", "paid"):
+        return total
+    if status == "unpaid":
+        return 0.0
+    if not status.startswith("partial"):
+        raise ValueError(f"payment status '{status_text}' must be Paid, Partial Payment or Unpaid")
+    try:
+        amount = round(parse_amount(amount_text), 2)
+    except ValueError:
+        raise ValueError("a partial payment needs the amount paid") from None
+    if not 0 < amount < total:
+        raise ValueError("a partial payment must be more than zero and less than the total")
+    return amount
+
+
+def update_payment(db, kind, ref_id, total, old_paid):
+    """Reads the admin payment form, logs the change and returns the new amount paid. Raises ValueError on bad input."""
+    if request.form.get("mark_paid"):
+        new_paid = total
+    else:
+        new_paid = round(number("amount_paid"), 2)
+        if not 0 <= new_paid <= total + 0.005:
+            raise ValueError("amount_paid")
+        new_paid = min(new_paid, total)
+    db.execute(
+        "INSERT INTO payment_log (business_id, kind, ref_id, old_paid, new_paid, note, changed_by, changed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (g.user["business_id"], kind, ref_id, old_paid, new_paid, text("note")[:200], g.user["username"], now().strftime("%Y-%m-%d %H:%M:%S")),
+    )
+    return new_paid
+
+
+def payment_history(db, kind, ref_id):
+    return db.all(
+        "SELECT old_paid, new_paid, note, changed_by, changed_at FROM payment_log WHERE business_id=? AND kind=? AND ref_id=? ORDER BY id DESC",
+        (g.user["business_id"], kind, ref_id),
+    )
+
+
 @app.template_filter("month")
 def month_label(value):
     try:
@@ -301,12 +348,22 @@ def pos():
            JOIN invoices i ON i.id = ii.invoice_id WHERE i.business_id=? AND i.kind='SALE'""",
         (biz,),
     )["n"]
-    revenue = db.one("SELECT COALESCE(SUM(amount_paid), 0) AS n FROM invoices WHERE business_id=? AND kind='SALE'", (biz,))["n"]
+    sales = db.one(
+        "SELECT COALESCE(SUM(amount_paid), 0) AS received, COALESCE(SUM(balance_due), 0) AS owed FROM invoices WHERE business_id=? AND kind='SALE'",
+        (biz,),
+    )
+    spend = db.one(
+        "SELECT COALESCE(SUM(amount_paid), 0) AS paid, COALESCE(SUM(total_cost - amount_paid), 0) AS owed FROM procurements WHERE business_id=?",
+        (biz,),
+    )
     stats = {
         "listed": len(products),
         "low": sum(1 for p in products if p["quantity"] < g.user["low_stock_threshold"]),
         "units": units,
-        "revenue": revenue,
+        "revenue": sales["received"],
+        "receivable": sales["owed"],
+        "expenditure": spend["paid"],
+        "payable": spend["owed"],
     }
     return render_template("pos.html", products=products, stats=stats, departments=department_names(db, biz), statuses=PAYMENT_STATUSES)
 
@@ -436,9 +493,15 @@ def purchase():
     if not code or not name or qty <= 0 or unit_cost < 0 or (price is not None and price < 0):
         flash("Item code and name are required, quantity must be above zero and prices cannot be negative.", "error")
         return redirect(url_for("inventory"))
+    try:
+        amount_paid = amount_for_status(text("payment_status"), text("amount_paid"), round(qty * unit_cost, 2))
+    except ValueError as e:
+        flash(str(e).capitalize() + ".", "error")
+        return redirect(url_for("inventory"))
 
     try:
         existing_name = record_purchase(db, biz, {
+            "amount_paid": amount_paid,
             "item_code": code, "name": name, "category": text("category") or "General", "department": chosen_department(db, biz),
             "quantity": qty, "unit_cost": unit_cost, "price": price, "supplier_name": text("supplier_name"),
             "invoice_no": text("invoice_no"), "purchase_date": text("purchase_date") or now().strftime("%Y-%m-%d"),
@@ -481,12 +544,14 @@ def record_purchase(db, biz, p):
                 p["unit_cost"], price, p["supplier_name"], p["invoice_no"], p["purchase_date"], p["expiry_date"],
             ),
         )
+    total_cost = round(p["quantity"] * p["unit_cost"], 2)
     db.execute(
-        """INSERT INTO procurements (business_id, item_code, name, category, department, supplier_name, invoice_no, purchase_date, quantity, unit_cost, total_cost, expiry_date)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        """INSERT INTO procurements (business_id, item_code, name, category, department, supplier_name, invoice_no, purchase_date, quantity, unit_cost, total_cost, expiry_date, amount_paid)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             biz, p["item_code"], existing["name"] if existing else p["name"], p["category"], p["department"], p["supplier_name"],
-            p["invoice_no"], p["purchase_date"], p["quantity"], p["unit_cost"], round(p["quantity"] * p["unit_cost"], 2), p["expiry_date"],
+            p["invoice_no"], p["purchase_date"], p["quantity"], p["unit_cost"], total_cost, p["expiry_date"],
+            total_cost if p.get("amount_paid") is None else p["amount_paid"],
         ),
     )
     db.execute("UPDATE pos_products SET price=? WHERE business_id=? AND item_code=?", (price, biz, p["item_code"]))
@@ -664,18 +729,81 @@ def invoice(invoice_id):
         "SELECT item_code, item_name, qty, unit_price, line_total FROM invoice_items WHERE invoice_id=? AND business_id=? ORDER BY id",
         (invoice_id, biz),
     )
-    return render_template("invoice.html", inv=inv, lines=lines)
+    return render_template("invoice.html", inv=inv, lines=lines, payments=payment_history(db, "sale", invoice_id))
+
+
+@app.post("/invoices/<int:invoice_id>/payment")
+@need("admin")
+def invoice_payment(invoice_id):
+    db, biz = get_db(), g.user["business_id"]
+    inv = db.one("SELECT total, amount_paid FROM invoices WHERE id=? AND business_id=? AND kind='SALE'", (invoice_id, biz))
+    if inv is None:
+        abort(404)
+    try:
+        new_paid = update_payment(db, "sale", invoice_id, inv["total"], inv["amount_paid"])
+    except ValueError:
+        db.rollback()
+        flash(f"Enter an amount between 0 and the invoice total ({money(inv['total'])}).", "error")
+        return redirect(url_for("invoice", invoice_id=invoice_id))
+
+    db.execute(
+        "UPDATE invoices SET amount_paid=?, balance_due=?, payment_status=? WHERE id=? AND business_id=?",
+        (new_paid, round(inv["total"] - new_paid, 2), payment_status_for(inv["total"], new_paid), invoice_id, biz),
+    )
+    db.commit()
+    flash("Payment updated.", "ok")
+    return redirect(url_for("invoice", invoice_id=invoice_id))
 
 
 # --- PROCUREMENTS ---
+PROCUREMENT_COLUMNS = "id, purchase_date, supplier_name, invoice_no, item_code, name, category, department, quantity, unit_cost, total_cost, expiry_date, amount_paid"
+
+
+def with_payment_state(row):
+    row["balance"] = round((row["total_cost"] or 0.0) - (row["amount_paid"] or 0.0), 2)
+    row["status"] = payment_status_for(row["total_cost"] or 0.0, row["amount_paid"] or 0.0)
+    return row
+
+
 def procurement_rows(db, biz, category):
-    sql = """SELECT purchase_date, supplier_name, invoice_no, item_code, name, category, department, quantity, unit_cost, total_cost, expiry_date
-             FROM procurements WHERE business_id=?"""
+    sql = f"SELECT {PROCUREMENT_COLUMNS} FROM procurements WHERE business_id=?"
     params = [biz]
     if category:
         sql += " AND category=?"
         params.append(category)
-    return db.all(sql + " ORDER BY id DESC", params)
+    return [with_payment_state(row) for row in db.all(sql + " ORDER BY id DESC", params)]
+
+
+def get_procurement(db, purchase_id):
+    row = db.one(f"SELECT {PROCUREMENT_COLUMNS} FROM procurements WHERE id=? AND business_id=?", (purchase_id, g.user["business_id"]))
+    if row is None:
+        abort(404)
+    return with_payment_state(row)
+
+
+@app.get("/procurements/<int:purchase_id>")
+@need("admin")
+def procurement(purchase_id):
+    db = get_db()
+    return render_template("purchase.html", p=get_procurement(db, purchase_id), payments=payment_history(db, "purchase", purchase_id))
+
+
+@app.post("/procurements/<int:purchase_id>/payment")
+@need("admin")
+def procurement_payment(purchase_id):
+    db = get_db()
+    p = get_procurement(db, purchase_id)
+    try:
+        new_paid = update_payment(db, "purchase", purchase_id, p["total_cost"], p["amount_paid"])
+    except ValueError:
+        db.rollback()
+        flash(f"Enter an amount between 0 and the purchase total ({money(p['total_cost'])}).", "error")
+        return redirect(url_for("procurement", purchase_id=purchase_id))
+
+    db.execute("UPDATE procurements SET amount_paid=? WHERE id=? AND business_id=?", (new_paid, purchase_id, g.user["business_id"]))
+    db.commit()
+    flash("Payment updated.", "ok")
+    return redirect(url_for("procurement", purchase_id=purchase_id))
 
 
 @app.get("/procurements")
@@ -692,6 +820,7 @@ def procurements():
     return render_template(
         "procurements.html", rows=rows, category=category, categories=categories,
         by_category=sorted(by_category.items()), grand_total=sum(by_category.values()),
+        total_paid=sum(r["amount_paid"] or 0.0 for r in rows), total_owed=sum(r["balance"] for r in rows),
     )
 
 
@@ -701,10 +830,10 @@ def procurements_csv():
     rows = procurement_rows(get_db(), g.user["business_id"], request.args.get("category", "").strip())
     return csv_response(
         "procurements.csv",
-        ["Date", "Supplier", "Invoice No", "Item Code", "Product Name", "Category", "Dept", "Qty", "Unit Cost", "Total Cost", "Expiry"],
+        ["Date", "Supplier", "Invoice No", "Item Code", "Product Name", "Category", "Dept", "Qty", "Unit Cost", "Total Cost", "Expiry", "Amount Paid", "Balance", "Payment Status"],
         [
             (r["purchase_date"], r["supplier_name"], r["invoice_no"], r["item_code"], r["name"], r["category"], r["department"],
-             r["quantity"], r["unit_cost"], r["total_cost"], r["expiry_date"])
+             r["quantity"], r["unit_cost"], r["total_cost"], r["expiry_date"], r["amount_paid"], r["balance"], r["status"])
             for r in rows
         ],
     )
@@ -928,6 +1057,8 @@ PURCHASE_COLUMNS = {
     "batch_no": ("batch no", "batch number", "batch"),
     "date_planted": ("date planted",),
     "expiry_date": ("expiry", "expiry date"),
+    "payment_status": ("payment status", "status"),
+    "amount_paid": ("amount paid", "paid"),
 }
 SALES_COLUMNS = {
     "invoice_no": ("invoice no", "invoice number", "invoice"),
@@ -943,8 +1074,8 @@ SALES_COLUMNS = {
 }
 IMPORT_TEMPLATES = {
     "purchases": (
-        ["Item Code", "Name", "Category", "Department", "Quantity", "Unit Cost", "Selling Price", "Supplier", "Invoice No", "Purchase Date", "Batch No", "Date Planted", "Expiry Date"],
-        ["SEED-001", "Maize Seed 10kg", "Seeds", "General", 50, 450, 600, "Agro Supplies Ltd", "SUP-1001", "2026-10-01", "B-22", "", "2027-10-01"],
+        ["Item Code", "Name", "Category", "Department", "Quantity", "Unit Cost", "Selling Price", "Supplier", "Invoice No", "Purchase Date", "Batch No", "Date Planted", "Expiry Date", "Payment Status", "Amount Paid"],
+        ["SEED-001", "Maize Seed 10kg", "Seeds", "General", 50, 450, 600, "Agro Supplies Ltd", "SUP-1001", "2026-10-01", "B-22", "", "2027-10-01", "Paid", ""],
     ),
     "sales": (
         ["Invoice No", "Date", "Customer", "Phone", "Item Code", "Item Name", "Quantity", "Unit Price", "Payment Status", "Amount Paid"],
@@ -1108,6 +1239,13 @@ def import_purchases():
                 except ValueError:
                     problems.append(f"{label} '{rec[field]}' is not a date (use YYYY-MM-DD or DD/MM/YYYY)")
 
+        amount_paid = None
+        if not problems:
+            try:
+                amount_paid = amount_for_status(rec["payment_status"], rec["amount_paid"], round(qty * unit_cost, 2))
+            except ValueError as e:
+                problems.append(str(e))
+
         if problems:
             errors.append(f"Row {rec['_row']}: " + "; ".join(problems))
             continue
@@ -1122,6 +1260,7 @@ def import_purchases():
             "quantity": qty, "unit_cost": round(unit_cost, 2), "price": None if price is None else round(price, 2),
             "supplier_name": rec["supplier_name"], "invoice_no": rec["invoice_no"], "purchase_date": dates["purchase_date"] or today,
             "batch_no": rec["batch_no"], "date_planted": dates["date_planted"], "expiry_date": dates["expiry_date"],
+            "amount_paid": amount_paid,
         })
 
     if errors:

@@ -5,7 +5,8 @@
     <div class="stat"><span>Listed POS items</span><strong class="accent">{{ stats.listed }}</strong></div>
     <div class="stat"><span>Low stock (&lt;{{ user.low_stock_threshold }})</span><strong class="warn">{{ stats.low }}</strong></div>
     <div class="stat"><span>Units sold</span><strong class="ok">{{ stats.units }}</strong></div>
-    <div class="stat"><span>Revenue</span><strong class="gold">{{ stats.revenue|money }}</strong></div>
+    <div class="stat"><span>Revenue (received)</span><strong class="gold">{{ stats.revenue|money }}</strong><small>Owed by customers: {{ stats.receivable|money }}</small></div>
+    <div class="stat"><span>Expenditure (paid for purchases)</span><strong class="warn">{{ stats.expenditure|money }}</strong><small>Owed to suppliers: {{ stats.payable|money }}</small></div>
 </div>
 
 <div class="split">

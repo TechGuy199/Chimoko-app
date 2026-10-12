@@ -1,0 +1,35 @@
+{# Admin-only payment form and change history. Expects: action, total, paid, payments. #}
+<section class="card block no-print payment-box">
+    <h2>Update Payment</h2>
+    <form method="post" action="{{ action }}">
+        {{ csrf_field() }}
+        <div class="grid">
+            <label>Total amount paid so far (0 to {{ total|money }})
+                <input name="amount_paid" type="number" min="0" max="{{ total }}" step="0.01" value="{{ '%.2f'|format(paid) }}" required>
+            </label>
+            <label>Note (optional, e.g. "Mobile money, ref 1234") <input name="note" maxlength="200"></label>
+        </div>
+        <button class="btn primary">Save Payment</button>
+        <button class="btn success" name="mark_paid" value="1" formnovalidate>Mark as Fully Paid</button>
+    </form>
+
+    {% if payments %}
+    <h2 class="spaced">Payment Changes</h2>
+    <div class="table-wrap">
+        <table>
+            <thead><tr><th>When</th><th>By</th><th class="num">From</th><th class="num">To</th><th>Note</th></tr></thead>
+            <tbody>
+            {% for c in payments %}
+                <tr>
+                    <td>{{ c.changed_at }}</td>
+                    <td>{{ c.changed_by }}</td>
+                    <td class="num">{{ c.old_paid|money }}</td>
+                    <td class="num">{{ c.new_paid|money }}</td>
+                    <td>{{ c.note or '—' }}</td>
+                </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+</section>

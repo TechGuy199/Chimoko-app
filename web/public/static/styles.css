@@ -164,6 +164,13 @@ td form { margin: 0; display: inline; }
 .invoice dl.totals dd { text-align: right; font-weight: 700; }
 .invoice footer { margin-top: 24px; text-align: center; color: var(--text-muted); }
 
+/* Payments */
+.stat small { display: block; margin-top: 2px; color: var(--text-muted); font-size: 11px; }
+.payment-wrap { max-width: 720px; margin: 0 auto; }
+.facts { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; margin: 0; }
+.facts dt { color: var(--text-muted); }
+.facts dd { margin: 0; }
+
 /* Import */
 .error-list { border: 1px solid var(--danger); }
 .error-list h2 { color: var(--warn-text); }

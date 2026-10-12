@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}Purchase payment — {% endblock %}
+{% block content %}
+<p><a href="{{ url_for('procurements') }}">&larr; Back to procurements</a></p>
+<div class="payment-wrap">
+    <section class="card">
+        <h1>{{ p.name }} <span class="muted">(code {{ p.item_code }})</span></h1>
+        <dl class="facts">
+            <dt>Purchase date</dt><dd>{{ p.purchase_date or '—' }}</dd>
+            <dt>Supplier</dt><dd>{{ p.supplier_name or '—' }}</dd>
+            <dt>Supplier invoice no</dt><dd>{{ p.invoice_no or '—' }}</dd>
+            <dt>Quantity</dt><dd>{{ p.quantity }} at {{ p.unit_cost|money }}</dd>
+            <dt>Total cost</dt><dd>{{ p.total_cost|money }}</dd>
+            <dt>Amount paid</dt><dd>{{ p.amount_paid|money }}</dd>
+            <dt>Balance owed</dt><dd class="{{ 'warn' if p.balance > 0 else 'ok' }}">{{ p.balance|money }}</dd>
+            <dt>Status</dt><dd>{{ p.status }}</dd>
+        </dl>
+    </section>
+
+    {% with action=url_for('procurement_payment', purchase_id=p.id), total=p.total_cost, paid=p.amount_paid %}
+    {% include "_payment.html" %}
+    {% endwith %}
+</div>
+{% endblock %}

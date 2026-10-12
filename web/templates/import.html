@@ -23,7 +23,8 @@
         <p>Each row is one purchase. It is added to inventory and to the Procurements log, exactly like the "Log a Purchase" form.</p>
         <ul class="muted">
             <li><strong>Required:</strong> Item Code, Quantity, Unit Cost. Name is required when the item code is new.</li>
-            <li><strong>Optional:</strong> Category, Department, Selling Price, Supplier, Invoice No, Purchase Date, Batch No, Date Planted, Expiry Date.</li>
+            <li><strong>Optional:</strong> Category, Department, Selling Price, Supplier, Invoice No, Purchase Date, Batch No, Date Planted, Expiry Date, Payment Status, Amount Paid.</li>
+            <li>Payment Status is Paid (default), Unpaid or Partial Payment. Partial Payment needs an Amount Paid.</li>
             <li>An item code you already have adds the quantity to that item's stock.</li>
             <li>A blank Selling Price keeps the item's current price (a new item uses the unit cost).</li>
             <li>Departments that do not exist yet are created.</li>

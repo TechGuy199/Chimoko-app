@@ -47,4 +47,12 @@
 
     <footer>Thank you for your business!</footer>
 </article>
+
+{% if user.role == 'admin' and inv.kind == 'SALE' %}
+<div class="payment-wrap">
+    {% with action=url_for('invoice_payment', invoice_id=inv.id), total=inv.total, paid=inv.amount_paid %}
+    {% include "_payment.html" %}
+    {% endwith %}
+</div>
+{% endif %}
 {% endblock %}

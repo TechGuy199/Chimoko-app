@@ -79,6 +79,11 @@ SCHEMA = [
         employer_napsa DOUBLE PRECISION NOT NULL DEFAULT 0, employer_nhima DOUBLE PRECISION NOT NULL DEFAULT 0,
         net_payable DOUBLE PRECISION NOT NULL, created_at TEXT
     )""",
+    """CREATE TABLE IF NOT EXISTS payment_log (
+        id {pk}, business_id INTEGER NOT NULL, kind TEXT NOT NULL, ref_id INTEGER NOT NULL,
+        old_paid DOUBLE PRECISION NOT NULL, new_paid DOUBLE PRECISION NOT NULL, note TEXT DEFAULT '',
+        changed_by TEXT, changed_at TEXT
+    )""",
 ]
 
 
@@ -121,11 +126,22 @@ class Database:
         self.conn.close()
 
 
+def add_column(db, table, column, definition):
+    """Adds a column to a table created by an earlier version, if it is not there yet."""
+    if IS_POSTGRES:
+        db.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {definition}")
+    elif column not in [row["name"] for row in db.all(f"PRAGMA table_info({table})")]:
+        db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
 def init_schema():
     db = Database()
     try:
         for statement in SCHEMA:
             db.execute(statement.replace("{pk}", PRIMARY_KEY))
+        # Purchases recorded before payments were tracked are treated as paid in full
+        add_column(db, "procurements", "amount_paid", "DOUBLE PRECISION")
+        db.execute("UPDATE procurements SET amount_paid = total_cost WHERE amount_paid IS NULL")
         db.commit()
     finally:
         db.close()
