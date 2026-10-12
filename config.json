@@ -1,0 +1,20 @@
+{
+    "app_settings": {
+        "title": "Beaver Passion & Skill",
+        "currency": "ZMW ",
+        "low_stock_threshold": 10
+    },
+    "database": {
+        "db_name": "pos_system.db"
+    },
+    "labels": {
+        "pos_tab": "🛒 Sales & POS",
+        "inventory_tab": "📋 Inventory",
+        "available_products_header": "Available Products"
+    },
+    "receipt_header": {
+        "company_name": "BEAVER PASSION & SKILL",
+        "subtitle": "Official Sales Invoice",
+        "contact": ""
+    }
+}

@@ -1,0 +1,41 @@
+/*
+ * Theme for the desktop app. Main.py reads the :root block below at startup.
+ * Colours must be hex (#rgb or #rrggbb); anything else falls back to the built-in default.
+ * Restart the app after editing.
+ */
+
+:root {
+    /* Backgrounds */
+    --bg: #121218;
+    --surface: #1a1a24;
+    --surface-alt: #222230;
+
+    /* Text */
+    --text: #e2e8f0;
+    --text-muted: #94a3b8;
+    --text-dim: #64748b;
+    --text-bright: #ffffff;
+
+    /* Highlights */
+    --accent: #89b4fa;
+    --ok-text: #a6e3a1;
+    --warn-text: #f38ba8;
+    --gold-text: #f9e2af;
+
+    /* Buttons */
+    --button-bg: #2b2b3d;
+    --button-hover: #3b3b52;
+    --button-active: #4e4e6d;
+    --primary: #3b82f6;
+    --primary-hover: #2563eb;
+    --primary-active: #1d4ed8;
+    --success: #238636;
+    --success-hover: #2ea043;
+    --success-active: #196c2e;
+    --danger: #da3633;
+    --danger-hover: #b62324;
+
+    /* Fonts (one family name each) */
+    --font-family: Segoe UI;
+    --font-mono: Courier New;
+}

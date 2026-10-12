@@ -1,0 +1,14 @@
+# Business data: customers, payroll and password hashes live in the database
+*.db
+*.db-journal
+*.sqlite3
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Exports
+*.pdf
+*.csv
