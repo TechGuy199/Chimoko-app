@@ -89,6 +89,16 @@ SCHEMA = [
         name_key TEXT NOT NULL, phone_key TEXT NOT NULL, created_at TEXT,
         UNIQUE (business_id, name_key, phone_key)
     )""",
+    # Name/phone spellings of accounts that were merged away, so later sales typed that way still find the kept account
+    """CREATE TABLE IF NOT EXISTS customer_aliases (
+        id {pk}, business_id INTEGER NOT NULL, name_key TEXT NOT NULL, phone_key TEXT NOT NULL, customer_id INTEGER NOT NULL,
+        UNIQUE (business_id, name_key, phone_key)
+    )""",
+    # Pairs an admin has confirmed are different people, so they stop being suggested as duplicates
+    """CREATE TABLE IF NOT EXISTS customer_distinct (
+        id {pk}, business_id INTEGER NOT NULL, low_id INTEGER NOT NULL, high_id INTEGER NOT NULL,
+        UNIQUE (business_id, low_id, high_id)
+    )""",
 ]
 
 

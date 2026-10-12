@@ -8,6 +8,13 @@
     {% if user.role == 'admin' and inv.customer_id %}<a class="btn" href="{{ url_for('customer_statement', customer_id=inv.customer_id) }}">Customer statement</a>{% endif %}
 </div>
 
+{% for twin in twins %}
+<div class="flash notice no-print">
+    This customer's phone number is also on another account, "{{ twin.name }}". If they are the same person,
+    <a href="{{ url_for('customer_statement', customer_id=inv.customer_id) }}">open the statement to merge them</a>.
+</div>
+{% endfor %}
+
 <article class="invoice">
     <header>
         <h1>{{ user.business_name }}</h1>

@@ -227,6 +227,15 @@ td form { margin: 0; display: inline; }
 .total-row td { font-weight: 700; border-top: 2px solid var(--surface-alt); }
 
 /* Customer statements */
+.flash.notice { background: rgba(250, 178, 25, 0.16); color: var(--gold-text); }
+.twin-prompt { margin-bottom: 16px; border: 1px solid var(--gold-text); }
+.twin-prompt p { margin: 0 0 10px; }
+.twin-prompt .toolbar { margin-bottom: 0; }
+.twin-prompt form, .dup-pair form { margin: 0; }
+.dup-reason { margin: 0 0 10px; color: var(--gold-text); font-weight: 700; }
+.dup-sides { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; margin-bottom: 12px; }
+.dup-side { padding: 12px; border-radius: 8px; background: var(--surface-alt); }
+.dup-side .facts { margin: 8px 0 12px; }
 .home-tiles { margin-bottom: 16px; }
 .lump-sum { margin-bottom: 16px; }
 .lump-sum .toolbar { margin-bottom: 0; }

@@ -37,6 +37,13 @@
     {% endfor %}
     {% block content %}{% endblock %}
 </main>
+<script>
+    // Forms carrying data-confirm ask before submitting; the message is read as plain text, never run as code
+    document.addEventListener("submit", function (e) {
+        const message = e.target.dataset ? e.target.dataset.confirm : "";
+        if (message && !confirm(message)) e.preventDefault();
+    });
+</script>
 {% block scripts %}{% endblock %}
 </body>
 </html>

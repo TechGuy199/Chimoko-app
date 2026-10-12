@@ -1,6 +1,7 @@
 import calendar
 import csv
 import datetime
+import difflib
 import functools
 import hmac
 import io
@@ -226,6 +227,13 @@ def customer_for(db, biz, name, phone, when):
     exact = db.one("SELECT id FROM customers WHERE business_id=? AND name_key=? AND phone_key=?", (biz, nkey, pkey))
     if exact:
         return exact["id"]
+    merged = db.one(
+        """SELECT c.id FROM customer_aliases a JOIN customers c ON c.id = a.customer_id
+           WHERE a.business_id=? AND a.name_key=? AND a.phone_key=?""",
+        (biz, nkey, pkey),
+    )
+    if merged:
+        return merged["id"]
     # Only one of the two details was given: use the account it points to when there is exactly one
     if not pkey or not nkey:
         column, value = ("name_key", nkey) if not pkey else ("phone_key", pkey)
@@ -771,7 +779,8 @@ def invoice(invoice_id):
         "SELECT item_code, item_name, qty, unit_price, line_total FROM invoice_items WHERE invoice_id=? AND business_id=? ORDER BY id",
         (invoice_id, biz),
     )
-    return render_template("invoice.html", inv=inv, lines=lines, payments=payment_history(db, "sale", invoice_id))
+    twins = phone_twins(db, biz, inv["customer_id"]) if inv["customer_id"] and g.user["role"] == "admin" else []
+    return render_template("invoice.html", inv=inv, lines=lines, payments=payment_history(db, "sale", invoice_id), twins=twins)
 
 
 @app.post("/invoices/<int:invoice_id>/payment")
@@ -1098,7 +1107,7 @@ def customers():
             params.append(f"%{phone_key(q)}%")
         sql += ")"
     sql += " GROUP BY c.id, c.name, c.phone ORDER BY c.name LIMIT 100"
-    return render_template("customers.html", results=db.all(sql, params), q=q)
+    return render_template("customers.html", results=db.all(sql, params), q=q, duplicate_count=len(find_duplicates(db, biz)))
 
 
 def get_customer(db, customer_id):
@@ -1176,7 +1185,10 @@ def statement_data(db, customer_id):
 @need("admin")
 def customer_statement(customer_id):
     db = get_db()
-    return render_template("customer.html", customer=get_customer(db, customer_id), **statement_data(db, customer_id))
+    return render_template(
+        "customer.html", customer=get_customer(db, customer_id), twins=phone_twins(db, g.user["business_id"], customer_id),
+        **statement_data(db, customer_id),
+    )
 
 
 @app.get("/customers/<int:customer_id>/statement.pdf")
@@ -1362,6 +1374,179 @@ def update_customer(customer_id):
         db.commit()
         flash("Customer details saved. Invoices already issued keep the name and phone printed on them.", "ok")
     return redirect(url_for("customer_statement", customer_id=customer_id))
+
+
+DUPLICATE_SCAN_LIMIT = 3000
+DUPLICATES_SHOWN = 100
+CUSTOMER_COLUMNS = "id, name, phone, name_key, phone_key, created_at"
+
+
+def names_alike(a, b):
+    """True when two name keys look like the same person: reordered, a small typo, or an initial for a full name."""
+    words_a, words_b = a.split(), b.split()
+    if sorted(words_a) == sorted(words_b) or difflib.SequenceMatcher(None, a, b).ratio() >= 0.86:
+        return True
+    if len(words_a) != len(words_b) or len(words_a) < 2:
+        return False
+    whole_matches = 0
+    for x, y in zip(words_a, words_b):
+        x, y = x.strip("."), y.strip(".")
+        if x == y:
+            whole_matches += 1
+        elif not ((len(x) == 1 and y.startswith(x)) or (len(y) == 1 and x.startswith(y))):
+            return False
+    return whole_matches >= 1
+
+
+def pair_key(a, b):
+    return (min(a, b), max(a, b))
+
+
+def distinct_pairs(db, biz):
+    return {(r["low_id"], r["high_id"]) for r in db.all("SELECT low_id, high_id FROM customer_distinct WHERE business_id=?", (biz,))}
+
+
+def find_duplicates(db, biz):
+    """Pairs of customer accounts that may be the same person, strongest evidence first."""
+    people = db.all(
+        """SELECT c.id, c.name, c.phone, c.name_key, c.phone_key, c.created_at,
+                  COUNT(i.id) AS invoices, COALESCE(SUM(i.total), 0) AS total, COALESCE(SUM(i.balance_due), 0) AS owed
+           FROM customers c LEFT JOIN invoices i ON i.customer_id = c.id AND i.kind='SALE'
+           WHERE c.business_id=? GROUP BY c.id, c.name, c.phone, c.name_key, c.phone_key, c.created_at ORDER BY c.id LIMIT ?""",
+        (biz, DUPLICATE_SCAN_LIMIT),
+    )
+    by_id = {p["id"]: p for p in people}
+    ruled_out = distinct_pairs(db, biz)
+    found = {}
+
+    def suggest(a, b, rank, reason):
+        key = pair_key(a, b)
+        if a != b and key not in ruled_out and (key not in found or rank < found[key][0]):
+            found[key] = (rank, reason)
+
+    same = {}
+    for p in people:
+        if p["phone_key"]:
+            same.setdefault(("phone", p["phone_key"]), []).append(p["id"])
+        if p["name_key"]:
+            same.setdefault(("name", p["name_key"]), []).append(p["id"])
+    for (kind, _), ids in same.items():
+        ids = ids[:30]
+        for i, a in enumerate(ids):
+            for b in ids[i + 1:]:
+                if kind == "phone":
+                    suggest(a, b, 0, "Same phone number")
+                else:
+                    suggest(a, b, 1, "Same name, different phone numbers")
+
+    # Comparing every name with every other is too slow, so only compare names that share a word or their first letters
+    buckets = {}
+    for p in people:
+        if p["name_key"]:
+            for word in set(p["name_key"].split()) | {p["name_key"][:3]}:
+                if len(word) >= 2:
+                    buckets.setdefault(word, []).append(p["id"])
+    for ids in buckets.values():
+        if len(ids) > 150:
+            continue
+        for i, a in enumerate(ids):
+            for b in ids[i + 1:]:
+                if pair_key(a, b) not in found and names_alike(by_id[a]["name_key"], by_id[b]["name_key"]):
+                    both_have_phones = by_id[a]["phone_key"] and by_id[b]["phone_key"]
+                    suggest(a, b, 3 if both_have_phones else 2, "Similar name, different phone numbers" if both_have_phones else "Similar name")
+
+    pairs = [{"a": by_id[low], "b": by_id[high], "reason": reason, "rank": rank} for (low, high), (rank, reason) in found.items()]
+    pairs.sort(key=lambda pair: (pair["rank"], pair["a"]["name_key"], pair["a"]["id"]))
+    return pairs
+
+
+def phone_twins(db, biz, customer_id):
+    """Other accounts carrying this customer's phone number, unless an admin already said they are different people."""
+    me = db.one("SELECT phone_key FROM customers WHERE id=? AND business_id=?", (customer_id, biz))
+    if not me or not me["phone_key"]:
+        return []
+    others = db.all(
+        "SELECT id, name, phone FROM customers WHERE business_id=? AND phone_key=? AND id<>? ORDER BY id",
+        (biz, me["phone_key"], customer_id),
+    )
+    ruled_out = distinct_pairs(db, biz)
+    return [other for other in others if pair_key(customer_id, other["id"]) not in ruled_out]
+
+
+@app.get("/customers/duplicates")
+@need("admin")
+def customer_duplicates():
+    pairs = find_duplicates(get_db(), g.user["business_id"])
+    return render_template("duplicates.html", pairs=pairs[:DUPLICATES_SHOWN], total=len(pairs))
+
+
+def customer_pair_from_form(db, biz, first, second):
+    a = db.one(f"SELECT {CUSTOMER_COLUMNS} FROM customers WHERE id=? AND business_id=?", (request.form.get(first, type=int), biz))
+    b = db.one(f"SELECT {CUSTOMER_COLUMNS} FROM customers WHERE id=? AND business_id=?", (request.form.get(second, type=int), biz))
+    return (a, b) if a and b and a["id"] != b["id"] else (None, None)
+
+
+def back_from_duplicates():
+    back_to = request.form.get("back_to", type=int)
+    return redirect(url_for("customer_statement", customer_id=back_to) if back_to else url_for("customer_duplicates"))
+
+
+@app.post("/customers/merge")
+@need("admin")
+def merge_customers():
+    db, biz = get_db(), g.user["business_id"]
+    keep, remove = customer_pair_from_form(db, biz, "keep", "remove")
+    if keep is None:
+        flash("Those two accounts could not be found. One may already have been merged.", "error")
+        return redirect(url_for("customer_duplicates"))
+
+    try:
+        moved = db.execute("UPDATE invoices SET customer_id=? WHERE customer_id=? AND business_id=?", (keep["id"], remove["id"], biz)).rowcount
+        # The removed account's spelling, and any spellings merged into it earlier, now lead to the kept account
+        db.execute("UPDATE customer_aliases SET customer_id=? WHERE customer_id=? AND business_id=?", (keep["id"], remove["id"], biz))
+        db.execute("DELETE FROM customer_aliases WHERE business_id=? AND name_key=? AND phone_key=?", (biz, remove["name_key"], remove["phone_key"]))
+        db.execute(
+            "INSERT INTO customer_aliases (business_id, name_key, phone_key, customer_id) VALUES (?, ?, ?, ?)",
+            (biz, remove["name_key"], remove["phone_key"], keep["id"]),
+        )
+        db.execute("DELETE FROM customer_distinct WHERE business_id=? AND (low_id=? OR high_id=?)", (biz, remove["id"], remove["id"]))
+        db.execute("DELETE FROM customers WHERE id=? AND business_id=?", (remove["id"], biz))
+
+        since = min(keep["created_at"] or "9999", remove["created_at"] or "9999")
+        phone, pkey = keep["phone"], keep["phone_key"]
+        if not pkey and remove["phone_key"]:
+            taken = db.one(
+                "SELECT id FROM customers WHERE business_id=? AND name_key=? AND phone_key=? AND id<>?",
+                (biz, keep["name_key"], remove["phone_key"], keep["id"]),
+            )
+            if not taken:
+                phone, pkey = remove["phone"], remove["phone_key"]
+        db.execute(
+            "UPDATE customers SET phone=?, phone_key=?, created_at=? WHERE id=? AND business_id=?",
+            (phone, pkey, None if since == "9999" else since, keep["id"], biz),
+        )
+        db.commit()
+    except DB_ERRORS:
+        db.rollback()
+        flash("The merge could not be saved, so nothing was changed. Please try again.", "error")
+        return redirect(url_for("customer_duplicates"))
+
+    flash(f"Merged '{remove['name']}' into '{keep['name']}': {moved} invoice(s) moved onto this statement.", "ok")
+    return redirect(url_for("customer_statement", customer_id=keep["id"]))
+
+
+@app.post("/customers/distinct")
+@need("admin")
+def mark_customers_distinct():
+    db, biz = get_db(), g.user["business_id"]
+    a, b = customer_pair_from_form(db, biz, "a", "b")
+    if a is not None:
+        low, high = pair_key(a["id"], b["id"])
+        if not db.one("SELECT id FROM customer_distinct WHERE business_id=? AND low_id=? AND high_id=?", (biz, low, high)):
+            db.execute("INSERT INTO customer_distinct (business_id, low_id, high_id) VALUES (?, ?, ?)", (biz, low, high))
+            db.commit()
+        flash(f"Noted: '{a['name']}' and '{b['name']}' are different customers. They will not be suggested again.", "ok")
+    return back_from_duplicates()
 
 
 def link_existing_customers():

@@ -6,7 +6,15 @@
     <input name="q" id="customer-q" type="search" value="{{ q }}" placeholder="Type a customer's name or phone number" autocomplete="off" autofocus>
     <button class="btn primary">Search</button>
     {% if q %}<a class="btn" href="{{ url_for('customers') }}">Clear</a>{% endif %}
+    <a class="btn" href="{{ url_for('customer_duplicates') }}">Find Duplicates</a>
 </form>
+
+{% if duplicate_count %}
+<div class="flash notice">
+    {{ duplicate_count }} pair(s) of accounts look like the same customer.
+    <a href="{{ url_for('customer_duplicates') }}">Review and merge</a>
+</div>
+{% endif %}
 
 <section class="card">
     <div class="table-wrap">

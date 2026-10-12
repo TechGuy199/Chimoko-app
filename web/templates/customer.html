@@ -7,6 +7,31 @@
     <button class="btn" onclick="window.print()">Print</button>
 </div>
 
+{% for twin in twins %}
+<section class="card no-print twin-prompt">
+    <p>
+        <strong>Same phone number as another account.</strong>
+        <a href="{{ url_for('customer_statement', customer_id=twin.id) }}">{{ twin.name }}</a> ({{ twin.phone }}) has the same phone number as {{ customer.name }}.
+        Are they the same customer?
+    </p>
+    <div class="toolbar">
+        <form method="post" action="{{ url_for('merge_customers') }}" data-confirm="Merge &quot;{{ twin.name }}&quot; into &quot;{{ customer.name }}&quot;?&#10;&#10;All of its invoices and payments move onto this statement and the other account is removed. This cannot be undone.">
+            {{ csrf_field() }}
+            <input type="hidden" name="keep" value="{{ customer.id }}">
+            <input type="hidden" name="remove" value="{{ twin.id }}">
+            <button class="btn success">Yes, merge {{ twin.name }} into this statement</button>
+        </form>
+        <form method="post" action="{{ url_for('mark_customers_distinct') }}">
+            {{ csrf_field() }}
+            <input type="hidden" name="a" value="{{ customer.id }}">
+            <input type="hidden" name="b" value="{{ twin.id }}">
+            <input type="hidden" name="back_to" value="{{ customer.id }}">
+            <button class="btn">No, different people</button>
+        </form>
+    </div>
+</section>
+{% endfor %}
+
 {% if summary.owed > 0 %}
 <section class="card no-print lump-sum">
     <h2>Record a Payment</h2>
