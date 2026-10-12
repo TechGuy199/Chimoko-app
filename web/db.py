@@ -94,6 +94,18 @@ SCHEMA = [
         id {pk}, business_id INTEGER NOT NULL, name_key TEXT NOT NULL, phone_key TEXT NOT NULL, customer_id INTEGER NOT NULL,
         UNIQUE (business_id, name_key, phone_key)
     )""",
+    # In-app alerts. for_user_id is the one user it is for, or NULL when it is for the business's admins.
+    # wa_status records what happened to the WhatsApp copy: sent, failed, or skipped (with the reason in wa_error).
+    """CREATE TABLE IF NOT EXISTS notifications (
+        id {pk}, business_id INTEGER NOT NULL, for_user_id INTEGER, kind TEXT NOT NULL, title TEXT NOT NULL, body TEXT DEFAULT '',
+        link TEXT DEFAULT '', created_at TEXT, read_at TEXT, wa_status TEXT DEFAULT '', wa_error TEXT DEFAULT ''
+    )""",
+    # An operator asking an admin to allow one action on one item that their account cannot normally do
+    """CREATE TABLE IF NOT EXISTS permission_requests (
+        id {pk}, business_id INTEGER NOT NULL, user_id INTEGER NOT NULL, username TEXT NOT NULL, action TEXT NOT NULL,
+        item_id INTEGER NOT NULL, item_name TEXT NOT NULL, reason TEXT DEFAULT '', status TEXT NOT NULL DEFAULT 'pending',
+        created_at TEXT, decided_by TEXT, decided_at TEXT, expires_at TEXT
+    )""",
     # Pairs an admin has confirmed are different people, so they stop being suggested as duplicates
     """CREATE TABLE IF NOT EXISTS customer_distinct (
         id {pk}, business_id INTEGER NOT NULL, low_id INTEGER NOT NULL, high_id INTEGER NOT NULL,
@@ -161,6 +173,10 @@ def init_schema():
         # Each user's own appearance choices: colour theme and how see-through the interface is (0-100)
         add_column(db, "users", "theme", "TEXT")
         add_column(db, "users", "glass", "INTEGER")
+        # Alert settings per business: the WhatsApp number and which alerts are switched on (NULL counts as on)
+        add_column(db, "businesses", "alert_phone", "TEXT")
+        add_column(db, "businesses", "alert_low_stock", "INTEGER")
+        add_column(db, "businesses", "alert_permission", "INTEGER")
         # Statutory rules became separate employee and employer rates. Settings saved under the old
         # "one rate, paid by one side" rule keep exactly the same effect.
         for column in ("napsa_employee_pct", "napsa_employer_pct", "nhima_employee_pct", "nhima_employer_pct"):

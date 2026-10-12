@@ -1,16 +1,39 @@
 {% extends "base.html" %}
 {% block title %}{{ item.name }} — {% endblock %}
 {% block content %}
-<p><a href="{{ url_for('inventory') }}">&larr; Back to inventory</a></p>
-<h1>{{ item.name }} <span class="muted">(code {{ item.item_code }})</span></h1>
+{# Shown in place of an action the signed-in account is not allowed to do: ask an admin, or see how the request stands #}
+{% macro ask_admin(action) %}
+{% set a = access[action] %}
+{% if a.state == 'pending' %}
+<p class="flash notice">Your request to {{ dict(actions)[action] }} is waiting for an admin. A popup will appear here when they answer.</p>
+{% elif a.state == 'none' %}
+<form method="post" action="{{ url_for('request_permission', item_id=item.id) }}" class="request-box">
+    {{ csrf_field() }}
+    <input type="hidden" name="action" value="{{ action }}">
+    <p class="muted">Your account cannot {{ dict(actions)[action] }}. You can ask an admin to allow it once.</p>
+    <label>Reason (optional) <input name="reason" maxlength="200" placeholder="Why this is needed"></label>
+    <button class="btn">Request admin permission</button>
+</form>
+{% endif %}
+{% endmacro %}
+
+<div class="page-head">
+    <div>
+        <a class="back" href="{{ url_for('inventory') }}">&larr; Back to inventory</a>
+        <h1>{{ item.name }} <span class="muted">(code {{ item.item_code }})</span></h1>
+    </div>
+</div>
 <p>In stock: <strong class="{{ 'warn' if item.quantity < user.low_stock_threshold else 'ok' }}">{{ item.quantity }}</strong></p>
 
 <div class="split">
     <section class="card grow">
         <h2>Details</h2>
+        {% if access.procure.state == 'approved' %}
+        <p class="flash ok">An admin approved one edit of this item. Save your changes before {{ access.procure.until }}.</p>
+        {% endif %}
         <form method="post" action="{{ url_for('update_item', item_id=item.id) }}">
             {{ csrf_field() }}
-            <fieldset {{ 'disabled' if not can('procure') }}>
+            <fieldset {{ 'disabled' if access.procure.state not in ('own', 'approved') }}>
                 <div class="grid">
                     <label>Item name <input name="name" value="{{ item.name }}" required></label>
                     <label>Category <input name="category" value="{{ item.category }}"></label>
@@ -32,12 +55,14 @@
             </fieldset>
         </form>
         <p class="muted">The item code and quantity cannot be edited here. Stock changes through purchases, transfers and sales.</p>
+        {{ ask_admin('procure') }}
     </section>
 
     <div class="side">
-        {% if can('transfer') %}
         <section class="card">
             <h2>Transfer / Use</h2>
+            {% if access.transfer.state in ('own', 'approved') %}
+            {% if access.transfer.state == 'approved' %}<p class="flash ok">An admin approved one transfer. Use it before {{ access.transfer.until }}.</p>{% endif %}
             <form method="post" action="{{ url_for('transfer', item_id=item.id) }}">
                 {{ csrf_field() }}
                 <label>Destination
@@ -51,18 +76,23 @@
                 <label>Phone number (farm use) <input name="phone"></label>
                 <button class="btn success wide" {{ 'disabled' if item.quantity < 1 }}>Confirm Transfer</button>
             </form>
+            {% else %}
+            {{ ask_admin('transfer') }}
+            {% endif %}
         </section>
-        {% endif %}
 
-        {% if can('delete') %}
         <section class="card">
             <h2>Delete</h2>
+            {% if access.delete.state in ('own', 'approved') %}
+            {% if access.delete.state == 'approved' %}<p class="flash ok">An admin approved deleting this item. Use it before {{ access.delete.until }}.</p>{% endif %}
             <form method="post" action="{{ url_for('delete_item', item_id=item.id) }}" onsubmit="return confirm('Delete this item from inventory permanently?');">
                 {{ csrf_field() }}
                 <button class="btn danger wide">Delete Item</button>
             </form>
+            {% else %}
+            {{ ask_admin('delete') }}
+            {% endif %}
         </section>
-        {% endif %}
     </div>
 </div>
 {% endblock %}

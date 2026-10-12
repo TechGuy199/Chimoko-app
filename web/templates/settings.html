@@ -42,6 +42,40 @@
     </section>
 </div>
 
+<section class="card block rules-form" id="alerts">
+    <h2>Alerts</h2>
+    <p class="muted">
+        Alerts pop up inside the app for every admin. A copy can also go by WhatsApp to one phone number.
+        Tick the alerts you want; an alert that is not ticked is not raised at all.
+    </p>
+    <form method="post" action="{{ url_for('save_alerts') }}">
+        {{ csrf_field() }}
+        <label class="check"><input type="checkbox" name="alert_low_stock" {{ 'checked' if user.alert_low_stock != 0 }}> <span><strong>Low stock</strong>: when a sale or transfer takes an item below the low-stock threshold ({{ user.low_stock_threshold }}).</span></label>
+        <label class="check"><input type="checkbox" name="alert_permission" {{ 'checked' if user.alert_permission != 0 }}> <span><strong>Requests for admin permission</strong>: when an operator asks to edit, transfer or delete an item their account is not allowed to.</span></label>
+        <label class="spaced">WhatsApp number for alerts, with country code (leave blank for popups only)
+            <input name="alert_phone" type="tel" value="{{ user.alert_phone or '' }}" placeholder="+260 972 047 233" autocomplete="off">
+        </label>
+        <button class="btn primary">Save Alerts</button>
+    </form>
+
+    <div class="rules-summary spaced">
+        {% if whatsapp[0] %}
+        <p><strong class="ok">WhatsApp is connected</strong> ({{ whatsapp[0] }}).</p>
+        {% else %}
+        <p><strong class="warn">WhatsApp is not connected yet</strong>: {{ whatsapp[1] }}. Popups inside the app work without it.</p>
+        {% endif %}
+        <p id="desktop-alerts-state"></p>
+    </div>
+    <div class="toolbar">
+        <form method="post" action="{{ url_for('test_alert') }}">
+            {{ csrf_field() }}
+            <button class="btn">Send a test alert</button>
+        </form>
+        <button type="button" class="btn" id="allow-desktop-alerts">Allow desktop notifications</button>
+        <a class="btn ghost" href="{{ url_for('notifications') }}">See all alerts</a>
+    </div>
+</section>
+
 <section class="card block narrow-form">
     <h2>Appearance</h2>
     <p class="muted">Your own theme and transparency. Each user sets theirs from the menu under their name; this does not change anyone else's.</p>

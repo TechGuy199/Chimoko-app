@@ -26,6 +26,7 @@
     ('People', [
         ('HR & Payroll', 'hr', ['hr', 'hr_settings', 'new_payslip', 'payslips', 'employee_statements', 'employee_statement'], true),
         ('Operators', 'operators', ['operators'], true),
+        ('Permission Requests', 'permission_requests', ['permission_requests'], true),
     ]),
     ('Business', [
         ('Settings', 'settings', ['settings'], true),
@@ -38,6 +39,15 @@
     <a class="brand" href="{{ url_for('pos') }}">{{ user.business_name }}</a>
     {% if here.label %}<span class="here">{{ here.label }}</span>{% endif %}
     <span class="spacer"></span>
+
+    <details class="menu" id="alerts-menu">
+        <summary class="btn ghost" aria-label="Alerts">Alerts <span class="badge" id="alerts-count" hidden>0</span></summary>
+        <div class="menu-panel alerts-panel">
+            <span class="menu-heading">Unread alerts</span>
+            <div id="alerts-list"><span class="menu-note">Nothing new.</span></div>
+            <a class="menu-item" href="{{ url_for('notifications') }}">See all alerts</a>
+        </div>
+    </details>
 
     <details class="menu">
         <summary class="btn">Menu</summary>
@@ -101,6 +111,10 @@
         });
     })();
 </script>
+{% if user %}
+<div id="toasts" class="toasts no-print" aria-live="polite"></div>
+<script src="{{ asset('notify.js') }}" data-poll="{{ url_for('notifications_poll') }}"></script>
+{% endif %}
 {% block scripts %}{% endblock %}
 </body>
 </html>

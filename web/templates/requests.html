@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}Permission Requests — {% endblock %}
+{% block content %}
+<h1>Permission Requests</h1>
+<p class="muted">
+    When an operator's account is not allowed to edit, transfer or delete an item, they can ask here.
+    Approving allows that one action on that one item, once, within {{ minutes }} minutes. It does not change the operator's permissions.
+</p>
+
+<section class="card">
+    <div class="table-wrap">
+        <table>
+            <thead><tr><th>Asked</th><th>Operator</th><th>Wants to</th><th>Item</th><th>Reason</th><th>Status</th><th></th></tr></thead>
+            <tbody>
+            {% for r in rows %}
+                <tr id="request-{{ r.id }}">
+                    <td>{{ r.created_at }}</td>
+                    <td>{{ r.username }}</td>
+                    <td>{{ actions.get(r.action, r.action) }}</td>
+                    <td><a href="{{ url_for('item', item_id=r.item_id) }}">{{ r.item_name }}</a></td>
+                    <td class="wrap">{{ r.reason or '—' }}</td>
+                    <td>
+                        {% if r.status == 'pending' %}<strong class="gold">Waiting</strong>
+                        {% elif r.status == 'approved' %}<span class="ok">Approved by {{ r.decided_by }}</span><small class="muted"> until {{ (r.expires_at or '')[11:16] }}</small>
+                        {% elif r.status == 'used' %}<span class="muted">Approved by {{ r.decided_by }}, used</span>
+                        {% else %}<span class="warn">Denied by {{ r.decided_by }}</span>{% endif %}
+                    </td>
+                    <td class="num actions">
+                        {% if r.status == 'pending' %}
+                        <form method="post" action="{{ url_for('decide_request', request_id=r.id) }}">
+                            {{ csrf_field() }}
+                            <button class="btn success small" name="decision" value="approve">Approve</button>
+                            <button class="btn danger small" name="decision" value="deny">Deny</button>
+                        </form>
+                        {% endif %}
+                    </td>
+                </tr>
+            {% else %}
+                <tr><td colspan="7" class="muted center">No requests yet.</td></tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endblock %}

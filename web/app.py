@@ -96,7 +96,8 @@ def load_user_and_check_csrf():
     if uid:
         g.user = get_db().one(
             """SELECT u.id, u.business_id, u.username, u.role, u.can_sell, u.can_procure, u.can_transfer, u.can_delete, u.theme, u.glass,
-                      b.name AS business_name, b.subtitle, b.contact, b.currency, b.low_stock_threshold
+                      b.name AS business_name, b.subtitle, b.contact, b.currency, b.low_stock_threshold,
+                      b.alert_phone, b.alert_low_stock, b.alert_permission
                FROM users u JOIN businesses b ON b.id = u.business_id WHERE u.id=?""",
             (uid,),
         )
@@ -132,7 +133,7 @@ def need(perm):
 def template_globals():
     return {
         "csrf_field": csrf_field, "user": g.get("user"), "can": can, "look": appearance_of(g.get("user")), "themes": THEMES,
-        "asset": asset,
+        "asset": asset, "csrf_token": csrf_token,
     }
 
 
@@ -563,6 +564,7 @@ def checkout():
             )
             if moved.rowcount != 1:
                 raise StockError(p["name"])
+            low_stock_alert(db, p["name"], p["item_code"], p["quantity"], p["quantity"] - qty, "listed for sale in the POS")
             db.execute(
                 """INSERT INTO invoice_items (invoice_id, business_id, item_code, item_name, department, batch_no, qty, unit_price, line_total)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
@@ -708,14 +710,20 @@ def record_purchase(db, biz, p):
 @need(None)
 def item(item_id):
     db = get_db()
-    return render_template("item.html", item=get_item(db, item_id), departments=department_names(db, g.user["business_id"]))
+    return render_template(
+        "item.html", item=get_item(db, item_id), departments=department_names(db, g.user["business_id"]),
+        access={action: item_access_state(db, item_id, action) for action, _ in ITEM_ACTIONS}, actions=ITEM_ACTIONS,
+    )
 
 
 @app.post("/inventory/<int:item_id>/update")
-@need("procure")
+@need(None)
 def update_item(item_id):
     db, biz = get_db(), g.user["business_id"]
     current = get_item(db, item_id)
+    grant = item_grant(db, item_id, "procure")
+    if grant is None:
+        return refuse_item_action(item_id)
     name = text("name")
     try:
         unit_cost = number("unit_cost")
@@ -742,6 +750,7 @@ def update_item(item_id):
             "UPDATE pos_products SET name=?, category=?, department=?, price=? WHERE business_id=? AND item_code=?",
             (name, category, dept, price, biz, current["item_code"]),
         )
+        use_grant(db, grant)
         db.commit()
     except DB_ERRORS:
         db.rollback()
@@ -753,10 +762,13 @@ def update_item(item_id):
 
 
 @app.post("/inventory/<int:item_id>/transfer")
-@need("transfer")
+@need(None)
 def transfer(item_id):
     db, biz = get_db(), g.user["business_id"]
     p = get_item(db, item_id)
+    grant = item_grant(db, item_id, "transfer")
+    if grant is None:
+        return refuse_item_action(item_id)
     destination = text("destination")
     try:
         qty = number("quantity", int)
@@ -774,6 +786,7 @@ def transfer(item_id):
         )
         if moved.rowcount != 1:
             raise StockError(p["name"])
+        low_stock_alert(db, p["name"], p["item_code"], p["quantity"], p["quantity"] - qty, "in inventory")
 
         if destination == "farm":
             invoice_id = db.insert(
@@ -796,6 +809,7 @@ def transfer(item_id):
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (biz, p["item_code"], p["name"], p["category"], p["department"], p["batch_no"], p["date_planted"], qty, p["price"]),
                 )
+        use_grant(db, grant)
         db.commit()
     except StockError:
         db.rollback()
@@ -813,11 +827,15 @@ def transfer(item_id):
 
 
 @app.post("/inventory/<int:item_id>/delete")
-@need("delete")
+@need(None)
 def delete_item(item_id):
     db = get_db()
     p = get_item(db, item_id)
+    grant = item_grant(db, item_id, "delete")
+    if grant is None:
+        return refuse_item_action(item_id)
     db.execute("DELETE FROM products WHERE id=? AND business_id=?", (item_id, g.user["business_id"]))
+    use_grant(db, grant)
     db.commit()
     flash(f"'{p['name']}' was deleted from inventory.", "ok")
     return redirect(url_for("inventory"))
@@ -1204,6 +1222,336 @@ def delete_payslip(payslip_id):
     db.commit()
     flash("Payslip deleted.", "ok")
     return redirect(url_for("hr"))
+
+
+# --- ALERTS: IN-APP NOTIFICATIONS AND WHATSAPP ---
+# WhatsApp needs an account with a sending service, set up once through environment variables (never stored
+# in the database). Two services are supported:
+#   WHATSAPP_PROVIDER=meta       WHATSAPP_TOKEN, WHATSAPP_PHONE_ID, WHATSAPP_TEMPLATE (an approved template whose body
+#                                is a single {{1}} placeholder), optional WHATSAPP_TEMPLATE_LANG and WHATSAPP_API_VERSION
+#   WHATSAPP_PROVIDER=callmebot  WHATSAPP_CALLMEBOT_KEY (the key CallMeBot issued to the alert phone number)
+# Until one is configured, alerts still appear in the app and the WhatsApp copy is recorded as skipped.
+ALERT_KINDS = (("low_stock", "Low stock"), ("permission", "Requests for admin permission"))
+ITEM_ACTIONS = (("procure", "edit this item's details"), ("transfer", "transfer or use this item's stock"), ("delete", "delete this item"))
+GRANT_MINUTES = 60
+WHATSAPP_TIMEOUT = 6
+
+
+def whatsapp_service():
+    """Returns (provider, None) when WhatsApp sending is configured, otherwise (None, why not)."""
+    provider = os.environ.get("WHATSAPP_PROVIDER", "").strip().lower()
+    if provider == "meta":
+        missing = [name for name in ("WHATSAPP_TOKEN", "WHATSAPP_PHONE_ID", "WHATSAPP_TEMPLATE") if not os.environ.get(name)]
+        return (None, "missing " + ", ".join(missing)) if missing else ("meta", None)
+    if provider == "callmebot":
+        return ("callmebot", None) if os.environ.get("WHATSAPP_CALLMEBOT_KEY") else (None, "missing WHATSAPP_CALLMEBOT_KEY")
+    return None, "no WhatsApp service has been connected yet"
+
+
+def whatsapp_number(phone):
+    """Digits with the country code, as WhatsApp wants them. A local Zambian 09... number gains its 260."""
+    digits = re.sub(r"\D", "", phone or "")
+    if len(digits) == 10 and digits.startswith("0"):
+        digits = "260" + digits[1:]
+    return digits if 9 <= len(digits) <= 15 else ""
+
+
+def send_whatsapp(phone, message):
+    """Sends one WhatsApp message. Returns (status, detail) with status 'sent', 'failed' or 'skipped'; never raises."""
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+
+    number_to = whatsapp_number(phone)
+    if not number_to:
+        return "skipped", "no valid WhatsApp number is saved in Settings"
+    provider, problem = whatsapp_service()
+    if provider is None:
+        return "skipped", problem
+
+    # One line of plain text: template parameters may not contain line breaks or long runs of spaces
+    message = " ".join(message.split())[:900]
+    try:
+        if provider == "meta":
+            version = os.environ.get("WHATSAPP_API_VERSION", "v21.0")
+            payload = {
+                "messaging_product": "whatsapp", "recipient_type": "individual", "to": number_to, "type": "template",
+                "template": {
+                    "name": os.environ["WHATSAPP_TEMPLATE"], "language": {"code": os.environ.get("WHATSAPP_TEMPLATE_LANG", "en")},
+                    "components": [{"type": "body", "parameters": [{"type": "text", "text": message}]}],
+                },
+            }
+            call = urllib.request.Request(
+                f"https://graph.facebook.com/{version}/{os.environ['WHATSAPP_PHONE_ID']}/messages",
+                data=json.dumps(payload).encode("utf-8"), method="POST",
+                headers={"Authorization": "Bearer " + os.environ["WHATSAPP_TOKEN"], "Content-Type": "application/json"},
+            )
+        else:
+            query = urllib.parse.urlencode({"phone": "+" + number_to, "text": message, "apikey": os.environ["WHATSAPP_CALLMEBOT_KEY"]})
+            call = urllib.request.Request("https://api.callmebot.com/whatsapp.php?" + query, method="GET")
+        with urllib.request.urlopen(call, timeout=WHATSAPP_TIMEOUT) as reply:
+            answer = reply.read(2000).decode("utf-8", errors="replace")
+        if provider == "callmebot" and re.search(r"error|invalid|not\s+(valid|allowed|activated)", answer, re.I):
+            return "failed", re.sub(r"<[^>]+>", " ", answer)[:200].strip()
+        return "sent", ""
+    except urllib.error.HTTPError as e:
+        detail = e.read(600).decode("utf-8", errors="replace")
+        return "failed", f"the WhatsApp service answered {e.code}: {' '.join(detail.split())[:200]}"
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        return "failed", f"could not reach the WhatsApp service ({type(e).__name__})"
+
+
+def alert_enabled(kind):
+    """An alert kind is on unless an admin has switched it off in Settings."""
+    return g.user["alert_" + kind] != 0
+
+
+def notify(db, kind, title, body, link, for_user_id=None, whatsapp=False):
+    """Records an in-app alert for one user, or for the business's admins when for_user_id is None.
+
+    With whatsapp=True a copy is queued for the number in Settings. It is sent after the response is
+    ready, and only if the alert was really saved, so a failed sale never sends a message.
+    """
+    notification_id = db.insert(
+        "INSERT INTO notifications (business_id, for_user_id, kind, title, body, link, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (g.user["business_id"], for_user_id, kind, title, body, link, now().strftime("%Y-%m-%d %H:%M:%S")),
+    )
+    if whatsapp:
+        outbox = g.setdefault("whatsapp_outbox", [])
+        outbox.append((notification_id, f"{g.user['business_name']}: {title}. {body}"))
+    return notification_id
+
+
+@app.after_request
+def deliver_whatsapp(response):
+    outbox = g.pop("whatsapp_outbox", None)
+    if not outbox or not g.get("user"):
+        return response
+    db = get_db()
+    try:
+        for notification_id, message in outbox:
+            # Skip anything whose alert was rolled back together with the action that raised it
+            if not db.one("SELECT id FROM notifications WHERE id=?", (notification_id,)):
+                continue
+            status, detail = send_whatsapp(g.user["alert_phone"], message)
+            db.execute("UPDATE notifications SET wa_status=?, wa_error=? WHERE id=?", (status, detail, notification_id))
+        db.commit()
+    except DB_ERRORS:
+        db.rollback()
+    return response
+
+
+def low_stock_alert(db, name, code, before, after, where):
+    """Raises the alert once, at the moment a quantity drops below the threshold, not on every later sale."""
+    threshold = g.user["low_stock_threshold"]
+    if alert_enabled("low_stock") and before >= threshold > after:
+        notify(
+            db, "low_stock", f"Low stock: {name}",
+            f"{name} (code {code}) is down to {after} {where}. The alert level is {threshold}.",
+            url_for("inventory"), whatsapp=True,
+        )
+
+
+def my_notifications_clause():
+    """SQL and parameters selecting the alerts the signed-in user should see."""
+    if g.user["role"] == "admin":
+        return "business_id=? AND (for_user_id=? OR for_user_id IS NULL)", [g.user["business_id"], g.user["id"]]
+    return "business_id=? AND for_user_id=?", [g.user["business_id"], g.user["id"]]
+
+
+@app.get("/notifications/poll")
+@need(None)
+def notifications_poll():
+    where, params = my_notifications_clause()
+    rows = get_db().all(
+        f"SELECT id, kind, title, body, created_at FROM notifications WHERE {where} AND read_at IS NULL ORDER BY id DESC LIMIT 20", params
+    )
+    for row in rows:
+        row["open"] = url_for("open_notification", notification_id=row["id"])
+    return {"unread": len(rows), "items": rows}
+
+
+@app.get("/notifications/<int:notification_id>/open")
+@need(None)
+def open_notification(notification_id):
+    """Marks one alert as read and goes to what it is about."""
+    db = get_db()
+    where, params = my_notifications_clause()
+    row = db.one(f"SELECT id, link FROM notifications WHERE {where} AND id=?", params + [notification_id])
+    if row is None:
+        abort(404)
+    db.execute("UPDATE notifications SET read_at=? WHERE id=?", (now().strftime("%Y-%m-%d %H:%M:%S"), notification_id))
+    db.commit()
+    # Links are written by this app; anything that is not a local path is ignored
+    link = row["link"] or ""
+    return redirect(link if link.startswith("/") and not link.startswith("//") else url_for("notifications"))
+
+
+@app.route("/notifications", methods=["GET", "POST"])
+@need(None)
+def notifications():
+    db = get_db()
+    where, params = my_notifications_clause()
+    if request.method == "POST":
+        db.execute(f"UPDATE notifications SET read_at=? WHERE {where} AND read_at IS NULL", [now().strftime("%Y-%m-%d %H:%M:%S")] + params)
+        db.commit()
+        return redirect(url_for("notifications"))
+    rows = db.all(
+        f"SELECT id, kind, title, body, created_at, read_at, wa_status, wa_error FROM notifications WHERE {where} ORDER BY id DESC LIMIT 100", params
+    )
+    return render_template("notifications.html", rows=rows)
+
+
+@app.post("/settings/alerts")
+@need("admin")
+def save_alerts():
+    db = get_db()
+    phone = text("alert_phone")
+    if phone and not whatsapp_number(phone):
+        flash("Enter the WhatsApp number with its country code, for example +260 972 047 233.", "error")
+        return redirect(url_for("settings"))
+    db.execute(
+        "UPDATE businesses SET alert_phone=?, alert_low_stock=?, alert_permission=? WHERE id=?",
+        (phone, 1 if request.form.get("alert_low_stock") else 0, 1 if request.form.get("alert_permission") else 0, g.user["business_id"]),
+    )
+    db.commit()
+    flash("Alert settings saved.", "ok")
+    return redirect(url_for("settings"))
+
+
+@app.post("/settings/alerts/test")
+@need("admin")
+def test_alert():
+    db = get_db()
+    notification_id = notify(db, "test", "Test alert", "This is a test. If you can read it, alerts are reaching you.", url_for("notifications"))
+    db.commit()
+    status, detail = send_whatsapp(g.user["alert_phone"], f"{g.user['business_name']}: Test alert. If you can read this, WhatsApp alerts are working.")
+    db.execute("UPDATE notifications SET wa_status=?, wa_error=? WHERE id=?", (status, detail, notification_id))
+    db.commit()
+    if status == "sent":
+        flash(f"Test sent to WhatsApp number {g.user['alert_phone']}. A popup will also appear here shortly.", "ok")
+    else:
+        flash(f"The popup alert works, but the WhatsApp message was not sent: {detail}.", "error")
+    return redirect(url_for("settings"))
+
+
+# --- PERMISSION REQUESTS ---
+def active_request(db, item_id, action):
+    """The signed-in user's latest request for this action on this item that is still pending or approved and unexpired."""
+    row = db.one(
+        """SELECT id, status, expires_at FROM permission_requests
+           WHERE business_id=? AND user_id=? AND item_id=? AND action=? AND status IN ('pending', 'approved') ORDER BY id DESC LIMIT 1""",
+        (g.user["business_id"], g.user["id"], item_id, action),
+    )
+    if row and row["status"] == "approved" and (row["expires_at"] or "") < now().strftime("%Y-%m-%d %H:%M:%S"):
+        return None
+    return row
+
+
+def item_grant(db, item_id, action):
+    """'own' when the user's account allows the action, the approved request when an admin allowed it once, else None."""
+    if can(action):
+        return "own"
+    row = active_request(db, item_id, action)
+    return row if row and row["status"] == "approved" else None
+
+
+def use_grant(db, grant):
+    """An admin's approval covers one use: it is spent when the action goes through."""
+    if isinstance(grant, dict):
+        db.execute("UPDATE permission_requests SET status='used' WHERE id=?", (grant["id"],))
+
+
+def item_access_state(db, item_id, action):
+    """For the item page: 'own', 'approved', 'pending' or 'none', plus when an approval runs out."""
+    if can(action):
+        return {"state": "own", "until": ""}
+    row = active_request(db, item_id, action)
+    return {"state": row["status"], "until": (row["expires_at"] or "")[11:16]} if row else {"state": "none", "until": ""}
+
+
+def refuse_item_action(item_id):
+    flash("Your account does not have permission to do that. Use the request button to ask an admin.", "error")
+    return redirect(url_for("item", item_id=item_id))
+
+
+@app.post("/inventory/<int:item_id>/request-permission")
+@need(None)
+def request_permission(item_id):
+    db, biz = get_db(), g.user["business_id"]
+    target = get_item(db, item_id)
+    action = text("action")
+    back = redirect(url_for("item", item_id=item_id))
+    if action not in dict(ITEM_ACTIONS):
+        abort(400)
+    if can(action):
+        flash("Your account already has that permission.", "ok")
+        return back
+    if active_request(db, item_id, action):
+        flash("You already have a request for this waiting or approved.", "ok")
+        return back
+
+    reason = text("reason")[:200]
+    request_id = db.insert(
+        """INSERT INTO permission_requests (business_id, user_id, username, action, item_id, item_name, reason, status, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)""",
+        (biz, g.user["id"], g.user["username"], action, item_id, target["name"], reason, now().strftime("%Y-%m-%d %H:%M:%S")),
+    )
+    if alert_enabled("permission"):
+        notify(
+            db, "permission", f"Permission request from {g.user['username']}",
+            f"{g.user['username']} asks to {dict(ITEM_ACTIONS)[action]}: {target['name']} (code {target['item_code']})."
+            + (f" Reason: {reason}." if reason else "") + " Open the app to approve or deny.",
+            url_for("permission_requests") + f"#request-{request_id}", whatsapp=True,
+        )
+    db.commit()
+    flash("Your request has been sent to the admin. You will get a popup here when they answer.", "ok")
+    return back
+
+
+@app.get("/requests")
+@need("admin")
+def permission_requests():
+    rows = get_db().all(
+        """SELECT id, username, action, item_id, item_name, reason, status, created_at, decided_by, decided_at, expires_at
+           FROM permission_requests WHERE business_id=? ORDER BY CASE WHEN status='pending' THEN 0 ELSE 1 END, id DESC LIMIT 200""",
+        (g.user["business_id"],),
+    )
+    return render_template("requests.html", rows=rows, actions=dict(ITEM_ACTIONS), minutes=GRANT_MINUTES)
+
+
+@app.post("/requests/<int:request_id>/decide")
+@need("admin")
+def decide_request(request_id):
+    db, biz = get_db(), g.user["business_id"]
+    row = db.one("SELECT id, user_id, action, item_id, item_name, status FROM permission_requests WHERE id=? AND business_id=?", (request_id, biz))
+    approve = text("decision") == "approve"
+    if row is None or row["status"] != "pending" or text("decision") not in ("approve", "deny"):
+        flash("That request has already been answered.", "error")
+        return redirect(url_for("permission_requests"))
+
+    stamp = now()
+    expires = (stamp + datetime.timedelta(minutes=GRANT_MINUTES)).strftime("%Y-%m-%d %H:%M:%S") if approve else None
+    db.execute(
+        "UPDATE permission_requests SET status=?, decided_by=?, decided_at=?, expires_at=? WHERE id=?",
+        ("approved" if approve else "denied", g.user["username"], stamp.strftime("%Y-%m-%d %H:%M:%S"), expires, request_id),
+    )
+    what = dict(ITEM_ACTIONS)[row["action"]]
+    if approve:
+        notify(
+            db, "decision", "Request approved",
+            f"{g.user['username']} approved your request to {what}: {row['item_name']}. It covers one use and lasts {GRANT_MINUTES} minutes.",
+            url_for("item", item_id=row["item_id"]), for_user_id=row["user_id"],
+        )
+    else:
+        notify(
+            db, "decision", "Request denied",
+            f"{g.user['username']} did not approve your request to {what}: {row['item_name']}.",
+            url_for("item", item_id=row["item_id"]), for_user_id=row["user_id"],
+        )
+    db.commit()
+    flash("Request approved. The operator has been notified." if approve else "Request denied. The operator has been notified.", "ok")
+    return redirect(url_for("permission_requests"))
 
 
 # --- EMPLOYEE STATEMENTS (ADMIN) ---
@@ -2453,6 +2801,7 @@ def import_sales():
                     (invoice_id, biz, code, name, dept, batch, qty, unit_price, line_total),
                 )
         for code, qty in needed.items():
+            low_stock_alert(db, listed[code]["name"], code, listed[code]["quantity"], listed[code]["quantity"] - qty, "listed for sale in the POS")
             moved = db.execute(
                 "UPDATE pos_products SET quantity = quantity - ? WHERE id=? AND business_id=? AND quantity >= ?",
                 (qty, listed[code]["id"], biz, qty),
@@ -2668,7 +3017,7 @@ def settings():
         return redirect(url_for("settings"))
 
     departments = db.all("SELECT id, name FROM departments WHERE business_id=? ORDER BY name", (biz,))
-    return render_template("settings.html", departments=departments)
+    return render_template("settings.html", departments=departments, whatsapp=whatsapp_service())
 
 
 @app.post("/settings/departments")

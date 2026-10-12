@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}Alerts — {% endblock %}
+{% block content %}
+<div class="page-head">
+    <h1>Alerts</h1>
+    <form method="post">
+        {{ csrf_field() }}
+        <button class="btn">Mark all as read</button>
+    </form>
+</div>
+
+<section class="card">
+    <div class="table-wrap">
+        <table>
+            <thead><tr><th>When</th><th>Alert</th><th>Details</th>{% if user.role == 'admin' %}<th>WhatsApp</th>{% endif %}<th></th></tr></thead>
+            <tbody>
+            {% for n in rows %}
+                <tr class="{{ 'unread' if not n.read_at }}">
+                    <td>{{ n.created_at }}</td>
+                    <td><strong>{{ n.title }}</strong></td>
+                    <td class="wrap">{{ n.body }}</td>
+                    {% if user.role == 'admin' %}
+                    <td class="wrap">
+                        {% if n.wa_status == 'sent' %}<span class="ok">Sent</span>
+                        {% elif n.wa_status == 'failed' %}<span class="warn">Failed</span><small class="muted"> {{ n.wa_error }}</small>
+                        {% elif n.wa_status == 'skipped' %}<span class="muted">Not sent</span><small class="muted"> {{ n.wa_error }}</small>
+                        {% else %}<span class="muted">—</span>{% endif %}
+                    </td>
+                    {% endif %}
+                    <td class="num"><a class="btn small" href="{{ url_for('open_notification', notification_id=n.id) }}">Open</a></td>
+                </tr>
+            {% else %}
+                <tr><td colspan="5" class="muted center">No alerts yet.</td></tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endblock %}
