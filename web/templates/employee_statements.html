@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block title %}Employee Statements — {% endblock %}
+{% block content %}
+<div class="page-head">
+    <div>
+        <a class="back" href="{{ url_for('hr') }}">&larr; HR &amp; Payroll</a>
+        <h1>Employee Statements</h1>
+    </div>
+</div>
+
+<form method="get" class="toolbar" id="employee-search">
+    <input name="q" id="employee-q" type="search" value="{{ q }}" placeholder="Type an employee's name or NRC number" autocomplete="off" autofocus>
+    <button class="btn primary">Search</button>
+    {% if q %}<a class="btn" href="{{ url_for('employee_statements') }}">Clear</a>{% endif %}
+</form>
+
+<section class="card">
+    <div class="table-wrap">
+        <table>
+            <thead><tr><th>Employee</th><th>NRC</th><th>Type</th><th class="num">Basic salary</th><th class="num">Payslips</th><th>First month</th><th>Latest month</th><th></th></tr></thead>
+            <tbody>
+            {% for e in results %}
+                <tr>
+                    <td><a href="{{ url_for('employee_statement', employee_id=e.id) }}">{{ e.full_name }}</a></td>
+                    <td>{{ e.nrc_number or '—' }}</td>
+                    <td>{{ e.employment_type }}</td>
+                    <td class="num">{{ e.basic_salary|money }}</td>
+                    <td class="num">{{ e.payslips }}</td>
+                    <td>{{ e.first_month|month if e.first_month else '—' }}</td>
+                    <td>{{ e.last_month|month if e.last_month else '—' }}</td>
+                    <td class="num"><a class="btn small" href="{{ url_for('employee_statement', employee_id=e.id) }}">Statement</a></td>
+                </tr>
+            {% else %}
+                <tr><td colspan="8" class="muted center">{% if q %}No employee matches "{{ q }}".{% else %}No employees registered yet.{% endif %}</td></tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endblock %}
+{% block scripts %}
+<script>
+    // Search as you type: wait for a short pause, then reload the list with the cursor kept at the end
+    (function () {
+        const box = document.getElementById("employee-q");
+        let timer;
+        box.setSelectionRange(box.value.length, box.value.length);
+        box.addEventListener("input", function () {
+            clearTimeout(timer);
+            timer = setTimeout(function () { document.getElementById("employee-search").submit(); }, 450);
+        });
+    })();
+</script>
+{% endblock %}

@@ -8,27 +8,66 @@
 </head>
 <body>
 {% if user %}
-<nav class="nav no-print">
-    <span class="brand">{{ user.business_name }}</span>
-    <a href="{{ url_for('pos') }}" class="{{ 'active' if request.endpoint == 'pos' }}">Sales &amp; POS</a>
-    <a href="{{ url_for('inventory') }}" class="{{ 'active' if request.endpoint in ('inventory', 'item') }}">Inventory</a>
-    <a href="{{ url_for('history') }}" class="{{ 'active' if request.endpoint in ('history', 'invoice') }}">Sales &amp; Invoices</a>
-    <a href="{{ url_for('procurements') }}" class="{{ 'active' if request.endpoint == 'procurements' }}">Procurements</a>
-    <a href="{{ url_for('reports') }}" class="{{ 'active' if request.endpoint in ('reports', 'report_department') }}">Reports</a>
-    {% if user.role == 'admin' %}
-    <a href="{{ url_for('customers') }}" class="{{ 'active' if request.endpoint in ('customers', 'customer_statement') }}">Customers</a>
-    <a href="{{ url_for('hr') }}" class="{{ 'active' if request.endpoint in ('hr', 'hr_settings', 'new_payslip', 'payslips') }}">HR &amp; Payroll</a>
-    <a href="{{ url_for('import_data') }}" class="{{ 'active' if request.endpoint in ('import_data', 'import_purchases', 'import_sales') }}">Import</a>
-    <a href="{{ url_for('operators') }}" class="{{ 'active' if request.endpoint == 'operators' }}">Operators</a>
-    <a href="{{ url_for('settings') }}" class="{{ 'active' if request.endpoint == 'settings' }}">Settings</a>
-    {% endif %}
+{# Every page of the app, grouped for the menu: (label, endpoint, endpoints that count as "here", admin only) #}
+{% set nav = [
+    ('Sell', [
+        ('Sales & POS', 'pos', ['pos'], false),
+        ('Sales & Invoices', 'history', ['history', 'invoice'], false),
+        ('Customers', 'customers', ['customers', 'customer_statement', 'customer_duplicates'], true),
+    ]),
+    ('Stock', [
+        ('Inventory', 'inventory', ['inventory', 'item'], false),
+        ('Procurements', 'procurements', ['procurements', 'procurement'], false),
+        ('Import', 'import_data', ['import_data'], true),
+    ]),
+    ('Insights', [
+        ('Reports', 'reports', ['reports', 'report_department'], false),
+    ]),
+    ('People', [
+        ('HR & Payroll', 'hr', ['hr', 'hr_settings', 'new_payslip', 'payslips', 'employee_statements', 'employee_statement'], true),
+        ('Operators', 'operators', ['operators'], true),
+    ]),
+    ('Business', [
+        ('Settings', 'settings', ['settings'], true),
+    ]),
+] %}
+{% set here = namespace(label='') %}
+{% for group, links in nav %}{% for label, endpoint, active, admin_only in links if request.endpoint in active %}{% set here.label = label %}{% endfor %}{% endfor %}
+
+<header class="topbar no-print">
+    <a class="brand" href="{{ url_for('pos') }}">{{ user.business_name }}</a>
+    {% if here.label %}<span class="here">{{ here.label }}</span>{% endif %}
     <span class="spacer"></span>
-    <span class="who">{{ user.username }} ({{ user.role }})</span>
-    <form method="post" action="{{ url_for('logout') }}">
-        {{ csrf_field() }}
-        <button class="btn danger">Logout</button>
-    </form>
-</nav>
+
+    <details class="menu">
+        <summary class="btn">Menu</summary>
+        <nav class="menu-panel menu-groups">
+            {% for group, links in nav %}
+            {% set shown = [] %}
+            {% for link in links if user.role == 'admin' or not link[3] %}{% set _ = shown.append(link) %}{% endfor %}
+            {% if shown %}
+            <div class="menu-group">
+                <span class="menu-heading">{{ group }}</span>
+                {% for label, endpoint, active, admin_only in shown %}
+                <a class="menu-item {{ 'active' if request.endpoint in active }}" href="{{ url_for(endpoint) }}">{{ label }}</a>
+                {% endfor %}
+            </div>
+            {% endif %}
+            {% endfor %}
+        </nav>
+    </details>
+
+    <details class="menu">
+        <summary class="btn ghost">{{ user.username }}</summary>
+        <div class="menu-panel">
+            <span class="menu-heading">Signed in as {{ user.role }}</span>
+            <form method="post" action="{{ url_for('logout') }}">
+                {{ csrf_field() }}
+                <button class="menu-item danger">Logout</button>
+            </form>
+        </div>
+    </details>
+</header>
 {% endif %}
 
 <main>
@@ -43,6 +82,23 @@
         const message = e.target.dataset ? e.target.dataset.confirm : "";
         if (message && !confirm(message)) e.preventDefault();
     });
+
+    // Dropdown menus: only one open at a time; a click elsewhere or Escape closes them
+    (function () {
+        const menus = Array.from(document.querySelectorAll("details.menu"));
+        function closeAll(except) {
+            menus.forEach(function (menu) { if (menu !== except) menu.open = false; });
+        }
+        menus.forEach(function (menu) {
+            menu.addEventListener("toggle", function () { if (menu.open) closeAll(menu); });
+        });
+        document.addEventListener("click", function (e) {
+            if (!e.target.closest("details.menu")) closeAll(null);
+        });
+        document.addEventListener("keydown", function (e) {
+            if (e.key === "Escape") closeAll(null);
+        });
+    })();
 </script>
 {% block scripts %}{% endblock %}
 </body>

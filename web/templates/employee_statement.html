@@ -1,0 +1,158 @@
+{% extends "base.html" %}
+{% block title %}{{ employee.full_name }} statement — {% endblock %}
+{% block content %}
+<div class="page-head no-print">
+    <div>
+        <a class="back" href="{{ url_for('employee_statements') }}">&larr; All employees</a>
+        <h1>{{ employee.full_name }}</h1>
+    </div>
+    <details class="menu">
+        <summary class="btn">Actions</summary>
+        <div class="menu-panel">
+            <button type="button" class="menu-item" onclick="window.print()">Print / Save as PDF</button>
+            <a class="menu-item" href="{{ url_for('new_payslip') }}">Compute a payslip</a>
+            <a class="menu-item" href="{{ url_for('hr') }}">HR &amp; Payroll</a>
+        </div>
+    </details>
+</div>
+
+<form method="get" class="toolbar report-filters no-print" id="statement-filters">
+    <select name="period" id="statement-period" aria-label="Period">
+        {% for value, label in periods %}<option value="{{ value }}" {{ 'selected' if value == period }}>{{ label }}</option>{% endfor %}
+    </select>
+    <span id="custom-range" {{ 'hidden' if period != 'custom' }}>
+        <input type="month" name="from" value="{{ start if period == 'custom' else '' }}" pattern="\d{4}-\d{2}" placeholder="YYYY-MM" aria-label="From month">
+        <span class="muted">to</span>
+        <input type="month" name="to" value="{{ end if period == 'custom' else '' }}" pattern="\d{4}-\d{2}" placeholder="YYYY-MM" aria-label="To month">
+        <button class="btn primary">Apply</button>
+    </span>
+</form>
+
+<article class="statement">
+    <header>
+        <h1>{{ user.business_name }}</h1>
+        {% if user.contact %}<p class="muted">{{ user.contact }}</p>{% endif %}
+        <p class="doc-type">Employee Statement</p>
+        <p class="muted">{% if start %}{{ start|month }} to {{ end|month }}{% else %}All time{% endif %}</p>
+    </header>
+
+    <dl class="facts">
+        <dt>Employee</dt><dd><strong>{{ employee.full_name }}</strong></dd>
+        <dt>NRC number</dt><dd>{{ employee.nrc_number or '—' }}</dd>
+        <dt>Employment</dt><dd>{{ employee.employment_type }}</dd>
+        <dt>Started</dt><dd>{{ employee.start_date or '—' }}</dd>
+        <dt>Current basic salary</dt><dd>{{ employee.basic_salary|money }}</dd>
+        <dt>Statement date</dt><dd>{{ printed }}</dd>
+    </dl>
+
+    <div class="stats spaced">
+        <div class="stat"><span>Months worked</span><strong>{{ summary.months }}</strong><small>{{ totals.payslips }} payslip(s)</small></div>
+        <div class="stat"><span>Average days absent per month</span><strong class="{{ 'warn' if summary.average_absent > 0 else 'ok' }}">{{ '%.1f'|format(summary.average_absent) }}</strong><small>{{ '%g'|format(totals.absent) }} day(s) absent in total</small></div>
+        <div class="stat"><span>Attendance</span><strong>{{ '%.1f'|format(summary.attendance) ~ '%' if summary.attendance is not none else '—' }}</strong><small>{{ '%g'|format(totals.worked) }} of {{ '%g'|format(totals.expected) }} days worked</small></div>
+        <div class="stat"><span>Total net pay</span><strong>{{ totals.net|money }}</strong><small>Average {{ summary.average_net|money }} per month</small></div>
+    </div>
+
+    <h2 class="spaced">Month by Month</h2>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr><th>Month</th><th class="num">Payslips</th><th class="num">Days expected</th><th class="num">Days worked</th><th class="num">Days absent</th><th class="num">Basic earned</th><th class="num">Bonuses</th><th class="num">Other deductions</th><th class="num">NAPSA</th><th class="num">NHIMA</th><th class="num">Net pay</th></tr>
+            </thead>
+            <tbody>
+            {% for m in months %}
+                <tr>
+                    <td>{{ m.month|month }}</td>
+                    <td class="num">{{ m.payslips }}</td>
+                    <td class="num">{{ '%g'|format(m.expected) }}</td>
+                    <td class="num">{{ '%g'|format(m.worked) }}</td>
+                    <td class="num {{ 'warn' if m.absent > 0 }}">{{ '%g'|format(m.absent) }}</td>
+                    <td class="num">{{ m.basic|money }}</td>
+                    <td class="num">{{ m.bonuses|money }}</td>
+                    <td class="num">{{ m.deductions|money }}</td>
+                    <td class="num">{{ m.napsa|money }}</td>
+                    <td class="num">{{ m.nhima|money }}</td>
+                    <td class="num">{{ m.net|money }}</td>
+                </tr>
+            {% else %}
+                <tr><td colspan="11" class="muted center">No payslips for this employee in this period.</td></tr>
+            {% endfor %}
+            {% if months %}
+                <tr class="total-row">
+                    <td>Total</td>
+                    <td class="num">{{ totals.payslips }}</td>
+                    <td class="num">{{ '%g'|format(totals.expected) }}</td>
+                    <td class="num">{{ '%g'|format(totals.worked) }}</td>
+                    <td class="num">{{ '%g'|format(totals.absent) }}</td>
+                    <td class="num">{{ totals.basic|money }}</td>
+                    <td class="num">{{ totals.bonuses|money }}</td>
+                    <td class="num">{{ totals.deductions|money }}</td>
+                    <td class="num">{{ totals.napsa|money }}</td>
+                    <td class="num">{{ totals.nhima|money }}</td>
+                    <td class="num">{{ totals.net|money }}</td>
+                </tr>
+                <tr>
+                    <td>Average per month</td>
+                    <td class="num">{{ '%.1f'|format(totals.payslips / summary.months) }}</td>
+                    <td class="num">{{ '%.1f'|format(totals.expected / summary.months) }}</td>
+                    <td class="num">{{ '%.1f'|format(totals.worked / summary.months) }}</td>
+                    <td class="num">{{ '%.1f'|format(summary.average_absent) }}</td>
+                    <td class="num">{{ (totals.basic / summary.months)|money }}</td>
+                    <td class="num">{{ (totals.bonuses / summary.months)|money }}</td>
+                    <td class="num">{{ (totals.deductions / summary.months)|money }}</td>
+                    <td class="num">{{ (totals.napsa / summary.months)|money }}</td>
+                    <td class="num">{{ (totals.nhima / summary.months)|money }}</td>
+                    <td class="num">{{ summary.average_net|money }}</td>
+                </tr>
+            {% endif %}
+            </tbody>
+        </table>
+    </div>
+
+    {% if months %}
+    <div class="split spaced">
+        <section class="grow">
+            <h2>Bonuses &amp; Deductions by Name</h2>
+            <div class="table-wrap">
+                <table>
+                    <thead><tr><th>Item</th><th>Kind</th><th class="num">Total over the period</th></tr></thead>
+                    <tbody>
+                    {% for name, amount in bonuses %}<tr><td>{{ name }}</td><td>Bonus</td><td class="num">{{ amount|money }}</td></tr>{% endfor %}
+                    {% for name, amount in deductions %}<tr><td>{{ name }}</td><td>Deduction</td><td class="num">{{ amount|money }}</td></tr>{% endfor %}
+                    {% if not bonuses and not deductions %}<tr><td colspan="3" class="muted center">None in this period.</td></tr>{% endif %}
+                    </tbody>
+                </table>
+            </div>
+        </section>
+        <section class="grow">
+            <h2>Statutory Contributions</h2>
+            <div class="table-wrap">
+                <table>
+                    <thead><tr><th>Contribution</th><th class="num">Employee</th><th class="num">Employer</th><th class="num">Total remitted</th></tr></thead>
+                    <tbody>
+                        <tr><td>NAPSA</td><td class="num">{{ totals.napsa|money }}</td><td class="num">{{ totals.employer_napsa|money }}</td><td class="num">{{ (totals.napsa + totals.employer_napsa)|money }}</td></tr>
+                        <tr><td>NHIMA</td><td class="num">{{ totals.nhima|money }}</td><td class="num">{{ totals.employer_nhima|money }}</td><td class="num">{{ (totals.nhima + totals.employer_nhima)|money }}</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+    </div>
+    {% endif %}
+</article>
+{% endblock %}
+{% block scripts %}
+<script>
+    // Presets apply at once; "Custom range" reveals the two month boxes
+    (function () {
+        const period = document.getElementById("statement-period");
+        const custom = document.getElementById("custom-range");
+        period.addEventListener("change", function () {
+            if (period.value === "custom") {
+                custom.hidden = false;
+                custom.querySelector("input").focus();
+            } else {
+                document.getElementById("statement-filters").submit();
+            }
+        });
+    })();
+</script>
+{% endblock %}

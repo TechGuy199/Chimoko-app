@@ -16,7 +16,12 @@
         <a href="{{ report_url(request.endpoint, view='visual') }}" class="{{ 'active' if view == 'visual' }}">Visual</a>
         <a href="{{ report_url(request.endpoint, view='table') }}" class="{{ 'active' if view == 'table' }}">Table</a>
     </span>
-    <button type="button" class="btn" onclick="window.print()">Print</button>
+    <details class="menu">
+        <summary class="btn">Actions</summary>
+        <div class="menu-panel">
+            <button type="button" class="menu-item" onclick="window.print()">Print / Save as PDF</button>
+        </div>
+    </details>
 </form>
 <p class="muted period-line">
     {% if start %}{{ start.strftime('%d %b %Y') }} to {{ end.strftime('%d %b %Y') }}{% else %}All time{% endif %}

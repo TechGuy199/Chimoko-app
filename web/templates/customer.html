@@ -1,10 +1,19 @@
 {% extends "base.html" %}
 {% block title %}{{ customer.name }} statement — {% endblock %}
 {% block content %}
-<div class="toolbar no-print">
-    <a class="btn" href="{{ url_for('customers') }}">&larr; All customers</a>
-    <a class="btn primary" href="{{ url_for('customer_statement_pdf', customer_id=customer.id) }}">Download PDF</a>
-    <button class="btn" onclick="window.print()">Print</button>
+<div class="page-head no-print">
+    <div>
+        <a class="back" href="{{ url_for('customers') }}">&larr; All customers</a>
+        <h1>{{ customer.name }}</h1>
+    </div>
+    <details class="menu">
+        <summary class="btn primary">Actions</summary>
+        <div class="menu-panel">
+            <a class="menu-item" href="{{ url_for('customer_statement_pdf', customer_id=customer.id) }}">Download PDF</a>
+            <button type="button" class="menu-item" onclick="window.print()">Print</button>
+            <a class="menu-item" href="{{ url_for('customer_duplicates') }}">Find duplicates</a>
+        </div>
+    </details>
 </div>
 
 {% for twin in twins %}

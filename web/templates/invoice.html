@@ -1,11 +1,19 @@
 {% extends "base.html" %}
 {% block title %}{{ inv.invoice_no }} — {% endblock %}
 {% block content %}
-<div class="toolbar no-print">
-    <a class="btn" href="{{ url_for('history') }}">&larr; All invoices</a>
-    <a class="btn" href="{{ url_for('pos') }}">New sale</a>
-    <button class="btn primary" onclick="window.print()">Print / Save as PDF</button>
-    {% if user.role == 'admin' and inv.customer_id %}<a class="btn" href="{{ url_for('customer_statement', customer_id=inv.customer_id) }}">Customer statement</a>{% endif %}
+<div class="page-head no-print">
+    <div>
+        <a class="back" href="{{ url_for('history') }}">&larr; All invoices</a>
+        <h1>{{ inv.invoice_no }}</h1>
+    </div>
+    <details class="menu">
+        <summary class="btn primary">Actions</summary>
+        <div class="menu-panel">
+            <button type="button" class="menu-item" onclick="window.print()">Print / Save as PDF</button>
+            <a class="menu-item" href="{{ url_for('pos') }}">New sale</a>
+            {% if user.role == 'admin' and inv.customer_id %}<a class="menu-item" href="{{ url_for('customer_statement', customer_id=inv.customer_id) }}">Customer statement</a>{% endif %}
+        </div>
+    </details>
 </div>
 
 {% for twin in twins %}

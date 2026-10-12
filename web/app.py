@@ -1115,6 +1115,109 @@ def delete_payslip(payslip_id):
     return redirect(url_for("hr"))
 
 
+# --- EMPLOYEE STATEMENTS (ADMIN) ---
+STATEMENT_PERIODS = (
+    ("this_year", "This year"), ("last_6", "Last 6 months"), ("last_12", "Last 12 months"), ("all", "All time"), ("custom", "Custom range"),
+)
+
+
+def shift_month(year, month, by):
+    index = year * 12 + (month - 1) + by
+    return index // 12, index % 12 + 1
+
+
+def statement_months():
+    """Returns (choice, first month, last month) as 'YYYY-MM' strings; both are None for 'all time'."""
+    today = now().date()
+    this_month = today.strftime("%Y-%m")
+    choice = request.args.get("period", "this_year")
+    if choice == "custom":
+        try:
+            start = datetime.datetime.strptime(request.args.get("from", ""), "%Y-%m").strftime("%Y-%m")
+            end = datetime.datetime.strptime(request.args.get("to", ""), "%Y-%m").strftime("%Y-%m")
+            return choice, min(start, end), max(start, end)
+        except ValueError:
+            choice = "this_year"
+    if choice == "all":
+        return choice, None, None
+    if choice in ("last_6", "last_12"):
+        year, month = shift_month(today.year, today.month, -(5 if choice == "last_6" else 11))
+        return choice, f"{year:04d}-{month:02d}", this_month
+    return "this_year", f"{today.year:04d}-01", f"{today.year:04d}-12"
+
+
+@app.get("/hr/statements")
+@need("admin")
+def employee_statements():
+    db, biz = get_db(), g.user["business_id"]
+    q = request.args.get("q", "").strip()
+    sql = """SELECT e.id, e.full_name, e.nrc_number, e.employment_type, e.basic_salary,
+                    COUNT(p.id) AS payslips, MIN(p.pay_month) AS first_month, MAX(p.pay_month) AS last_month
+             FROM employees e LEFT JOIN payroll p ON p.employee_id = e.id AND p.business_id = e.business_id
+             WHERE e.business_id=?"""
+    params = [biz]
+    if q:
+        like = f"%{q.lower()}%"
+        sql += " AND (LOWER(e.full_name) LIKE ? OR LOWER(e.nrc_number) LIKE ?)"
+        params += [like, like]
+    sql += " GROUP BY e.id, e.full_name, e.nrc_number, e.employment_type, e.basic_salary ORDER BY e.full_name LIMIT 100"
+    return render_template("employee_statements.html", results=db.all(sql, params), q=q)
+
+
+@app.get("/hr/employees/<int:employee_id>/statement")
+@need("admin")
+def employee_statement(employee_id):
+    db, biz = get_db(), g.user["business_id"]
+    employee = db.one(
+        "SELECT id, full_name, nrc_number, employment_type, basic_salary, start_date, expected_days_week FROM employees WHERE id=? AND business_id=?",
+        (employee_id, biz),
+    )
+    if employee is None:
+        abort(404)
+
+    choice, start, end = statement_months()
+    slips = db.all(
+        """SELECT pay_month, expected_days, worked_days, calculated_basic, bonuses_json, deductions_json,
+                  napsa_amt, nhima_amt, employer_napsa, employer_nhima, net_payable
+           FROM payroll WHERE employee_id=? AND business_id=? AND pay_month >= ? AND pay_month <= ? ORDER BY pay_month, id""",
+        (employee_id, biz, start or "0000-00", end or "9999-99"),
+    )
+
+    money_keys = ("basic", "bonuses", "deductions", "napsa", "nhima", "employer_napsa", "employer_nhima", "net")
+    blank = dict.fromkeys(("payslips", "expected", "worked", "absent") + money_keys, 0)
+    months, totals, named = {}, dict(blank), {"bonus": {}, "deduction": {}}
+    for slip in slips:
+        bonuses, deductions = json.loads(slip["bonuses_json"] or "{}"), json.loads(slip["deductions_json"] or "{}")
+        for kind, items in (("bonus", bonuses), ("deduction", deductions)):
+            for name, amount in items.items():
+                named[kind][name] = named[kind].get(name, 0.0) + (amount or 0.0)
+        figures = {
+            "payslips": 1, "expected": slip["expected_days"], "worked": slip["worked_days"],
+            # Absence is counted payslip by payslip: the days expected that were not worked
+            "absent": max(0.0, slip["expected_days"] - slip["worked_days"]),
+            "basic": slip["calculated_basic"], "bonuses": sum(bonuses.values()), "deductions": sum(deductions.values()),
+            "napsa": slip["napsa_amt"], "nhima": slip["nhima_amt"], "employer_napsa": slip["employer_napsa"] or 0.0,
+            "employer_nhima": slip["employer_nhima"] or 0.0, "net": slip["net_payable"],
+        }
+        month = months.setdefault(slip["pay_month"], dict(blank, month=slip["pay_month"]))
+        for key, value in figures.items():
+            month[key] += value or 0
+            totals[key] += value or 0
+
+    worked_months = len(months)
+    summary = {
+        "months": worked_months,
+        "average_absent": totals["absent"] / worked_months if worked_months else 0.0,
+        "attendance": 100.0 * totals["worked"] / totals["expected"] if totals["expected"] else None,
+        "average_net": totals["net"] / worked_months if worked_months else 0.0,
+    }
+    return render_template(
+        "employee_statement.html", employee=employee, months=list(months.values()), totals=totals, summary=summary,
+        bonuses=sorted(named["bonus"].items()), deductions=sorted(named["deduction"].items()),
+        periods=STATEMENT_PERIODS, period=choice, start=start, end=end, printed=now().strftime("%d %b %Y %H:%M"),
+    )
+
+
 # --- CUSTOMER STATEMENTS (ADMIN) ---
 @app.get("/customers")
 @need("admin")

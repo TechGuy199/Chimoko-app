@@ -1,10 +1,24 @@
 {% extends "base.html" %}
 {% block title %}HR &amp; Payroll — {% endblock %}
 {% block content %}
-<div class="toolbar">
-    <h1 class="grow-title">Human Resources &amp; Payroll</h1>
-    <a class="btn primary" href="{{ url_for('new_payslip') }}">Compute Payslip</a>
-    <a class="btn" href="{{ url_for('hr_settings') }}">HR Settings</a>
+<div class="page-head">
+    <h1>Human Resources &amp; Payroll</h1>
+    <details class="menu">
+        <summary class="btn primary">Actions</summary>
+        <div class="menu-panel">
+            <a class="menu-item" href="{{ url_for('new_payslip') }}">Compute Payslip</a>
+            <a class="menu-item" href="{{ url_for('employee_statements') }}">Employee Statements</a>
+            <a class="menu-item" href="{{ url_for('import_data') }}">Import salaries &amp; wages</a>
+            <a class="menu-item" href="{{ url_for('hr_settings') }}">HR Settings</a>
+        </div>
+    </details>
+</div>
+
+<div class="dept-tiles home-tiles">
+    <a class="dept-tile" href="{{ url_for('employee_statements') }}">
+        <strong>Employee Statements</strong>
+        <small>Months worked, pay and absence for any period</small>
+    </a>
 </div>
 
 <div class="split">
@@ -22,7 +36,8 @@
                         <td class="num">{{ e.basic_salary|money }}</td>
                         <td class="num">{{ e.expected_days_week }}</td>
                         <td>{{ e.start_date or '—' }}</td>
-                        <td class="num">
+                        <td class="num actions">
+                            <a class="btn small" href="{{ url_for('employee_statement', employee_id=e.id) }}">Statement</a>
                             <form method="post" action="{{ url_for('delete_employee', employee_id=e.id) }}" onsubmit="return confirm('Remove this employee? Past payslips are kept.');">
                                 {{ csrf_field() }}
                                 <button class="btn danger small">Remove</button>
