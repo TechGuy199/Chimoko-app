@@ -202,6 +202,42 @@ def payment_history(db, kind, ref_id):
     )
 
 
+WALK_IN = "Walk-in Customer"
+
+
+def name_key(name):
+    key = " ".join(name.lower().split())
+    return "" if key == WALK_IN.lower() else key
+
+
+def phone_key(phone):
+    """Digits only, with Zambia's +260 prefix folded to a leading 0 so both spellings find the same account."""
+    digits = re.sub(r"\D", "", phone or "")
+    return "0" + digits[3:] if digits.startswith("260") and len(digits) == 12 else digits
+
+
+def customer_for(db, biz, name, phone, when):
+    """Finds or opens the customer account for a sale. Returns None for an anonymous walk-in (no name and no phone)."""
+    name, phone = (name or "").strip(), (phone or "").strip()
+    nkey, pkey = name_key(name), phone_key(phone)
+    if not nkey and not pkey:
+        return None
+
+    exact = db.one("SELECT id FROM customers WHERE business_id=? AND name_key=? AND phone_key=?", (biz, nkey, pkey))
+    if exact:
+        return exact["id"]
+    # Only one of the two details was given: use the account it points to when there is exactly one
+    if not pkey or not nkey:
+        column, value = ("name_key", nkey) if not pkey else ("phone_key", pkey)
+        matches = db.all(f"SELECT id FROM customers WHERE business_id=? AND {column}=? LIMIT 2", (biz, value))
+        if len(matches) == 1:
+            return matches[0]["id"]
+    return db.insert(
+        "INSERT INTO customers (business_id, name, phone, name_key, phone_key, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (biz, name if nkey else "Unnamed customer", phone, nkey, pkey, when),
+    )
+
+
 @app.template_filter("month")
 def month_label(value):
     try:
@@ -365,7 +401,11 @@ def pos():
         "expenditure": spend["paid"],
         "payable": spend["owed"],
     }
-    return render_template("pos.html", products=products, stats=stats, departments=department_names(db, biz), statuses=PAYMENT_STATUSES)
+    known_customers = db.all("SELECT name, phone FROM customers WHERE business_id=? ORDER BY name LIMIT 1000", (biz,))
+    return render_template(
+        "pos.html", products=products, stats=stats, departments=department_names(db, biz), statuses=PAYMENT_STATUSES,
+        known_customers=known_customers,
+    )
 
 
 @app.post("/checkout")
@@ -420,12 +460,14 @@ def checkout():
             return redirect(url_for("pos"))
 
     try:
+        sold_at = now().strftime("%Y-%m-%d %H:%M:%S")
         invoice_id = db.insert(
-            """INSERT INTO invoices (business_id, invoice_no, kind, customer_name, customer_phone, payment_status, total, amount_paid, balance_due, created_by, created_at)
-               VALUES (?, ?, 'SALE', ?, ?, ?, ?, ?, ?, ?, ?)""",
+            """INSERT INTO invoices (business_id, invoice_no, kind, customer_name, customer_phone, payment_status, total, amount_paid, balance_due, created_by, created_at, customer_id)
+               VALUES (?, ?, 'SALE', ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
-                biz, next_invoice_no(db, biz), text("customer_name") or "Walk-in Customer", text("customer_phone"),
-                status, total, amount_paid, round(total - amount_paid, 2), g.user["username"], now().strftime("%Y-%m-%d %H:%M:%S"),
+                biz, next_invoice_no(db, biz), text("customer_name") or WALK_IN, text("customer_phone"),
+                status, total, amount_paid, round(total - amount_paid, 2), g.user["username"], sold_at,
+                customer_for(db, biz, text("customer_name"), text("customer_phone"), sold_at),
             ),
         )
         for p, qty, line_total in lines:
@@ -719,7 +761,7 @@ def history_csv():
 def invoice(invoice_id):
     db, biz = get_db(), g.user["business_id"]
     inv = db.one(
-        """SELECT id, invoice_no, kind, customer_name, customer_phone, payment_status, total, amount_paid, balance_due, created_by, created_at
+        """SELECT id, invoice_no, kind, customer_name, customer_phone, payment_status, total, amount_paid, balance_due, created_by, created_at, customer_id
            FROM invoices WHERE id=? AND business_id=?""",
         (invoice_id, biz),
     )
@@ -1036,6 +1078,143 @@ def delete_payslip(payslip_id):
     db.commit()
     flash("Payslip deleted.", "ok")
     return redirect(url_for("hr"))
+
+
+# --- CUSTOMER STATEMENTS (ADMIN) ---
+@app.get("/customers")
+@need("admin")
+def customers():
+    db, biz = get_db(), g.user["business_id"]
+    q = request.args.get("q", "").strip()
+    sql = """SELECT c.id, c.name, c.phone, COUNT(i.id) AS invoices, COALESCE(SUM(i.total), 0) AS total, COALESCE(SUM(i.balance_due), 0) AS owed
+             FROM customers c LEFT JOIN invoices i ON i.customer_id = c.id AND i.kind='SALE'
+             WHERE c.business_id=?"""
+    params = [biz]
+    if q:
+        sql += " AND (c.name_key LIKE ?"
+        params.append(f"%{' '.join(q.lower().split())}%")
+        if phone_key(q):
+            sql += " OR c.phone_key LIKE ?"
+            params.append(f"%{phone_key(q)}%")
+        sql += ")"
+    sql += " GROUP BY c.id, c.name, c.phone ORDER BY c.name LIMIT 100"
+    return render_template("customers.html", results=db.all(sql, params), q=q)
+
+
+def get_customer(db, customer_id):
+    customer = db.one("SELECT id, name, phone, created_at FROM customers WHERE id=? AND business_id=?", (customer_id, g.user["business_id"]))
+    if customer is None:
+        abort(404)
+    return customer
+
+
+@app.get("/customers/<int:customer_id>")
+@need("admin")
+def customer_statement(customer_id):
+    db, biz = get_db(), g.user["business_id"]
+    customer = get_customer(db, customer_id)
+    invoices = db.all(
+        """SELECT id, invoice_no, created_at, created_by, payment_status, total, amount_paid, balance_due
+           FROM invoices WHERE customer_id=? AND business_id=? AND kind='SALE' ORDER BY created_at, id""",
+        (customer_id, biz),
+    )
+    lines = db.all(
+        """SELECT ii.invoice_id, ii.item_code, ii.item_name, ii.qty, ii.unit_price, ii.line_total
+           FROM invoice_items ii JOIN invoices i ON i.id = ii.invoice_id
+           WHERE i.customer_id=? AND i.business_id=? AND i.kind='SALE' ORDER BY ii.id""",
+        (customer_id, biz),
+    )
+    changes = db.all(
+        """SELECT pl.ref_id, pl.old_paid, pl.new_paid, pl.note, pl.changed_by, pl.changed_at
+           FROM payment_log pl JOIN invoices i ON i.id = pl.ref_id
+           WHERE pl.kind='sale' AND pl.business_id=? AND i.customer_id=? ORDER BY pl.id""",
+        (biz, customer_id),
+    )
+
+    products = {}
+    for inv in invoices:
+        inv["lines"] = [line for line in lines if line["invoice_id"] == inv["id"]]
+        inv["changes"] = [change for change in changes if change["ref_id"] == inv["id"]]
+        for line in inv["lines"]:
+            p = products.setdefault((line["item_code"], line["item_name"]), {"code": line["item_code"], "name": line["item_name"], "qty": 0, "value": 0.0, "last": ""})
+            p["qty"] += line["qty"]
+            p["value"] += line["line_total"]
+            p["last"] = max(p["last"], inv["created_at"][:10])
+
+    # The statement: every invoice as a charge and every payment as a credit, in date order with a running balance.
+    # Whatever was paid before the first logged change was paid at the time of sale.
+    entries = []
+    for inv in invoices:
+        items = ", ".join(f"{line['qty']} x {line['item_name']}" for line in inv["lines"])
+        entries.append({"at": inv["created_at"], "order": 0, "what": f"Invoice {inv['invoice_no']}", "detail": items, "charge": inv["total"], "paid": 0.0, "invoice_id": inv["id"]})
+        at_sale = inv["changes"][0]["old_paid"] if inv["changes"] else inv["amount_paid"]
+        if at_sale > 0:
+            entries.append({"at": inv["created_at"], "order": 1, "what": "Payment at time of sale", "detail": inv["invoice_no"], "charge": 0.0, "paid": at_sale, "invoice_id": inv["id"]})
+        for change in inv["changes"]:
+            amount = round(change["new_paid"] - change["old_paid"], 2)
+            if amount:
+                detail = inv["invoice_no"] + (f" — {change['note']}" if change["note"] else "") + f" (recorded by {change['changed_by']})"
+                entries.append({
+                    "at": change["changed_at"], "order": 2, "what": "Payment received" if amount > 0 else "Payment correction",
+                    "detail": detail, "charge": 0.0, "paid": amount, "invoice_id": inv["id"],
+                })
+    entries.sort(key=lambda e: (e["at"], e["invoice_id"], e["order"]))
+    balance = 0.0
+    for entry in entries:
+        balance = round(balance + entry["charge"] - entry["paid"], 2)
+        entry["balance"] = balance
+
+    summary = {
+        "invoices": len(invoices), "total": sum(inv["total"] for inv in invoices),
+        "paid": sum(inv["amount_paid"] for inv in invoices), "owed": sum(inv["balance_due"] for inv in invoices),
+    }
+    return render_template(
+        "customer.html", customer=customer, invoices=invoices, entries=entries, summary=summary,
+        products=sorted(products.values(), key=lambda p: -p["value"]), printed=now().strftime("%d %b %Y %H:%M"),
+    )
+
+
+@app.post("/customers/<int:customer_id>/update")
+@need("admin")
+def update_customer(customer_id):
+    db, biz = get_db(), g.user["business_id"]
+    get_customer(db, customer_id)
+    name, phone = text("name"), text("phone")
+    nkey, pkey = name_key(name), phone_key(phone)
+    clash = db.one("SELECT id FROM customers WHERE business_id=? AND name_key=? AND phone_key=? AND id<>?", (biz, nkey, pkey, customer_id))
+    if not nkey:
+        flash("The customer needs a name.", "error")
+    elif clash:
+        flash("Another customer account already has that name and phone number.", "error")
+    else:
+        db.execute("UPDATE customers SET name=?, phone=?, name_key=?, phone_key=? WHERE id=? AND business_id=?", (name, phone, nkey, pkey, customer_id, biz))
+        db.commit()
+        flash("Customer details saved. Invoices already issued keep the name and phone printed on them.", "ok")
+    return redirect(url_for("customer_statement", customer_id=customer_id))
+
+
+def link_existing_customers():
+    """Opens accounts for named customers on invoices issued before customer accounts existed."""
+    db = Database()
+    try:
+        unlinked = db.all(
+            """SELECT id, business_id, customer_name, customer_phone, created_at FROM invoices
+               WHERE customer_id IS NULL AND kind='SALE' AND NOT (customer_name = ? AND (customer_phone IS NULL OR customer_phone = ''))
+               ORDER BY id""",
+            (WALK_IN,),
+        )
+        for inv in unlinked:
+            customer_id = customer_for(db, inv["business_id"], inv["customer_name"], inv["customer_phone"], inv["created_at"])
+            if customer_id:
+                db.execute("UPDATE invoices SET customer_id=? WHERE id=?", (customer_id, inv["id"]))
+        db.commit()
+    except DB_ERRORS:
+        db.rollback()
+    finally:
+        db.close()
+
+
+link_existing_customers()
 
 
 # --- REPORTS ---
@@ -1654,12 +1833,14 @@ def import_sales():
                     invoice_no = candidate
             taken_numbers.add(invoice_no)
 
+            sold_at = when.strftime("%Y-%m-%d %H:%M:%S")
             invoice_id = db.insert(
-                """INSERT INTO invoices (business_id, invoice_no, kind, customer_name, customer_phone, payment_status, total, amount_paid, balance_due, created_by, created_at)
-                   VALUES (?, ?, 'SALE', ?, ?, ?, ?, ?, ?, ?, ?)""",
+                """INSERT INTO invoices (business_id, invoice_no, kind, customer_name, customer_phone, payment_status, total, amount_paid, balance_due, created_by, created_at, customer_id)
+                   VALUES (?, ?, 'SALE', ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
-                    biz, invoice_no, first["customer_name"] or "Walk-in Customer", first["customer_phone"], status, total, amount_paid,
-                    round(total - amount_paid, 2), g.user["username"] + " (import)", when.strftime("%Y-%m-%d %H:%M:%S"),
+                    biz, invoice_no, first["customer_name"] or WALK_IN, first["customer_phone"], status, total, amount_paid,
+                    round(total - amount_paid, 2), g.user["username"] + " (import)", sold_at,
+                    customer_for(db, biz, first["customer_name"], first["customer_phone"], sold_at),
                 ),
             )
             for code, name, dept, batch, qty, unit_price, line_total in lines:

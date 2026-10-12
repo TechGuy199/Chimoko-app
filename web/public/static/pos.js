@@ -111,6 +111,17 @@
         }
     });
 
+    // Picking a known customer fills in their phone number, so repeat sales land on the same account
+    const customerName = document.getElementById("customer-name");
+    const customerPhone = document.getElementById("customer-phone");
+    customerName.addEventListener("change", function () {
+        const typed = customerName.value.trim().toLowerCase();
+        const matches = Array.from(document.querySelectorAll("#known-customers option")).filter(function (option) {
+            return option.value.toLowerCase() === typed;
+        });
+        if (matches.length === 1 && !customerPhone.value.trim()) customerPhone.value = matches[0].dataset.phone;
+    });
+
     status.addEventListener("change", function () {
         const partial = status.value === "Partial Payment";
         amountRow.hidden = !partial;

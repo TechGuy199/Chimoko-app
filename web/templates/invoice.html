@@ -5,6 +5,7 @@
     <a class="btn" href="{{ url_for('history') }}">&larr; All invoices</a>
     <a class="btn" href="{{ url_for('pos') }}">New sale</a>
     <button class="btn primary" onclick="window.print()">Print / Save as PDF</button>
+    {% if user.role == 'admin' and inv.customer_id %}<a class="btn" href="{{ url_for('customer_statement', customer_id=inv.customer_id) }}">Customer statement</a>{% endif %}
 </div>
 
 <article class="invoice">

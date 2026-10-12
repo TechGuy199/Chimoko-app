@@ -9,6 +9,15 @@
     <div class="stat"><span>Expenditure (paid for purchases)</span><strong class="warn">{{ stats.expenditure|money }}</strong><small>Owed to suppliers: {{ stats.payable|money }}</small></div>
 </div>
 
+{% if user.role == 'admin' %}
+<div class="dept-tiles home-tiles">
+    <a class="dept-tile" href="{{ url_for('customers') }}">
+        <strong>Customer Statements</strong>
+        <small>Look up a customer by name or phone number</small>
+    </a>
+</div>
+{% endif %}
+
 <div class="split">
     <section class="card grow">
         <h2>Available Products</h2>
@@ -52,8 +61,12 @@
                 </table>
             </div>
             <p id="cart-empty" class="muted center">The cart is empty.</p>
-            <label>Customer name <input name="customer_name" placeholder="Walk-in Customer"></label>
-            <label>Phone number <input name="customer_phone"></label>
+            <label>Customer name <input name="customer_name" id="customer-name" list="known-customers" placeholder="Walk-in Customer" autocomplete="off"></label>
+            <datalist id="known-customers">
+                {% for kc in known_customers %}<option value="{{ kc.name }}" data-phone="{{ kc.phone }}">{{ kc.phone }}</option>{% endfor %}
+            </datalist>
+            <label>Phone number <input name="customer_phone" id="customer-phone"></label>
+            <p class="muted hint">A name or phone number opens a customer account, so the sale appears on their statement.</p>
             <label>Payment status
                 <select name="payment_status" id="payment-status">
                     {% for s in statuses %}<option>{{ s }}</option>{% endfor %}

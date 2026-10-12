@@ -84,6 +84,11 @@ SCHEMA = [
         old_paid DOUBLE PRECISION NOT NULL, new_paid DOUBLE PRECISION NOT NULL, note TEXT DEFAULT '',
         changed_by TEXT, changed_at TEXT
     )""",
+    """CREATE TABLE IF NOT EXISTS customers (
+        id {pk}, business_id INTEGER NOT NULL, name TEXT NOT NULL, phone TEXT DEFAULT '',
+        name_key TEXT NOT NULL, phone_key TEXT NOT NULL, created_at TEXT,
+        UNIQUE (business_id, name_key, phone_key)
+    )""",
 ]
 
 
@@ -142,6 +147,7 @@ def init_schema():
         # Purchases recorded before payments were tracked are treated as paid in full
         add_column(db, "procurements", "amount_paid", "DOUBLE PRECISION")
         db.execute("UPDATE procurements SET amount_paid = total_cost WHERE amount_paid IS NULL")
+        add_column(db, "invoices", "customer_id", "INTEGER")
         db.commit()
     finally:
         db.close()

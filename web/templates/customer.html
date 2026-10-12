@@ -1,0 +1,103 @@
+{% extends "base.html" %}
+{% block title %}{{ customer.name }} statement — {% endblock %}
+{% block content %}
+<div class="toolbar no-print">
+    <a class="btn" href="{{ url_for('customers') }}">&larr; All customers</a>
+    <button class="btn primary" onclick="window.print()">Print / Save as PDF</button>
+</div>
+
+<article class="statement">
+    <header>
+        <h1>{{ user.business_name }}</h1>
+        {% if user.contact %}<p class="muted">{{ user.contact }}</p>{% endif %}
+        <p class="doc-type">Customer Statement</p>
+    </header>
+
+    <dl class="facts">
+        <dt>Customer</dt><dd><strong>{{ customer.name }}</strong></dd>
+        <dt>Phone</dt><dd>{{ customer.phone or '—' }}</dd>
+        <dt>Customer since</dt><dd>{{ (customer.created_at or '')[:10] or '—' }}</dd>
+        <dt>Statement date</dt><dd>{{ printed }}</dd>
+    </dl>
+
+    <div class="stats spaced">
+        <div class="stat"><span>Invoices</span><strong>{{ summary.invoices }}</strong></div>
+        <div class="stat"><span>Total bought</span><strong>{{ summary.total|money }}</strong></div>
+        <div class="stat"><span>Total paid</span><strong>{{ summary.paid|money }}</strong></div>
+        <div class="stat"><span>Balance owed</span><strong class="{{ 'warn' if summary.owed > 0 else 'ok' }}">{{ summary.owed|money }}</strong></div>
+    </div>
+
+    <h2 class="spaced">Statement of Account</h2>
+    <div class="table-wrap">
+        <table>
+            <thead><tr><th>Date / time</th><th>Entry</th><th>Details</th><th class="num">Charged</th><th class="num">Paid</th><th class="num">Balance owed</th></tr></thead>
+            <tbody>
+            {% for e in entries %}
+                <tr>
+                    <td>{{ e.at }}</td>
+                    <td>{{ e.what }}</td>
+                    <td class="wrap">{{ e.detail }}</td>
+                    <td class="num">{{ e.charge|money if e.charge else '' }}</td>
+                    <td class="num">{{ e.paid|money if e.paid else '' }}</td>
+                    <td class="num">{{ e.balance|money }}</td>
+                </tr>
+            {% else %}
+                <tr><td colspan="6" class="muted center">No purchases yet.</td></tr>
+            {% endfor %}
+            {% if entries %}
+                <tr class="total-row"><td colspan="3">Totals</td><td class="num">{{ summary.total|money }}</td><td class="num">{{ summary.paid|money }}</td><td class="num">{{ summary.owed|money }}</td></tr>
+            {% endif %}
+            </tbody>
+        </table>
+    </div>
+
+    <h2 class="spaced">What They Have Bought</h2>
+    <div class="table-wrap">
+        <table>
+            <thead><tr><th>Code</th><th>Product</th><th class="num">Quantity</th><th class="num">Value</th><th>Last bought</th></tr></thead>
+            <tbody>
+            {% for p in products %}
+                <tr><td>{{ p.code or '—' }}</td><td>{{ p.name }}</td><td class="num">{{ p.qty }}</td><td class="num">{{ p.value|money }}</td><td>{{ p.last }}</td></tr>
+            {% else %}
+                <tr><td colspan="5" class="muted center">Nothing yet.</td></tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+
+    <h2 class="spaced">Invoices in Full</h2>
+    {% for inv in invoices %}
+    <section class="statement-invoice">
+        <p class="invoice-head">
+            <strong><a href="{{ url_for('invoice', invoice_id=inv.id) }}">{{ inv.invoice_no }}</a></strong>
+            <span class="muted">{{ inv.created_at }} &middot; served by {{ inv.created_by }}</span>
+            <span class="status">{{ inv.payment_status }}</span>
+        </p>
+        <div class="table-wrap">
+            <table>
+                <thead><tr><th>Code</th><th>Item</th><th class="num">Qty</th><th class="num">Unit price</th><th class="num">Total</th></tr></thead>
+                <tbody>
+                {% for line in inv.lines %}
+                    <tr><td>{{ line.item_code or '—' }}</td><td>{{ line.item_name }}</td><td class="num">{{ line.qty }}</td><td class="num">{{ line.unit_price|money }}</td><td class="num">{{ line.line_total|money }}</td></tr>
+                {% endfor %}
+                    <tr class="total-row"><td colspan="4">Invoice total</td><td class="num">{{ inv.total|money }}</td></tr>
+                    <tr><td colspan="4">Paid so far</td><td class="num">{{ inv.amount_paid|money }}</td></tr>
+                    <tr><td colspan="4">Still owed on this invoice</td><td class="num">{{ inv.balance_due|money }}</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </section>
+    {% endfor %}
+</article>
+
+<section class="card block no-print narrow-form">
+    <h2>Edit Customer Details</h2>
+    <form method="post" action="{{ url_for('update_customer', customer_id=customer.id) }}">
+        {{ csrf_field() }}
+        <label>Name <input name="name" value="{{ customer.name }}" required></label>
+        <label>Phone number <input name="phone" value="{{ customer.phone }}"></label>
+        <button class="btn primary">Save</button>
+    </form>
+    <p class="muted">To record a payment, open the invoice above and use "Update Payment". It then appears on this statement with its date.</p>
+</section>
+{% endblock %}

@@ -226,6 +226,19 @@ td form { margin: 0; display: inline; }
 .rank-value { color: var(--text-muted); font-variant-numeric: tabular-nums; }
 .total-row td { font-weight: 700; border-top: 2px solid var(--surface-alt); }
 
+/* Customer statements */
+.home-tiles { margin-bottom: 16px; }
+.hint { margin: -4px 0 10px; font-size: 11px; }
+.statement { background: var(--surface); border-radius: 10px; padding: 24px; }
+.statement header { text-align: center; border-bottom: 2px solid var(--surface-alt); margin-bottom: 16px; padding-bottom: 12px; }
+.statement header p { margin: 2px 0; }
+.statement .doc-type { margin-top: 8px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; }
+.statement .stat { background: var(--surface-alt); }
+.statement td.wrap { white-space: normal; min-width: 220px; }
+.statement-invoice { margin-bottom: 18px; break-inside: avoid; }
+.invoice-head { display: flex; flex-wrap: wrap; gap: 10px; align-items: baseline; margin: 0 0 6px; }
+.invoice-head .status { margin-left: auto; font-weight: 700; }
+
 /* Payments */
 .stat small { display: block; margin-top: 2px; color: var(--text-muted); font-size: 11px; }
 .payment-wrap { max-width: 720px; margin: 0 auto; }
@@ -255,7 +268,9 @@ input[type="file"] { padding: 6px; }
 @media print {
     .payslip { border-bottom: 1px dashed #999999; border-radius: 0; margin-bottom: 18px; padding-bottom: 18px; }
     .no-print { display: none !important; }
-    body, .invoice { background: #ffffff; color: #000000; }
+    body, .invoice, .statement, .statement .stat { background: #ffffff; color: #000000; }
+    .statement { padding: 0; }
+    .statement h1, .statement h2, .statement .muted, .statement .stat span, .statement .stat strong, .statement dt, .statement a { color: #000000; }
     main { padding: 0; }
     .invoice { max-width: none; padding: 0; }
     .invoice h1, .invoice dt, .invoice header p, .invoice footer { color: #000000; }
