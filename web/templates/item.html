@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% block title %}{{ item.name }} — {% endblock %}
+{% block content %}
+<p><a href="{{ url_for('inventory') }}">&larr; Back to inventory</a></p>
+<h1>{{ item.name }} <span class="muted">(code {{ item.item_code }})</span></h1>
+<p>In stock: <strong class="{{ 'warn' if item.quantity < user.low_stock_threshold else 'ok' }}">{{ item.quantity }}</strong></p>
+
+<div class="split">
+    <section class="card grow">
+        <h2>Details</h2>
+        <form method="post" action="{{ url_for('update_item', item_id=item.id) }}">
+            {{ csrf_field() }}
+            <fieldset {{ 'disabled' if not can('procure') }}>
+                <div class="grid">
+                    <label>Item name <input name="name" value="{{ item.name }}" required></label>
+                    <label>Category <input name="category" value="{{ item.category }}"></label>
+                    <label>Department
+                        <select name="department">
+                            {% for d in departments %}<option {{ 'selected' if d == item.department }}>{{ d }}</option>{% endfor %}
+                        </select>
+                    </label>
+                    <label>Unit cost <input name="unit_cost" type="number" min="0" step="0.01" value="{{ item.unit_cost }}" required></label>
+                    <label>Selling price <input name="price" type="number" min="0" step="0.01" value="{{ item.price }}"></label>
+                    <label>Supplier name <input name="supplier_name" value="{{ item.supplier_name }}"></label>
+                    <label>Supplier invoice number <input name="invoice_no" value="{{ item.invoice_no }}"></label>
+                    <label>Purchase date <input name="purchase_date" type="date" value="{{ item.purchase_date }}"></label>
+                    <label>Batch number <input name="batch_no" value="{{ item.batch_no }}"></label>
+                    <label>Date planted <input name="date_planted" type="date" value="{{ item.date_planted }}"></label>
+                    <label>Expiry date <input name="expiry_date" type="date" value="{{ item.expiry_date }}"></label>
+                </div>
+                <button class="btn primary">Save Details</button>
+            </fieldset>
+        </form>
+        <p class="muted">The item code and quantity cannot be edited here. Stock changes through purchases, transfers and sales.</p>
+    </section>
+
+    <div class="side">
+        {% if can('transfer') %}
+        <section class="card">
+            <h2>Transfer / Use</h2>
+            <form method="post" action="{{ url_for('transfer', item_id=item.id) }}">
+                {{ csrf_field() }}
+                <label>Destination
+                    <select name="destination">
+                        <option value="pos">Stock Listing (sell in POS)</option>
+                        <option value="farm">Farm Use (internal)</option>
+                    </select>
+                </label>
+                <label>Quantity <input name="quantity" type="number" min="1" max="{{ item.quantity }}" step="1" value="1" required></label>
+                <label>Recipient name (farm use) <input name="recipient"></label>
+                <label>Phone number (farm use) <input name="phone"></label>
+                <button class="btn success wide" {{ 'disabled' if item.quantity < 1 }}>Confirm Transfer</button>
+            </form>
+        </section>
+        {% endif %}
+
+        {% if can('delete') %}
+        <section class="card">
+            <h2>Delete</h2>
+            <form method="post" action="{{ url_for('delete_item', item_id=item.id) }}" onsubmit="return confirm('Delete this item from inventory permanently?');">
+                {{ csrf_field() }}
+                <button class="btn danger wide">Delete Item</button>
+            </form>
+        </section>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}

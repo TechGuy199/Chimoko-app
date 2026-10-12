@@ -3,6 +3,11 @@
 *.db-journal
 *.sqlite3
 
+# Secrets and Vercel's local folder
+.env
+.env.*
+.vercel/
+
 # Python
 __pycache__/
 *.pyc

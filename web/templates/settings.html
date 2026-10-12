@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}Settings — {% endblock %}
+{% block content %}
+<div class="split">
+    <section class="card grow">
+        <h2>Business Details</h2>
+        <form method="post">
+            {{ csrf_field() }}
+            <label>Company / business name <input name="name" value="{{ user.business_name }}" required></label>
+            <label>Subtitle / TPIN / registration number <input name="subtitle" value="{{ user.subtitle }}"></label>
+            <label>Contact / address <input name="contact" value="{{ user.contact }}"></label>
+            <label>Currency prefix (include a trailing space, e.g. "ZMW ") <input name="currency" value="{{ user.currency }}" maxlength="8"></label>
+            <label>Low-stock threshold <input name="low_stock_threshold" type="number" min="0" step="1" value="{{ user.low_stock_threshold }}" required></label>
+            <button class="btn primary">Save</button>
+        </form>
+    </section>
+
+    <section class="card side">
+        <h2>Departments</h2>
+        <form method="post" action="{{ url_for('add_department') }}" class="toolbar">
+            {{ csrf_field() }}
+            <input name="name" placeholder="New department name" required>
+            <button class="btn success">Create</button>
+        </form>
+        <table>
+            <tbody>
+            {% for d in departments %}
+                <tr>
+                    <td>{{ d.name }}</td>
+                    <td class="num">
+                        {% if d.name != 'General' %}
+                        <form method="post" action="{{ url_for('delete_department', dept_id=d.id) }}" onsubmit="return confirm('Delete this department? Its items move to General.');">
+                            {{ csrf_field() }}
+                            <button class="btn danger small">Delete</button>
+                        </form>
+                        {% endif %}
+                    </td>
+                </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </section>
+</div>
+{% endblock %}

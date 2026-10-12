@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}Login — {% endblock %}
+{% block content %}
+<div class="card narrow">
+    <h1>Secure POS Login</h1>
+    <form method="post">
+        {{ csrf_field() }}
+        <label>Username <input name="username" required autofocus autocomplete="username"></label>
+        <label>Password <input name="password" type="password" required autocomplete="current-password"></label>
+        <button class="btn primary wide">Login</button>
+    </form>
+    {% if signup_open %}
+    <p class="muted center"><a href="{{ url_for('setup') }}">Register a new business</a></p>
+    {% endif %}
+</div>
+{% endblock %}

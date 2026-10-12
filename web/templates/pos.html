@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+{% block title %}Sales &amp; POS — {% endblock %}
+{% block content %}
+<div class="stats">
+    <div class="stat"><span>Listed POS items</span><strong class="accent">{{ stats.listed }}</strong></div>
+    <div class="stat"><span>Low stock (&lt;{{ user.low_stock_threshold }})</span><strong class="warn">{{ stats.low }}</strong></div>
+    <div class="stat"><span>Units sold</span><strong class="ok">{{ stats.units }}</strong></div>
+    <div class="stat"><span>Revenue</span><strong class="gold">{{ stats.revenue|money }}</strong></div>
+</div>
+
+<div class="split">
+    <section class="card grow">
+        <h2>Available Products</h2>
+        <div class="toolbar">
+            <input id="search" type="search" placeholder="Search name or scan/type a code, then Enter" autofocus>
+            <select id="dept-filter">
+                <option value="">All departments</option>
+                {% for d in departments %}<option>{{ d }}</option>{% endfor %}
+            </select>
+        </div>
+        <div class="table-wrap">
+            <table id="products">
+                <thead><tr><th>Code</th><th>Name</th><th>Dept</th><th class="num">Stock</th><th class="num">Price</th><th></th></tr></thead>
+                <tbody>
+                {% for p in products %}
+                    <tr data-id="{{ p.id }}" data-code="{{ p.item_code }}" data-name="{{ p.name }}" data-dept="{{ p.department }}" data-stock="{{ p.quantity }}" data-price="{{ p.price }}">
+                        <td>{{ p.item_code }}</td>
+                        <td>{{ p.name }}</td>
+                        <td>{{ p.department }}</td>
+                        <td class="num">{{ p.quantity }}</td>
+                        <td class="num">{{ p.price|money }}</td>
+                        <td class="num"><button type="button" class="btn primary small">Add</button></td>
+                    </tr>
+                {% else %}
+                    <tr><td colspan="6" class="muted center">Nothing is listed for sale yet. Transfer stock to "Stock Listing" from the Inventory page.</td></tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </section>
+
+    <section class="card cart">
+        <h2>Active Invoice Cart</h2>
+        <form id="checkout" method="post" action="{{ url_for('checkout') }}" data-currency="{{ user.currency }}">
+            {{ csrf_field() }}
+            <input type="hidden" name="cart" id="cart-data">
+            <div class="table-wrap">
+                <table id="cart">
+                    <thead><tr><th>Name</th><th>Qty</th><th class="num">Total</th><th></th></tr></thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+            <p id="cart-empty" class="muted center">The cart is empty.</p>
+            <label>Customer name <input name="customer_name" placeholder="Walk-in Customer"></label>
+            <label>Phone number <input name="customer_phone"></label>
+            <label>Payment status
+                <select name="payment_status" id="payment-status">
+                    {% for s in statuses %}<option>{{ s }}</option>{% endfor %}
+                </select>
+            </label>
+            <label id="amount-row" hidden>Amount paid <input name="amount_paid" id="amount-paid" inputmode="decimal"></label>
+            <p class="total">Total: <span id="cart-total">{{ 0|money }}</span></p>
+            <button class="btn success wide" {{ 'disabled' if not can('sell') }}>Complete Invoice</button>
+            {% if not can('sell') %}<p class="muted center">Your account cannot process sales.</p>{% endif %}
+        </form>
+    </section>
+</div>
+{% endblock %}
+{% block scripts %}<script src="{{ url_for('static', filename='pos.js') }}"></script>{% endblock %}

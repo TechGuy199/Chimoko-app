@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}{{ inv.invoice_no }} — {% endblock %}
+{% block content %}
+<div class="toolbar no-print">
+    <a class="btn" href="{{ url_for('history') }}">&larr; All invoices</a>
+    <a class="btn" href="{{ url_for('pos') }}">New sale</a>
+    <button class="btn primary" onclick="window.print()">Print / Save as PDF</button>
+</div>
+
+<article class="invoice">
+    <header>
+        <h1>{{ user.business_name }}</h1>
+        {% if user.subtitle %}<p>{{ user.subtitle }}</p>{% endif %}
+        {% if user.contact %}<p>{{ user.contact }}</p>{% endif %}
+        <p class="doc-type">{{ 'Internal Farm Use Issue Note' if inv.kind == 'FARM_USE' else 'Official Sales Invoice' }}</p>
+    </header>
+
+    <dl>
+        <dt>Invoice no</dt><dd>{{ inv.invoice_no }}</dd>
+        <dt>Date &amp; time</dt><dd>{{ inv.created_at }}</dd>
+        <dt>Served by</dt><dd>{{ inv.created_by }}</dd>
+        <dt>{{ 'Recipient' if inv.kind == 'FARM_USE' else 'Customer' }}</dt><dd>{{ inv.customer_name }}</dd>
+        <dt>Phone</dt><dd>{{ inv.customer_phone or '—' }}</dd>
+    </dl>
+
+    <table>
+        <thead><tr><th>Code</th><th>Item</th><th class="num">Qty</th><th class="num">Unit price</th><th class="num">Total</th></tr></thead>
+        <tbody>
+        {% for line in lines %}
+            <tr>
+                <td>{{ line.item_code }}</td>
+                <td>{{ line.item_name }}</td>
+                <td class="num">{{ line.qty }}</td>
+                <td class="num">{{ line.unit_price|money }}</td>
+                <td class="num">{{ line.line_total|money }}</td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+
+    <dl class="totals">
+        <dt>Payment status</dt><dd>{{ inv.payment_status }}</dd>
+        <dt>Grand total</dt><dd>{{ inv.total|money }}</dd>
+        <dt>Amount paid</dt><dd>{{ inv.amount_paid|money }}</dd>
+        <dt>Balance due</dt><dd>{{ inv.balance_due|money }}</dd>
+    </dl>
+
+    <footer>Thank you for your business!</footer>
+</article>
+{% endblock %}
