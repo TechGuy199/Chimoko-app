@@ -228,6 +228,10 @@ td form { margin: 0; display: inline; }
 
 /* Customer statements */
 .home-tiles { margin-bottom: 16px; }
+.lump-sum { margin-bottom: 16px; }
+.lump-sum .toolbar { margin-bottom: 0; }
+.lump-sum input[name="amount"] { flex: 0 1 180px; margin-top: 0; }
+.lump-sum input[name="note"] { flex: 1 1 260px; margin-top: 0; }
 .hint { margin: -4px 0 10px; font-size: 11px; }
 .statement { background: var(--surface); border-radius: 10px; padding: 24px; }
 .statement header { text-align: center; border-bottom: 2px solid var(--surface-alt); margin-bottom: 16px; padding-bottom: 12px; }

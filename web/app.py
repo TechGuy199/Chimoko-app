@@ -1108,11 +1108,9 @@ def get_customer(db, customer_id):
     return customer
 
 
-@app.get("/customers/<int:customer_id>")
-@need("admin")
-def customer_statement(customer_id):
-    db, biz = get_db(), g.user["business_id"]
-    customer = get_customer(db, customer_id)
+def statement_data(db, customer_id):
+    """Everything a customer statement shows, shared by the page and the PDF."""
+    biz = g.user["business_id"]
     invoices = db.all(
         """SELECT id, invoice_no, created_at, created_by, payment_status, total, amount_paid, balance_due
            FROM invoices WHERE customer_id=? AND business_id=? AND kind='SALE' ORDER BY created_at, id""",
@@ -1168,10 +1166,183 @@ def customer_statement(customer_id):
         "invoices": len(invoices), "total": sum(inv["total"] for inv in invoices),
         "paid": sum(inv["amount_paid"] for inv in invoices), "owed": sum(inv["balance_due"] for inv in invoices),
     }
-    return render_template(
-        "customer.html", customer=customer, invoices=invoices, entries=entries, summary=summary,
-        products=sorted(products.values(), key=lambda p: -p["value"]), printed=now().strftime("%d %b %Y %H:%M"),
+    return {
+        "invoices": invoices, "entries": entries, "summary": summary,
+        "products": sorted(products.values(), key=lambda p: -p["value"]), "printed": now().strftime("%d %b %Y %H:%M"),
+    }
+
+
+@app.get("/customers/<int:customer_id>")
+@need("admin")
+def customer_statement(customer_id):
+    db = get_db()
+    return render_template("customer.html", customer=get_customer(db, customer_id), **statement_data(db, customer_id))
+
+
+@app.get("/customers/<int:customer_id>/statement.pdf")
+@need("admin")
+def customer_statement_pdf(customer_id):
+    db = get_db()
+    customer = get_customer(db, customer_id)
+    pdf = statement_pdf(customer, statement_data(db, customer_id))
+    filename = "statement-" + (re.sub(r"[^A-Za-z0-9]+", "-", customer["name"]).strip("-") or "customer") + ".pdf"
+    return Response(pdf, mimetype="application/pdf", headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
+def statement_pdf(customer, data):
+    """Lays the statement out on A4 pages and returns the PDF as bytes."""
+    # Imported here so the PDF library only loads when a statement is actually downloaded
+    from xml.sax.saxutils import escape
+
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+    from reportlab.lib.units import mm
+    from reportlab.platypus import KeepTogether, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+
+    base = getSampleStyleSheet()
+    small = ParagraphStyle("small", parent=base["Normal"], fontSize=8, leading=10)
+    right = ParagraphStyle("right", parent=small, alignment=2)
+    centre = ParagraphStyle("centre", parent=base["Normal"], alignment=1, fontSize=9, leading=12)
+    title = ParagraphStyle("title", parent=base["Title"], fontSize=16, spaceAfter=2)
+    heading = ParagraphStyle("heading", parent=base["Heading3"], fontSize=11, spaceBefore=10, spaceAfter=4)
+    grey, line = colors.HexColor("#eeeeee"), colors.HexColor("#bbbbbb")
+
+    def cell(value, style=small):
+        return Paragraph(escape(str(value)), style)
+
+    def amount(value, blank_zero=False):
+        return "" if blank_zero and not value else money(value)
+
+    def table(rows, widths, numeric_from, bold_last=False):
+        """A ruled table whose first row is the header; columns from numeric_from onward are right-aligned."""
+        style = [
+            ("FONTSIZE", (0, 0), (-1, -1), 8), ("LEADING", (0, 0), (-1, -1), 10), ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"), ("BACKGROUND", (0, 0), (-1, 0), grey),
+            ("LINEBELOW", (0, 0), (-1, -1), 0.4, line), ("ALIGN", (numeric_from, 0), (-1, -1), "RIGHT"),
+        ]
+        if bold_last:
+            style.append(("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"))
+        return Table(rows, colWidths=[w * mm for w in widths], repeatRows=1, style=TableStyle(style))
+
+    summary = data["summary"]
+    story = [Paragraph(escape(g.user["business_name"]), title)]
+    for extra in (g.user["subtitle"], g.user["contact"]):
+        if extra:
+            story.append(Paragraph(escape(extra), centre))
+    story += [
+        Spacer(1, 4), Paragraph("<b>CUSTOMER STATEMENT</b>", centre), Spacer(1, 8),
+        Table(
+            [
+                ["Customer", cell(customer["name"]), "Invoices", str(summary["invoices"])],
+                ["Phone", cell(customer["phone"] or "-"), "Total bought", money(summary["total"])],
+                ["Customer since", (customer["created_at"] or "")[:10] or "-", "Total paid", money(summary["paid"])],
+                ["Statement date", data["printed"], "Balance owed", money(summary["owed"])],
+            ],
+            colWidths=[28 * mm, 62 * mm, 30 * mm, 60 * mm],
+            style=TableStyle([
+                ("FONTSIZE", (0, 0), (-1, -1), 9), ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("TEXTCOLOR", (0, 0), (0, -1), colors.grey), ("TEXTCOLOR", (2, 0), (2, -1), colors.grey),
+                ("ALIGN", (3, 0), (3, -1), "RIGHT"), ("FONTNAME", (2, 3), (3, 3), "Helvetica-Bold"),
+                ("BOX", (0, 0), (-1, -1), 0.4, line),
+            ]),
+        ),
+        Paragraph("Statement of account", heading),
+    ]
+
+    ledger = [["Date / time", "Entry", "Details", "Charged", "Paid", "Balance owed"]]
+    for e in data["entries"]:
+        ledger.append([e["at"], cell(e["what"]), cell(e["detail"]), amount(e["charge"], True), amount(e["paid"], True), money(e["balance"])])
+    if data["entries"]:
+        ledger.append(["Totals", "", "", money(summary["total"]), money(summary["paid"]), money(summary["owed"])])
+        story.append(table(ledger, (30, 34, 50, 22, 22, 22), 3, bold_last=True))
+    else:
+        story.append(Paragraph("No purchases yet.", small))
+
+    if data["products"]:
+        story.append(Paragraph("What they have bought", heading))
+        bought = [["Code", "Product", "Quantity", "Value", "Last bought"]]
+        for p in data["products"]:
+            bought.append([cell(p["code"] or "-"), cell(p["name"]), str(p["qty"]), money(p["value"]), p["last"]])
+        story.append(table(bought, (30, 78, 20, 28, 24), 2))
+
+    if data["invoices"]:
+        story.append(Paragraph("Invoices in full", heading))
+    for inv in data["invoices"]:
+        rows = [["Code", "Item", "Qty", "Unit price", "Total"]]
+        for item in inv["lines"]:
+            rows.append([cell(item["item_code"] or "-"), cell(item["item_name"]), str(item["qty"]), money(item["unit_price"]), money(item["line_total"])])
+        rows += [
+            ["", "", "", "Invoice total", money(inv["total"])],
+            ["", "", "", "Paid so far", money(inv["amount_paid"])],
+            ["", "", "", "Still owed", money(inv["balance_due"])],
+        ]
+        caption = f"<b>{escape(inv['invoice_no'])}</b> &nbsp; {escape(inv['created_at'])} &nbsp; served by {escape(inv['created_by'] or '-')} &nbsp; <b>{escape(inv['payment_status'] or '')}</b>"
+        story.append(KeepTogether([Paragraph(caption, small), Spacer(1, 2), table(rows, (30, 84, 14, 26, 26), 2), Spacer(1, 8)]))
+
+    def footer(canvas, doc):
+        canvas.setFont("Helvetica", 7)
+        canvas.setFillColor(colors.grey)
+        canvas.drawString(15 * mm, 9 * mm, f"{customer['name']} - statement printed {data['printed']}")
+        canvas.drawRightString(A4[0] - 15 * mm, 9 * mm, f"Page {doc.page}")
+
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buffer, pagesize=A4, leftMargin=15 * mm, rightMargin=15 * mm, topMargin=14 * mm, bottomMargin=16 * mm,
+        title=f"Statement - {customer['name']}", author=g.user["business_name"],
     )
+    doc.build(story, onFirstPage=footer, onLaterPages=footer)
+    return buffer.getvalue()
+
+
+@app.post("/customers/<int:customer_id>/payment")
+@need("admin")
+def customer_payment(customer_id):
+    """Spreads one lump-sum payment over the customer's unpaid invoices, oldest first."""
+    db, biz = get_db(), g.user["business_id"]
+    get_customer(db, customer_id)
+    back = redirect(url_for("customer_statement", customer_id=customer_id))
+    unpaid = db.all(
+        """SELECT id, total, amount_paid, balance_due FROM invoices
+           WHERE customer_id=? AND business_id=? AND kind='SALE' AND balance_due > 0 ORDER BY created_at, id""",
+        (customer_id, biz),
+    )
+    owed = round(sum(inv["balance_due"] for inv in unpaid), 2)
+    try:
+        amount = round(number("amount"), 2)
+    except ValueError:
+        amount = 0.0
+    if amount <= 0 or amount > owed + 0.005:
+        flash(f"Enter an amount above zero and no more than the {money(owed)} this customer owes.", "error")
+        return back
+
+    stamp = now().strftime("%Y-%m-%d %H:%M:%S")
+    note = f"Part of a {money(amount)} lump-sum payment" + (f": {text('note')[:150]}" if text("note") else "")
+    remaining, settled = min(amount, owed), 0
+    try:
+        for inv in unpaid:
+            if remaining <= 0.005:
+                break
+            part = min(remaining, inv["balance_due"])
+            new_paid = min(inv["total"], round(inv["amount_paid"] + part, 2))
+            db.execute(
+                "INSERT INTO payment_log (business_id, kind, ref_id, old_paid, new_paid, note, changed_by, changed_at) VALUES (?, 'sale', ?, ?, ?, ?, ?, ?)",
+                (biz, inv["id"], inv["amount_paid"], new_paid, note, g.user["username"], stamp),
+            )
+            db.execute(
+                "UPDATE invoices SET amount_paid=?, balance_due=?, payment_status=? WHERE id=? AND business_id=?",
+                (new_paid, round(inv["total"] - new_paid, 2), payment_status_for(inv["total"], new_paid), inv["id"], biz),
+            )
+            remaining = round(remaining - part, 2)
+            settled += 1
+        db.commit()
+    except DB_ERRORS:
+        db.rollback()
+        flash("The payment could not be saved. Please try again.", "error")
+        return back
+
+    flash(f"Recorded {money(amount)} across {settled} invoice(s), oldest first. Balance now owed: {money(owed - min(amount, owed))}.", "ok")
+    return back
 
 
 @app.post("/customers/<int:customer_id>/update")

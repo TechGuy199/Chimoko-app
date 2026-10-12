@@ -3,8 +3,22 @@
 {% block content %}
 <div class="toolbar no-print">
     <a class="btn" href="{{ url_for('customers') }}">&larr; All customers</a>
-    <button class="btn primary" onclick="window.print()">Print / Save as PDF</button>
+    <a class="btn primary" href="{{ url_for('customer_statement_pdf', customer_id=customer.id) }}">Download PDF</a>
+    <button class="btn" onclick="window.print()">Print</button>
 </div>
+
+{% if summary.owed > 0 %}
+<section class="card no-print lump-sum">
+    <h2>Record a Payment</h2>
+    <p class="muted">One amount is spread over this customer's unpaid invoices, starting with the oldest. They owe {{ summary.owed|money }}.</p>
+    <form method="post" action="{{ url_for('customer_payment', customer_id=customer.id) }}" class="toolbar">
+        {{ csrf_field() }}
+        <input name="amount" type="number" min="0.01" max="{{ '%.2f'|format(summary.owed) }}" step="0.01" placeholder="Amount received" aria-label="Amount received" required>
+        <input name="note" maxlength="150" placeholder='Note (optional, e.g. "Mobile money, ref 1234")' aria-label="Note">
+        <button class="btn success">Record Payment</button>
+    </form>
+</section>
+{% endif %}
 
 <article class="statement">
     <header>
@@ -98,6 +112,6 @@
         <label>Phone number <input name="phone" value="{{ customer.phone }}"></label>
         <button class="btn primary">Save</button>
     </form>
-    <p class="muted">To record a payment, open the invoice above and use "Update Payment". It then appears on this statement with its date.</p>
+    <p class="muted">To correct a payment on one invoice, open that invoice and use "Update Payment". The change then appears on this statement with its date.</p>
 </section>
 {% endblock %}
