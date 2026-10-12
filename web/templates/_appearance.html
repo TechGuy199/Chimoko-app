@@ -1,0 +1,52 @@
+{# Theme and transparency form. Expects: look, themes, and optionally back ('settings' returns there after saving). #}
+<form method="post" action="{{ url_for('appearance') }}" class="appearance" id="appearance-form">
+    {{ csrf_field() }}
+    {% if back %}<input type="hidden" name="back" value="{{ back }}">{% endif %}
+
+    <span class="muted">Theme</span>
+    <div>
+        <span class="segmented" role="radiogroup" aria-label="Theme">
+            {% for value, label in themes %}
+            <label><input type="radio" name="theme" value="{{ value }}" {{ 'checked' if look.theme == value }}> {{ label }}</label>
+            {% endfor %}
+        </span>
+    </div>
+
+    <label for="glass" class="muted">Transparency</label>
+    <div class="range-row">
+        <input type="range" id="glass" name="glass" min="0" max="100" step="5" value="{{ look.glass }}">
+        <output id="glass-value" for="glass">{{ look.glass }}%</output>
+    </div>
+    <div class="range-ends"><span>Solid</span><span>Most see-through</span></div>
+
+    <div class="stats preview-tiles" aria-hidden="true">
+        <div class="stat"><span>Preview</span><strong>ZMW 1,250.00</strong><small>Tiles, cards and menus follow the slider</small></div>
+        <div class="stat"><span>Preview</span><strong class="ok">42</strong><small>Changes show here before you save</small></div>
+    </div>
+
+    <button class="btn primary">Save Appearance</button>
+    <button type="button" class="btn" id="appearance-reset">Reset to default</button>
+</form>
+<script>
+    // Live preview: move the slider or pick a theme and the whole page follows; nothing is kept until Save
+    (function () {
+        const root = document.documentElement;
+        const slider = document.getElementById("glass");
+        const shown = document.getElementById("glass-value");
+        const themes = Array.from(document.querySelectorAll('#appearance-form input[name="theme"]'));
+
+        function apply() {
+            root.style.setProperty("--glass", slider.value / 100);
+            shown.textContent = slider.value + "%";
+            const picked = themes.find(function (radio) { return radio.checked; });
+            if (picked) root.dataset.theme = picked.value;
+        }
+        slider.addEventListener("input", apply);
+        themes.forEach(function (radio) { radio.addEventListener("change", apply); });
+        document.getElementById("appearance-reset").addEventListener("click", function () {
+            slider.value = 50;
+            themes.forEach(function (radio) { radio.checked = radio.value === "dark"; });
+            apply();
+        });
+    })();
+</script>

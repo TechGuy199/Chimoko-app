@@ -95,7 +95,7 @@ def load_user_and_check_csrf():
     uid = session.get("uid")
     if uid:
         g.user = get_db().one(
-            """SELECT u.id, u.business_id, u.username, u.role, u.can_sell, u.can_procure, u.can_transfer, u.can_delete,
+            """SELECT u.id, u.business_id, u.username, u.role, u.can_sell, u.can_procure, u.can_transfer, u.can_delete, u.theme, u.glass,
                       b.name AS business_name, b.subtitle, b.contact, b.currency, b.low_stock_threshold
                FROM users u JOIN businesses b ON b.id = u.business_id WHERE u.id=?""",
             (uid,),
@@ -130,7 +130,40 @@ def need(perm):
 
 @app.context_processor
 def template_globals():
-    return {"csrf_field": csrf_field, "user": g.get("user"), "can": can}
+    return {"csrf_field": csrf_field, "user": g.get("user"), "can": can, "look": appearance_of(g.get("user")), "themes": THEMES}
+
+
+THEMES = (("dark", "Dark"), ("light", "Light"), ("system", "Match my device"))
+DEFAULT_GLASS = 50
+
+
+def appearance_of(user):
+    """The signed-in user's theme and transparency (0-100), falling back to the defaults for anything unset or invalid."""
+    theme = user["theme"] if user and user["theme"] in dict(THEMES) else "dark"
+    glass = user["glass"] if user and isinstance(user["glass"], int) and 0 <= user["glass"] <= 100 else DEFAULT_GLASS
+    return {"theme": theme, "glass": glass}
+
+
+@app.route("/appearance", methods=["GET", "POST"])
+@need(None)
+def appearance():
+    """Every user chooses their own look; it follows them to whichever device they sign in on."""
+    if request.method == "POST":
+        theme = text("theme")
+        try:
+            glass = number("glass", int)
+        except ValueError:
+            glass = -1
+        if theme not in dict(THEMES) or not 0 <= glass <= 100:
+            flash("Choose a theme and a transparency between 0 and 100.", "error")
+        else:
+            db = get_db()
+            db.execute("UPDATE users SET theme=?, glass=? WHERE id=?", (theme, glass, g.user["id"]))
+            db.commit()
+            flash("Appearance saved.", "ok")
+        back_to_settings = request.form.get("back") == "settings" and g.user["role"] == "admin"
+        return redirect(url_for("settings" if back_to_settings else "appearance"))
+    return render_template("appearance.html")
 
 
 @app.template_filter("money")

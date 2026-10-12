@@ -158,6 +158,9 @@ def init_schema():
         add_column(db, "procurements", "amount_paid", "DOUBLE PRECISION")
         db.execute("UPDATE procurements SET amount_paid = total_cost WHERE amount_paid IS NULL")
         add_column(db, "invoices", "customer_id", "INTEGER")
+        # Each user's own appearance choices: colour theme and how see-through the interface is (0-100)
+        add_column(db, "users", "theme", "TEXT")
+        add_column(db, "users", "glass", "INTEGER")
         # Statutory rules became separate employee and employer rates. Settings saved under the old
         # "one rate, paid by one side" rule keep exactly the same effect.
         for column in ("napsa_employee_pct", "napsa_employer_pct", "nhima_employee_pct", "nhima_employer_pct"):

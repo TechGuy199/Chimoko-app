@@ -41,4 +41,10 @@
         </table>
     </section>
 </div>
+
+<section class="card block narrow-form">
+    <h2>Appearance</h2>
+    <p class="muted">Your own theme and transparency. Each user sets theirs from the menu under their name; this does not change anyone else's.</p>
+    {% with back='settings' %}{% include "_appearance.html" %}{% endwith %}
+</section>
 {% endblock %}

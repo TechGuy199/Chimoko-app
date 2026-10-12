@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="{{ look.theme }}" style="--glass: {{ look.glass / 100 }}">
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -61,6 +61,7 @@
         <summary class="btn ghost">{{ user.username }}</summary>
         <div class="menu-panel">
             <span class="menu-heading">Signed in as {{ user.role }}</span>
+            <a class="menu-item {{ 'active' if request.endpoint == 'appearance' }}" href="{{ url_for('appearance') }}">Appearance</a>
             <form method="post" action="{{ url_for('logout') }}">
                 {{ csrf_field() }}
                 <button class="menu-item danger">Logout</button>
