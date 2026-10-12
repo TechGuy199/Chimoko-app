@@ -24,7 +24,12 @@ TZ = ZoneInfo(os.environ.get("APP_TIMEZONE", "Africa/Lusaka"))
 PAYMENT_STATUSES = ("Paid", "Partial Payment", "Unpaid")
 PERMISSIONS = ("sell", "procure", "transfer", "delete")
 WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
-HR_DEFAULTS = {"non_working_days": "saturday,sunday", "napsa_pct": 5.0, "nhima_pct": 2.0, "napsa_bearer": "employee", "nhima_bearer": "employee"}
+# Statutory rules: each contribution has an employee rate (deducted from pay) and an employer rate (paid on top)
+STATUTORY_RATES = ("napsa_employee_pct", "napsa_employer_pct", "nhima_employee_pct", "nhima_employer_pct")
+HR_DEFAULTS = {
+    "non_working_days": "saturday,sunday", "napsa_employee_pct": 5.0, "napsa_employer_pct": 5.0,
+    "nhima_employee_pct": 1.0, "nhima_employer_pct": 1.0, "contribution_base": "basic",
+}
 
 if ON_VERCEL and not IS_POSTGRES:
     raise RuntimeError("DATABASE_URL is not set. Connect a Postgres database to this Vercel project.")
@@ -892,7 +897,18 @@ def procurements_csv():
 
 # --- HR & PAYROLL (ADMIN) ---
 def hr_settings_for(db, biz):
-    return db.one("SELECT non_working_days, napsa_pct, nhima_pct, napsa_bearer, nhima_bearer FROM hr_settings WHERE business_id=?", (biz,)) or dict(HR_DEFAULTS)
+    saved = db.one(
+        f"SELECT non_working_days, {', '.join(STATUTORY_RATES)}, contribution_base FROM hr_settings WHERE business_id=?", (biz,)
+    )
+    rules = dict(HR_DEFAULTS)
+    rules.update({key: value for key, value in (saved or {}).items() if value is not None})
+    return rules
+
+
+def statutory_amounts(rules, calculated_basic, bonuses_total):
+    """The employee and employer share of NAPSA and NHIMA for one payslip. Every new payslip goes through here."""
+    base = calculated_basic + (bonuses_total if rules["contribution_base"] == "gross" else 0.0)
+    return {rate[:-4]: round(base * rules[rate] / 100.0, 2) for rate in STATUTORY_RATES}
 
 
 def expected_work_days(year, month, non_working):
@@ -985,23 +1001,33 @@ def hr_settings():
     db, biz = get_db(), g.user["business_id"]
     if request.method == "POST":
         non_working = ",".join(day for day in WEEKDAYS if request.form.get("day_" + day))
-        napsa_bearer, nhima_bearer = text("napsa_bearer"), text("nhima_bearer")
+        base = text("contribution_base")
         try:
-            napsa, nhima = number("napsa_pct"), number("nhima_pct")
+            rates = [number(rate) for rate in STATUTORY_RATES]
         except ValueError:
-            napsa = nhima = -1
-        if not (0 <= napsa <= 100 and 0 <= nhima <= 100) or napsa_bearer not in ("employee", "employer") or nhima_bearer not in ("employee", "employer"):
-            flash("Rates must be percentages between 0 and 100.", "error")
+            rates = [-1.0]
+        if not all(0 <= rate <= 100 for rate in rates) or base not in ("basic", "gross"):
+            flash("Every rate must be a percentage between 0 and 100. Use 0 where a side pays nothing.", "error")
         elif len(non_working.split(",")) == 7:
             flash("At least one day of the week must be a working day.", "error")
         else:
-            values = (non_working, napsa, nhima, napsa_bearer, nhima_bearer, biz)
+            # napsa_pct, nhima_pct and the two bearer columns belong to the old single-rate rule; they are
+            # still filled in because the table requires them, but nothing reads them any more
+            values = (non_working, *rates, base, rates[0], rates[2], biz)
             if db.one("SELECT business_id FROM hr_settings WHERE business_id=?", (biz,)):
-                db.execute("UPDATE hr_settings SET non_working_days=?, napsa_pct=?, nhima_pct=?, napsa_bearer=?, nhima_bearer=? WHERE business_id=?", values)
+                db.execute(
+                    f"""UPDATE hr_settings SET non_working_days=?, {'=?, '.join(STATUTORY_RATES)}=?, contribution_base=?,
+                               napsa_pct=?, nhima_pct=?, napsa_bearer='employee', nhima_bearer='employee' WHERE business_id=?""",
+                    values,
+                )
             else:
-                db.execute("INSERT INTO hr_settings (non_working_days, napsa_pct, nhima_pct, napsa_bearer, nhima_bearer, business_id) VALUES (?, ?, ?, ?, ?, ?)", values)
+                db.execute(
+                    f"""INSERT INTO hr_settings (non_working_days, {', '.join(STATUTORY_RATES)}, contribution_base, napsa_pct, nhima_pct, business_id, napsa_bearer, nhima_bearer)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'employee', 'employee')""",
+                    values,
+                )
             db.commit()
-            flash("HR settings saved. They apply to payslips computed from now on.", "ok")
+            flash("Statutory rules saved. They apply to every payslip computed or imported from now on; existing payslips are unchanged.", "ok")
             return redirect(url_for("hr"))
         return redirect(url_for("hr_settings"))
 
@@ -1036,11 +1062,10 @@ def new_payslip():
 
         basic = employee["basic_salary"]
         calculated_basic = round(basic / expected * worked, 2)
-        napsa = round(calculated_basic * hr_set["napsa_pct"] / 100.0, 2)
-        nhima = round(calculated_basic * hr_set["nhima_pct"] / 100.0, 2)
-        # A contribution is deducted from pay only when the employee bears it; otherwise it is an employer cost
-        emp_napsa, employer_napsa = (napsa, 0.0) if hr_set["napsa_bearer"] == "employee" else (0.0, napsa)
-        emp_nhima, employer_nhima = (nhima, 0.0) if hr_set["nhima_bearer"] == "employee" else (0.0, nhima)
+        # The employee share comes off their pay; the employer share is a cost on top and never touches net pay
+        share = statutory_amounts(hr_set, calculated_basic, sum(bonuses.values()))
+        emp_napsa, employer_napsa = share["napsa_employee"], share["napsa_employer"]
+        emp_nhima, employer_nhima = share["nhima_employee"], share["nhima_employer"]
         net = round(calculated_basic + sum(bonuses.values()) - sum(deductions.values()) - emp_napsa - emp_nhima, 2)
 
         payslip_id = db.insert(
@@ -1070,7 +1095,8 @@ def payslips():
     marks = ",".join("?" for _ in ids)
     slips = db.all(
         f"""SELECT id, employee_name, pay_month, basic_salary, expected_days, worked_days, calculated_basic, bonuses_json, deductions_json,
-                   napsa_amt, nhima_amt, net_payable FROM payroll WHERE business_id=? AND id IN ({marks}) ORDER BY id""",
+                   napsa_amt, nhima_amt, employer_napsa, employer_nhima, net_payable
+            FROM payroll WHERE business_id=? AND id IN ({marks}) ORDER BY id""",
         [biz] + ids,
     )
     for slip in slips:
@@ -1868,8 +1894,8 @@ IMPORT_TEMPLATES = {
         ["", "2026-10-01 09:30", "Jane Banda", "0977123456", "SEED-001", "Maize Seed 10kg", 2, 600, "Paid", ""],
     ),
     "payroll": (
-        ["Employee Name", "NRC Number", "Employment Type", "Pay Month", "Basic Salary", "Expected Days", "Worked Days", "Bonus: Transport", "Deduction: Advance", "NAPSA", "NHIMA", "Net Pay"],
-        ["Mary Banda", "123456/10/1", "Permanent", "2026-10", 4400, 22, 22, 100, 0, "", "", ""],
+        ["Employee Name", "NRC Number", "Employment Type", "Pay Month", "Basic Salary", "Expected Days", "Worked Days", "Bonus: Transport", "Deduction: Advance", "Employee NAPSA", "Employee NHIMA", "Employer NAPSA", "Employer NHIMA", "Net Pay"],
+        ["Mary Banda", "123456/10/1", "Permanent", "2026-10", 4400, 22, 22, 100, 0, "", "", "", "", ""],
     ),
 }
 PAYROLL_COLUMNS = {
@@ -1882,8 +1908,10 @@ PAYROLL_COLUMNS = {
     "worked_days": ("worked days", "days worked", "work days", "actual days worked"),
     "bonuses": ("bonuses", "bonus", "allowances", "additions"),
     "deductions": ("deductions", "deduction", "other deductions"),
-    "napsa": ("napsa",),
-    "nhima": ("nhima",),
+    "napsa": ("napsa", "employee napsa", "napsa employee"),
+    "nhima": ("nhima", "employee nhima", "nhima employee"),
+    "employer_napsa": ("employer napsa", "napsa employer"),
+    "employer_nhima": ("employer nhima", "nhima employer"),
     "net_pay": ("net pay", "net payable", "net salary", "net"),
 }
 # Excel likes to turn "2026-10" into "Oct-26", so that spelling is accepted too
@@ -2318,6 +2346,8 @@ def import_payroll():
         worked = optional_amount(rec, "worked_days", "worked days", problems)
         napsa = optional_amount(rec, "napsa", "NAPSA", problems)
         nhima = optional_amount(rec, "nhima", "NHIMA", problems)
+        employer_napsa = optional_amount(rec, "employer_napsa", "employer NAPSA", problems)
+        employer_nhima = optional_amount(rec, "employer_nhima", "employer NHIMA", problems)
         net = optional_amount(rec, "net_pay", "net pay", problems, minimum=None)
         if expected is not None and expected <= 0:
             problems.append("expected days must be above zero")
@@ -2363,16 +2393,12 @@ def import_payroll():
         if worked is None:
             worked = expected
         calculated_basic = round(basic / expected * worked, 2)
-        # Amounts given in the file are taken as deducted from the employee; blanks follow the HR settings
-        employer_napsa = employer_nhima = 0.0
-        if napsa is None:
-            napsa = round(calculated_basic * hr_set["napsa_pct"] / 100.0, 2)
-            if hr_set["napsa_bearer"] != "employee":
-                napsa, employer_napsa = 0.0, napsa
-        if nhima is None:
-            nhima = round(calculated_basic * hr_set["nhima_pct"] / 100.0, 2)
-            if hr_set["nhima_bearer"] != "employee":
-                nhima, employer_nhima = 0.0, nhima
+        # Blank cells follow the statutory rules in HR Settings, each side on its own; amounts in the file are kept as given
+        share = statutory_amounts(hr_set, calculated_basic, sum(named["bonus"].values()))
+        napsa = share["napsa_employee"] if napsa is None else napsa
+        nhima = share["nhima_employee"] if nhima is None else nhima
+        employer_napsa = share["napsa_employer"] if employer_napsa is None else round(employer_napsa, 2)
+        employer_nhima = share["nhima_employer"] if employer_nhima is None else round(employer_nhima, 2)
         if net is None:
             net = calculated_basic + sum(named["bonus"].values()) - sum(named["deduction"].values()) - napsa - nhima
 

@@ -30,10 +30,10 @@
             <tr><td colspan="2" class="muted">None</td></tr>
         {% endfor %}
         </tbody>
-        <thead><tr><th>Statutory &amp; custom deductions</th><th class="num">Amount</th></tr></thead>
+        <thead><tr><th>Deductions from the employee's pay</th><th class="num">Amount</th></tr></thead>
         <tbody>
-            <tr><td>NAPSA contribution</td><td class="num">{{ slip.napsa_amt|money }}</td></tr>
-            <tr><td>NHIMA contribution</td><td class="num">{{ slip.nhima_amt|money }}</td></tr>
+            <tr><td>NAPSA, employee contribution</td><td class="num">{{ slip.napsa_amt|money }}</td></tr>
+            <tr><td>NHIMA, employee contribution</td><td class="num">{{ slip.nhima_amt|money }}</td></tr>
         {% for name, amount in slip.deductions.items() %}
             <tr><td>{{ name }}</td><td class="num">{{ amount|money }}</td></tr>
         {% endfor %}
@@ -43,6 +43,14 @@
     <dl class="totals">
         <dt>Net payable salary</dt><dd>{{ slip.net_payable|money }}</dd>
     </dl>
+
+    <table class="employer-share">
+        <thead><tr><th>Employer contributions (paid by the business, not deducted from pay)</th><th class="num">Amount</th></tr></thead>
+        <tbody>
+            <tr><td>NAPSA, employer contribution</td><td class="num">{{ (slip.employer_napsa or 0)|money }}</td></tr>
+            <tr><td>NHIMA, employer contribution</td><td class="num">{{ (slip.employer_nhima or 0)|money }}</td></tr>
+        </tbody>
+    </table>
 </article>
 {% else %}
 <p class="muted center">Those payslips could not be found.</p>

@@ -266,6 +266,15 @@ td form { margin: 0; display: inline; }
 .card li { margin-bottom: 4px; }
 input[type="file"] { padding: 6px; }
 
+/* Statutory rules */
+.card.rules-form { max-width: 760px; }
+table.rules th small, table.rules td small { display: block; font-weight: 400; color: var(--text-muted); font-size: 11px; white-space: normal; }
+table.rules input { margin-top: 0; max-width: 140px; }
+.rules-summary { margin-bottom: 14px; padding: 10px 12px; border-radius: 8px; background: var(--surface-alt); font-size: 12px; }
+.rules-summary p { margin: 2px 0; }
+.employer-share { margin-top: 16px; }
+.employer-share th { font-weight: 700; white-space: normal; }
+
 /* HR & payroll */
 .card.block { margin-top: 16px; }
 .card.narrow-form { max-width: 560px; }

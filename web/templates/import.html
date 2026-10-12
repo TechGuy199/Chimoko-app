@@ -64,11 +64,11 @@
         <p>Each row is one payslip for one employee for one month. Imported payslips appear under HR &amp; Payroll, in the monthly summary, and can be printed.</p>
         <ul class="muted">
             <li><strong>Required:</strong> Employee Name, Pay Month, Basic Salary.</li>
-            <li><strong>Optional:</strong> NRC Number, Employment Type, Expected Days, Worked Days, Bonuses, Deductions, NAPSA, NHIMA, Net Pay.</li>
+            <li><strong>Optional:</strong> NRC Number, Employment Type, Expected Days, Worked Days, Bonuses, Deductions, Employee NAPSA, Employee NHIMA, Employer NAPSA, Employer NHIMA, Net Pay.</li>
             <li>Name each bonus or deduction with its own column, headed like <strong>Bonus: Transport</strong> or <strong>Deduction: Advance</strong>. Add as many as you need.</li>
             <li>Employees are matched by NRC Number when the file has one, otherwise by name. Anyone not yet registered is registered with the salary in the file.</li>
             <li>Blank Expected Days are counted from the pay month and your HR settings; blank Worked Days mean a full month.</li>
-            <li>Blank NAPSA and NHIMA are worked out from your HR settings. Amounts you provide are used as they are, as employee deductions.</li>
+            <li>Blank NAPSA and NHIMA cells, for the employee and for the employer, are worked out from the statutory rules in HR Settings. Amounts you provide are kept as they are.</li>
             <li>Blank Net Pay is calculated. A Net Pay you provide is stored as given, even if it differs from the calculation.</li>
             <li>Pay Month can be 2026-10, October 2026 or Oct-26.</li>
             <li>An employee who already has a payslip for that month is rejected, which protects against importing a file twice.</li>

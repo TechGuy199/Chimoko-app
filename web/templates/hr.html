@@ -96,7 +96,7 @@
     <h2>Monthly Payroll &amp; Statutory Summary</h2>
     <div class="table-wrap">
         <table>
-            <thead><tr><th>Month</th><th class="num">Slips</th><th class="num">Total basic</th><th class="num">Employee NAPSA</th><th class="num">Employee NHIMA</th><th class="num">Employer NAPSA</th><th class="num">Employer NHIMA</th><th class="num">Net payout</th></tr></thead>
+            <thead><tr><th>Month</th><th class="num">Slips</th><th class="num">Total basic</th><th class="num">Employee NAPSA</th><th class="num">Employee NHIMA</th><th class="num">Employer NAPSA</th><th class="num">Employer NHIMA</th><th class="num">NAPSA to remit</th><th class="num">NHIMA to remit</th><th class="num">Net payout</th></tr></thead>
             <tbody>
             {% for m in summary %}
                 <tr>
@@ -107,10 +107,12 @@
                     <td class="num">{{ m.emp_nhima|money }}</td>
                     <td class="num">{{ m.empr_napsa|money }}</td>
                     <td class="num">{{ m.empr_nhima|money }}</td>
+                    <td class="num">{{ (m.emp_napsa + m.empr_napsa)|money }}</td>
+                    <td class="num">{{ (m.emp_nhima + m.empr_nhima)|money }}</td>
                     <td class="num ok">{{ m.net|money }}</td>
                 </tr>
             {% else %}
-                <tr><td colspan="8" class="muted center">Nothing to summarise yet.</td></tr>
+                <tr><td colspan="10" class="muted center">Nothing to summarise yet.</td></tr>
             {% endfor %}
             </tbody>
         </table>

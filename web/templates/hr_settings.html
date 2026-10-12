@@ -2,31 +2,55 @@
 {% block title %}HR Settings — {% endblock %}
 {% block content %}
 <p><a href="{{ url_for('hr') }}">&larr; Back to HR &amp; Payroll</a></p>
-<div class="card narrow-form">
+<div class="card rules-form">
     <h1>HR &amp; Statutory Settings</h1>
     <form method="post">
         {{ csrf_field() }}
-        <h2>Non-working days</h2>
+        <h2>Statutory contribution rules</h2>
+        <p class="muted">
+            Each contribution has two separate rules. The <strong>employee</strong> rate is deducted from the employee's pay.
+            The <strong>employer</strong> rate is paid by the business on top of the salary and never reduces the employee's pay.
+            Enter 0 where a side pays nothing.
+        </p>
+        <div class="table-wrap">
+            <table class="rules">
+                <thead><tr><th>Contribution</th><th>Employee rate (%)<small>deducted from pay</small></th><th>Employer rate (%)<small>paid by the business</small></th><th class="num">Total remitted</th></tr></thead>
+                <tbody>
+                    <tr>
+                        <td><strong>NAPSA</strong><small>National Pension Scheme</small></td>
+                        <td><input name="napsa_employee_pct" type="number" min="0" max="100" step="0.01" value="{{ '%g'|format(s.napsa_employee_pct) }}" aria-label="NAPSA employee rate" required></td>
+                        <td><input name="napsa_employer_pct" type="number" min="0" max="100" step="0.01" value="{{ '%g'|format(s.napsa_employer_pct) }}" aria-label="NAPSA employer rate" required></td>
+                        <td class="num">{{ '%g'|format(s.napsa_employee_pct + s.napsa_employer_pct) }}%</td>
+                    </tr>
+                    <tr>
+                        <td><strong>NHIMA</strong><small>National Health Insurance</small></td>
+                        <td><input name="nhima_employee_pct" type="number" min="0" max="100" step="0.01" value="{{ '%g'|format(s.nhima_employee_pct) }}" aria-label="NHIMA employee rate" required></td>
+                        <td><input name="nhima_employer_pct" type="number" min="0" max="100" step="0.01" value="{{ '%g'|format(s.nhima_employer_pct) }}" aria-label="NHIMA employer rate" required></td>
+                        <td class="num">{{ '%g'|format(s.nhima_employee_pct + s.nhima_employer_pct) }}%</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+        <label class="spaced">Rates are applied to
+            <select name="contribution_base">
+                <option value="basic" {{ 'selected' if s.contribution_base == 'basic' }}>Basic pay for the days worked</option>
+                <option value="gross" {{ 'selected' if s.contribution_base == 'gross' }}>Gross pay (basic pay for the days worked, plus bonuses and allowances)</option>
+            </select>
+        </label>
+
+        <h2 class="spaced">Where these rules apply</h2>
+        <ul class="muted">
+            <li>Every payslip made with <strong>Compute Payslip</strong>.</li>
+            <li>Every payslip brought in through <strong>Import &rarr; Salaries &amp; Wages</strong>, wherever the file leaves a contribution blank.</li>
+            <li>Each payslip stores the four amounts worked out at the time, so changing a rate here affects new payslips only. Payslips already saved keep their figures.</li>
+        </ul>
+
+        <h2 class="spaced">Non-working days</h2>
         {% for day in weekdays %}
         <label class="check"><input type="checkbox" name="day_{{ day }}" {{ 'checked' if day in non_working }}> {{ day|capitalize }}</label>
         {% endfor %}
 
-        <h2 class="spaced">Statutory contributions</h2>
-        <label>NAPSA rate (%) <input name="napsa_pct" type="number" min="0" max="100" step="0.01" value="{{ s.napsa_pct }}" required></label>
-        <label>NAPSA paid by
-            <select name="napsa_bearer">
-                <option value="employee" {{ 'selected' if s.napsa_bearer == 'employee' }}>Employee (deducted from pay)</option>
-                <option value="employer" {{ 'selected' if s.napsa_bearer == 'employer' }}>Employer</option>
-            </select>
-        </label>
-        <label>NHIMA rate (%) <input name="nhima_pct" type="number" min="0" max="100" step="0.01" value="{{ s.nhima_pct }}" required></label>
-        <label>NHIMA paid by
-            <select name="nhima_bearer">
-                <option value="employee" {{ 'selected' if s.nhima_bearer == 'employee' }}>Employee (deducted from pay)</option>
-                <option value="employer" {{ 'selected' if s.nhima_bearer == 'employer' }}>Employer</option>
-            </select>
-        </label>
-        <button class="btn primary">Save Settings</button>
+        <button class="btn primary spaced">Save Settings</button>
     </form>
 </div>
 {% endblock %}

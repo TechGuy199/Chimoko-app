@@ -4,10 +4,12 @@
 <p><a href="{{ url_for('hr') }}">&larr; Back to HR &amp; Payroll</a></p>
 <div class="card narrow-form">
     <h1>Monthly Payslip Calculator</h1>
-    <p class="muted">
-        NAPSA {{ '%g'|format(hr.napsa_pct) }}% paid by the {{ hr.napsa_bearer }}, NHIMA {{ '%g'|format(hr.nhima_pct) }}% paid by the {{ hr.nhima_bearer }}.
-        <a href="{{ url_for('hr_settings') }}">Change</a>
-    </p>
+    <div class="rules-summary">
+        <p><strong>Statutory rules applied to this payslip</strong> (on {{ 'gross pay' if hr.contribution_base == 'gross' else 'basic pay for the days worked' }})</p>
+        <p>NAPSA: employee {{ '%g'|format(hr.napsa_employee_pct) }}% deducted from pay, employer {{ '%g'|format(hr.napsa_employer_pct) }}% paid on top.</p>
+        <p>NHIMA: employee {{ '%g'|format(hr.nhima_employee_pct) }}% deducted from pay, employer {{ '%g'|format(hr.nhima_employer_pct) }}% paid on top.</p>
+        <p><a href="{{ url_for('hr_settings') }}">Change the rules</a></p>
+    </div>
     <form method="post" id="payslip-form" data-non-working="{{ hr.non_working_days }}">
         {{ csrf_field() }}
         <label>Employee
