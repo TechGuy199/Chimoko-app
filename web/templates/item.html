@@ -23,7 +23,21 @@
         <h1>{{ item.name }} <span class="muted">(code {{ item.item_code }})</span></h1>
     </div>
 </div>
-<p>In stock: <strong class="{{ 'warn' if item.quantity < user.low_stock_threshold else 'ok' }}">{{ item.quantity }}</strong></p>
+<p>
+    In stock: <strong class="{{ 'warn' if item.quantity < user.low_stock_threshold else 'ok' }}">{{ item.quantity }}</strong>
+    {% if seed %}
+    pack(s)
+    {% if item.seeds_per_pack %}
+    of {{ '{:,}'.format(item.seeds_per_pack) }} seeds = <strong>{{ '{:,}'.format(item.seeds_per_pack * item.quantity) }}</strong> seeds
+    {% if per_seed is not none %}<span class="muted">&middot; {{ per_seed|money4 }} per seed</span>{% endif %}
+    {% else %}
+    <span class="muted">&middot; seeds per pack not recorded yet</span>
+    {% endif %}
+    {% endif %}
+</p>
+{% if seed and listing %}
+<p class="muted">Seedlings on sale from this seed: <strong>{{ listing.quantity }}</strong> as &ldquo;{{ listing.name }}&rdquo; at {{ listing.price|money }} each.</p>
+{% endif %}
 
 <div class="split">
     <section class="card grow">
@@ -36,7 +50,10 @@
             <fieldset {{ 'disabled' if access.procure.state not in ('own', 'approved') }}>
                 <div class="grid">
                     <label>Item name <input name="name" value="{{ item.name }}" required></label>
-                    <label>Category <input name="category" value="{{ item.category }}"></label>
+                    <label>Category <input name="category" id="detail-category" value="{{ item.category }}"></label>
+                    <label id="detail-seeds-row" {{ 'hidden' if not seed }}>Seeds per pack
+                        <input name="seeds_per_pack" id="detail-seeds" type="number" min="1" step="1" inputmode="numeric" value="{{ item.seeds_per_pack or '' }}">
+                    </label>
                     <label>Department
                         <select name="department">
                             {% for d in departments %}<option {{ 'selected' if d == item.department }}>{{ d }}</option>{% endfor %}
@@ -63,15 +80,40 @@
             <h2>Transfer / Use</h2>
             {% if access.transfer.state in ('own', 'approved') %}
             {% if access.transfer.state == 'approved' %}<p class="flash ok">An admin approved one transfer. Use it before {{ access.transfer.until }}.</p>{% endif %}
-            <form method="post" action="{{ url_for('transfer', item_id=item.id) }}">
+            <form method="post" action="{{ url_for('transfer', item_id=item.id) }}" id="transfer-form"
+                  {% if seed %}data-seed="1" data-seeds-per-pack="{{ item.seeds_per_pack or '' }}" data-pack-cost="{{ item.unit_cost }}" data-currency="{{ user.currency }}"{% endif %}>
                 {{ csrf_field() }}
                 <label>Destination
-                    <select name="destination">
-                        <option value="pos">Stock Listing (sell in POS)</option>
+                    <select name="destination" id="transfer-destination">
+                        <option value="pos">{{ 'Sow and list seedlings for sale (POS)' if seed else 'Stock Listing (sell in POS)' }}</option>
                         <option value="farm">Farm Use (internal)</option>
                     </select>
                 </label>
-                <label>Quantity <input name="quantity" type="number" min="1" max="{{ item.quantity }}" step="1" value="1" required></label>
+                <label>Quantity {% if seed %}(packs){% endif %} <input name="quantity" id="transfer-quantity" type="number" min="1" max="{{ item.quantity }}" step="1" value="1" required></label>
+                {% if seed %}
+                {# Seed packs are sown; the seedlings that come up are what goes on sale. These are the greenhouse questions. #}
+                <fieldset class="seedling-fields" id="seedling-fields">
+                    <legend>Seedlings for sale</legend>
+                    <p class="muted">The seeds are sown and the seedlings that come up go on sale, listed under the code <strong>{{ item.item_code }}-SDL</strong>.</p>
+                    {% if not item.seeds_per_pack %}
+                    <label>Seeds per pack (not recorded yet)
+                        <input name="seeds_per_pack" id="sf-seeds" type="number" min="1" step="1" inputmode="numeric" placeholder="e.g. 1000">
+                    </label>
+                    {% endif %}
+                    <label>Estimated germination rate (%)
+                        <input name="germination_pct" id="sf-germination" type="number" min="0.1" max="100" step="any" inputmode="decimal" placeholder="e.g. 80">
+                    </label>
+                    <label>Cost of one seed ({{ user.currency|trim }})
+                        <input name="seed_cost" id="sf-seed-cost" type="number" min="0" step="any" inputmode="decimal" value="{{ '%.4f'|format(per_seed) if per_seed is not none }}">
+                        <small class="muted">Filled in from the pack cost ({{ item.unit_cost|money }}) divided by the seeds in a pack. Change it if this batch cost differently.</small>
+                    </label>
+                    <label>Name for the seedlings <input name="seedling_name" value="{{ seedling_name }}" maxlength="100"></label>
+                    <label>Selling price per seedling (blank = what they cost to raise, rounded up)
+                        <input name="seedling_price" id="sf-price" type="number" min="0" step="0.01" inputmode="decimal" value="{{ listing.price if listing }}">
+                    </label>
+                    <p class="seedling-summary" id="sf-summary" aria-live="polite"></p>
+                </fieldset>
+                {% endif %}
                 <label>Recipient name (farm use) <input name="recipient"></label>
                 <label>Phone number (farm use) <input name="phone"></label>
                 <button class="btn success wide" {{ 'disabled' if item.quantity < 1 }}>Confirm Transfer</button>
@@ -95,4 +137,36 @@
         </section>
     </div>
 </div>
+
+{% if seed %}
+<section class="card block">
+    <h2>Sowing History</h2>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr><th>When</th><th class="num">Packs</th><th class="num">Seeds sown</th><th class="num">Germination</th><th class="num">Cost per seed</th><th class="num">Seedlings</th><th class="num">Cost per seedling</th><th class="num">Sells at</th><th>By</th></tr>
+            </thead>
+            <tbody>
+            {% for b in batches %}
+                <tr>
+                    <td>{{ b.created_at }}</td>
+                    <td class="num">{{ '{:,}'.format(b.packs) }}</td>
+                    <td class="num">{{ '{:,}'.format(b.seeds_sown) }}</td>
+                    <td class="num">{{ '%g'|format(b.germination_pct) }}%</td>
+                    <td class="num">{{ b.seed_unit_cost|money4 }}</td>
+                    <td class="num">{{ '{:,}'.format(b.seedlings) }}</td>
+                    <td class="num">{{ b.cost_per_seedling|money4 }}</td>
+                    <td class="num">{{ b.selling_price|money }}</td>
+                    <td>{{ b.created_by }}</td>
+                </tr>
+            {% else %}
+                <tr><td colspan="9" class="muted center">Nothing has been sown from this seed yet.</td></tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    <p class="muted">The seedling count is an estimate (seeds sown &times; germination rate, rounded down). It is what goes on sale.</p>
+</section>
+{% endif %}
 {% endblock %}
+{% block scripts %}<script src="{{ asset('item.js') }}"></script>{% endblock %}

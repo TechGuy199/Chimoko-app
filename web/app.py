@@ -206,6 +206,13 @@ def appearance():
     return render_template("appearance.html")
 
 
+@app.template_filter("money4")
+def money_precise(value):
+    """Per-seed costs are tiny (ZMW 0.0625), so they are shown to four decimals instead of two."""
+    user = g.get("user")
+    return f"{user['currency'] if user else ''}{float(value or 0):,.4f}"
+
+
 @app.template_filter("money")
 def money(value):
     user = g.get("user")
@@ -584,7 +591,64 @@ def checkout():
 
 
 # --- INVENTORY ---
-ITEM_COLUMNS = "id, item_code, name, category, department, batch_no, date_planted, quantity, unit_cost, price, supplier_name, invoice_no, purchase_date, expiry_date"
+ITEM_COLUMNS = "id, item_code, name, category, department, batch_no, date_planted, quantity, unit_cost, price, supplier_name, invoice_no, purchase_date, expiry_date, seeds_per_pack"
+
+# --- Greenhouse: seed packs are bought, sown, and the seedlings are what goes on sale ---
+# An item is a seed item when its category contains the word "seed" or "seeds" ("Seeds", "Vegetable seeds").
+# "Seedlings" is deliberately not matched. Stock of a seed item is counted in packs.
+SEED_WORD = re.compile(r"\bseeds?\b", re.I)
+SEEDLING_SUFFIX = "-SDL"
+
+
+def is_seed_category(category):
+    return bool(SEED_WORD.search(category or ""))
+
+
+def seeds_per_pack_for(existing, category, typed):
+    """The pack size to keep for a purchase. Returns (seeds per pack or None, problem or None).
+
+    Non-seed items have none. For a seed item the form or file must say how many seeds a pack holds,
+    unless the item is already in stock with a pack size. Stock is counted in packs, so one item code
+    cannot switch pack size without muddling the count.
+    """
+    stored = existing["seeds_per_pack"] if existing else None
+    if not is_seed_category(existing["category"] if existing else category):
+        return None, None
+    typed = (typed or "").strip()
+    if typed:
+        try:
+            size = parse_whole(typed)
+            if size < 1:
+                raise ValueError
+        except ValueError:
+            return None, f"seeds per pack '{typed}' must be a whole number above zero"
+        if stored and stored != size:
+            return None, f"this item is already counted in packs of {stored:,} seeds; use a new item code for packs of {size:,}"
+        return size, None
+    if stored:
+        return stored, None
+    return None, "seeds per pack is needed for a seed item (how many seeds are in one pack)"
+
+
+def seedling_name_for(seed_name):
+    """'Tomato Seed' becomes 'Tomato seedlings'; a name without the word gets 'seedlings' added."""
+    renamed, count = SEED_WORD.subn("seedlings", seed_name, count=1)
+    return renamed if count else f"{seed_name} seedlings"
+
+
+def round_up_to_cent(value):
+    return math.ceil(round(value * 100, 6)) / 100
+
+
+def seedling_plan(packs, seeds_per_pack, germination_pct, seed_cost):
+    """What sowing these packs is expected to give. Seedlings are rounded down: better to under-promise stock."""
+    seeds = packs * seeds_per_pack
+    seedlings = math.floor(seeds * germination_pct / 100 + 1e-9)
+    cost_per_seedling = seed_cost / (germination_pct / 100)
+    return {
+        "seeds": seeds, "seedlings": seedlings, "cost_per_seedling": cost_per_seedling,
+        "break_even_price": round_up_to_cent(cost_per_seedling),
+    }
 
 
 def get_item(db, item_id):
@@ -620,9 +684,13 @@ def inventory():
         group["low"] += 1 if item["quantity"] < g.user["low_stock_threshold"] else 0
     categories = [group for _, group in sorted(by_category.items())]
 
+    # Lets the purchase form recognise a seed item by its code as well as by the category typed
+    seed_items = {i["item_code"]: i["seeds_per_pack"] or 0 for i in items if is_seed_category(i["category"])}
+    category_names = sorted({" ".join((i["category"] or "").split()) for i in items} - {""} | {"Seeds"}, key=str.lower)
+
     return render_template(
         "inventory.html", items=items, categories=categories, view="list" if request.args.get("view") == "list" else "category",
-        departments=department_names(db, biz), today=now().strftime("%Y-%m-%d"),
+        departments=department_names(db, biz), today=now().strftime("%Y-%m-%d"), seed_items=seed_items, category_names=category_names,
     )
 
 
@@ -647,10 +715,18 @@ def purchase():
         flash(str(e).capitalize() + ".", "error")
         return redirect(url_for("inventory"))
 
+    # Seed items must say how many seeds a pack holds
+    category = text("category") or "General"
+    known = db.one("SELECT category, seeds_per_pack FROM products WHERE business_id=? AND item_code=?", (biz, code))
+    seeds_per_pack, problem = seeds_per_pack_for(known, category, text("seeds_per_pack"))
+    if problem:
+        flash(problem[0].upper() + problem[1:] + ".", "error")
+        return redirect(url_for("inventory"))
+
     try:
         existing_name = record_purchase(db, biz, {
-            "amount_paid": amount_paid,
-            "item_code": code, "name": name, "category": text("category") or "General", "department": chosen_department(db, biz),
+            "amount_paid": amount_paid, "seeds_per_pack": seeds_per_pack,
+            "item_code": code, "name": name, "category": category, "department": chosen_department(db, biz),
             "quantity": qty, "unit_cost": unit_cost, "price": price, "supplier_name": text("supplier_name"),
             "invoice_no": text("invoice_no"), "purchase_date": text("purchase_date") or now().strftime("%Y-%m-%d"),
             "batch_no": text("batch_no"), "date_planted": text("date_planted"), "expiry_date": text("expiry_date"),
@@ -661,10 +737,11 @@ def purchase():
         flash("The purchase could not be saved. Please try again.", "error")
         return redirect(url_for("inventory"))
 
+    seed_note = f" That is {qty * seeds_per_pack:,} seeds in {qty:,} pack(s) of {seeds_per_pack:,}." if seeds_per_pack else ""
     if existing_name:
-        flash(f"Added {qty} unit(s) to the existing stock of '{existing_name}' (code {code}).", "ok")
+        flash(f"Added {qty} unit(s) to the existing stock of '{existing_name}' (code {code}).{seed_note}", "ok")
     else:
-        flash(f"Purchase logged for '{name}' and added to inventory.", "ok")
+        flash(f"Purchase logged for '{name}' and added to inventory.{seed_note}", "ok")
     return redirect(url_for("inventory"))
 
 
@@ -678,18 +755,20 @@ def record_purchase(db, biz, p):
     if existing:
         price = existing["price"] if p["price"] is None else p["price"]
         db.execute(
-            """UPDATE products SET quantity = quantity + ?, unit_cost=?, price=?, batch_no=?, supplier_name=?, invoice_no=?, purchase_date=?, expiry_date=?
+            """UPDATE products SET quantity = quantity + ?, unit_cost=?, price=?, batch_no=?, supplier_name=?, invoice_no=?, purchase_date=?, expiry_date=?,
+                                  seeds_per_pack = COALESCE(?, seeds_per_pack)
                WHERE id=? AND business_id=?""",
-            (p["quantity"], p["unit_cost"], price, p["batch_no"], p["supplier_name"], p["invoice_no"], p["purchase_date"], p["expiry_date"], existing["id"], biz),
+            (p["quantity"], p["unit_cost"], price, p["batch_no"], p["supplier_name"], p["invoice_no"], p["purchase_date"], p["expiry_date"],
+             p.get("seeds_per_pack"), existing["id"], biz),
         )
     else:
         price = p["unit_cost"] if p["price"] is None else p["price"]
         db.execute(
-            """INSERT INTO products (business_id, item_code, name, category, department, batch_no, date_planted, quantity, unit_cost, price, supplier_name, invoice_no, purchase_date, expiry_date)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            """INSERT INTO products (business_id, item_code, name, category, department, batch_no, date_planted, quantity, unit_cost, price, supplier_name, invoice_no, purchase_date, expiry_date, seeds_per_pack)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 biz, p["item_code"], p["name"], p["category"], p["department"], p["batch_no"], p["date_planted"], p["quantity"],
-                p["unit_cost"], price, p["supplier_name"], p["invoice_no"], p["purchase_date"], p["expiry_date"],
+                p["unit_cost"], price, p["supplier_name"], p["invoice_no"], p["purchase_date"], p["expiry_date"], p.get("seeds_per_pack"),
             ),
         )
     total_cost = round(p["quantity"] * p["unit_cost"], 2)
@@ -709,10 +788,28 @@ def record_purchase(db, biz, p):
 @app.get("/inventory/<int:item_id>")
 @need(None)
 def item(item_id):
-    db = get_db()
+    db, biz = get_db(), g.user["business_id"]
+    current = get_item(db, item_id)
+
+    # Greenhouse details for seed items: what the seedlings are listed as now, the cost of one seed, past sowings
+    seed = is_seed_category(current["category"])
+    listing, batches, per_seed = None, [], None
+    if seed:
+        size = current["seeds_per_pack"]
+        per_seed = current["unit_cost"] / size if size else None
+        listing = db.one(
+            "SELECT name, price, quantity FROM pos_products WHERE business_id=? AND item_code=?", (biz, current["item_code"] + SEEDLING_SUFFIX)
+        )
+        batches = db.all(
+            """SELECT created_at, packs, seeds_sown, germination_pct, seed_unit_cost, seedlings, cost_per_seedling, selling_price, created_by
+               FROM seedling_batches WHERE business_id=? AND seed_code=? ORDER BY id DESC LIMIT 20""",
+            (biz, current["item_code"]),
+        )
+
     return render_template(
-        "item.html", item=get_item(db, item_id), departments=department_names(db, g.user["business_id"]),
+        "item.html", item=current, departments=department_names(db, biz),
         access={action: item_access_state(db, item_id, action) for action, _ in ITEM_ACTIONS}, actions=ITEM_ACTIONS,
+        seed=seed, listing=listing, batches=batches, per_seed=per_seed, seedling_name=(listing or {}).get("name") or seedling_name_for(current["name"]),
     )
 
 
@@ -736,14 +833,27 @@ def update_item(item_id):
         return redirect(url_for("item", item_id=item_id))
 
     category, dept = text("category") or "General", chosen_department(db, biz)
+
+    # A seed item always carries its pack size; here an admin can correct a wrong one
+    seeds_per_pack = None
+    if is_seed_category(category):
+        try:
+            seeds_per_pack = parse_whole(text("seeds_per_pack")) if text("seeds_per_pack") else current["seeds_per_pack"]
+            if not seeds_per_pack or seeds_per_pack < 1:
+                raise ValueError
+        except ValueError:
+            flash("A seed item needs the number of seeds in one pack (a whole number above zero).", "error")
+            return redirect(url_for("item", item_id=item_id))
+
     # Item code and quantity are not editable: stock only moves through purchases, transfers and sales
     try:
         db.execute(
-            """UPDATE products SET name=?, category=?, department=?, batch_no=?, date_planted=?, unit_cost=?, price=?, supplier_name=?, invoice_no=?, purchase_date=?, expiry_date=?
+            """UPDATE products SET name=?, category=?, department=?, batch_no=?, date_planted=?, unit_cost=?, price=?, supplier_name=?, invoice_no=?, purchase_date=?, expiry_date=?,
+                                  seeds_per_pack = COALESCE(?, seeds_per_pack)
                WHERE id=? AND business_id=?""",
             (
                 name, category, dept, text("batch_no"), text("date_planted"), unit_cost, price, text("supplier_name"),
-                text("invoice_no"), text("purchase_date"), text("expiry_date"), item_id, biz,
+                text("invoice_no"), text("purchase_date"), text("expiry_date"), seeds_per_pack, item_id, biz,
             ),
         )
         db.execute(
@@ -778,6 +888,14 @@ def transfer(item_id):
         flash(f"Choose a destination and a quantity between 1 and {p['quantity']}.", "error")
         return redirect(url_for("item", item_id=item_id))
 
+    # Seed packs are not sold as they are: they are sown, and the seedlings that come up are what goes on sale
+    sowing = None
+    if destination == "pos" and is_seed_category(p["category"]):
+        sowing, problem = read_sowing_form(p, qty)
+        if problem:
+            flash(problem, "error")
+            return redirect(url_for("item", item_id=item_id))
+
     invoice_id = None
     try:
         moved = db.execute(
@@ -799,6 +917,8 @@ def transfer(item_id):
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)""",
                 (invoice_id, biz, p["item_code"], p["name"], p["department"], p["batch_no"], qty, p["price"]),
             )
+        elif sowing:
+            list_seedlings(db, biz, p, qty, sowing)
         else:
             listed = db.one("SELECT id FROM pos_products WHERE business_id=? AND item_code=?", (biz, p["item_code"]))
             if listed:
@@ -822,8 +942,88 @@ def transfer(item_id):
 
     if invoice_id:
         return redirect(url_for("invoice", invoice_id=invoice_id))
-    flash(f"Transferred {qty} unit(s) of '{p['name']}' to Sales & POS.", "ok")
+    if sowing:
+        flash(
+            f"Sowed {qty:,} pack(s) = {sowing['seeds']:,} seeds. About {sowing['seedlings']:,} seedlings are now listed for sale as "
+            f"'{sowing['name']}' at {money(sowing['price'])} each (cost {money_precise(sowing['cost_per_seedling'])} per seedling).",
+            "ok",
+        )
+    else:
+        flash(f"Transferred {qty} unit(s) of '{p['name']}' to Sales & POS.", "ok")
     return redirect(url_for("inventory"))
+
+
+def read_sowing_form(item, packs):
+    """Reads the greenhouse questions asked when seed packs are moved to the point of sale.
+
+    Returns (details, None) or (None, what is wrong). Nothing is saved here.
+    """
+    size = item["seeds_per_pack"]
+    if not size:
+        # A seed item bought before pack sizes were recorded: ask for it now
+        try:
+            size = number("seeds_per_pack", int)
+            if size < 1:
+                raise ValueError
+        except ValueError:
+            return None, "Say how many seeds are in one pack (a whole number above zero)."
+    try:
+        germination = number("germination_pct")
+        if not 0 < germination <= 100:
+            raise ValueError
+    except ValueError:
+        return None, "Enter the estimated germination rate as a percentage above 0 and up to 100."
+    try:
+        seed_cost = number("seed_cost")
+        if seed_cost < 0:
+            raise ValueError
+    except ValueError:
+        return None, "Enter the cost of one seed (0 or more)."
+
+    plan = seedling_plan(packs, size, germination, seed_cost)
+    if plan["seedlings"] < 1:
+        return None, "At that germination rate these seeds would give less than one seedling."
+    try:
+        # Left blank, the seedlings are priced at what they cost to raise, rounded up to the next cent
+        price = number("seedling_price") if text("seedling_price") else plan["break_even_price"]
+        if price < 0:
+            raise ValueError
+    except ValueError:
+        return None, "The selling price per seedling must be a number, 0 or more."
+    return dict(
+        plan, seeds_per_pack=size, germination=germination, seed_cost=seed_cost, price=round(price, 2),
+        name=text("seedling_name")[:100] or seedling_name_for(item["name"]),
+    ), None
+
+
+def list_seedlings(db, biz, item, packs, s):
+    """Puts the seedlings expected from a sowing on sale and logs the batch. The caller commits."""
+    pos_code = item["item_code"] + SEEDLING_SUFFIX
+    sown_on = now().strftime("%Y-%m-%d")
+    listed = db.one("SELECT id FROM pos_products WHERE business_id=? AND item_code=?", (biz, pos_code))
+    if listed:
+        db.execute(
+            "UPDATE pos_products SET quantity = quantity + ?, price=?, name=?, department=?, batch_no=?, date_planted=? WHERE id=?",
+            (s["seedlings"], s["price"], s["name"], item["department"], item["batch_no"], sown_on, listed["id"]),
+        )
+    else:
+        db.execute(
+            """INSERT INTO pos_products (business_id, item_code, name, category, department, batch_no, date_planted, quantity, price)
+               VALUES (?, ?, ?, 'Seedlings', ?, ?, ?, ?, ?)""",
+            (biz, pos_code, s["name"], item["department"], item["batch_no"], sown_on, s["seedlings"], s["price"]),
+        )
+    if not item["seeds_per_pack"]:
+        db.execute("UPDATE products SET seeds_per_pack=? WHERE id=? AND business_id=?", (s["seeds_per_pack"], item["id"], biz))
+    db.execute(
+        """INSERT INTO seedling_batches (business_id, seed_item_id, seed_code, seed_name, pos_code, seedling_name, packs, seeds_per_pack, seeds_sown,
+                                         germination_pct, seed_unit_cost, seedlings, cost_per_seedling, selling_price, created_by, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            biz, item["id"], item["item_code"], item["name"], pos_code, s["name"], packs, s["seeds_per_pack"], s["seeds"],
+            s["germination"], s["seed_cost"], s["seedlings"], s["cost_per_seedling"], s["price"], g.user["username"],
+            now().strftime("%Y-%m-%d %H:%M:%S"),
+        ),
+    )
 
 
 @app.post("/inventory/<int:item_id>/delete")
@@ -2413,6 +2613,7 @@ PURCHASE_COLUMNS = {
     "expiry_date": ("expiry", "expiry date"),
     "payment_status": ("payment status", "status"),
     "amount_paid": ("amount paid", "paid"),
+    "seeds_per_pack": ("seeds per pack", "seeds in pack", "seeds in a pack", "pack size", "seeds/pack"),
 }
 SALES_COLUMNS = {
     "invoice_no": ("invoice no", "invoice number", "invoice"),
@@ -2428,8 +2629,8 @@ SALES_COLUMNS = {
 }
 IMPORT_TEMPLATES = {
     "purchases": (
-        ["Item Code", "Name", "Category", "Department", "Quantity", "Unit Cost", "Selling Price", "Supplier", "Invoice No", "Purchase Date", "Batch No", "Date Planted", "Expiry Date", "Payment Status", "Amount Paid"],
-        ["SEED-001", "Maize Seed 10kg", "Seeds", "General", 50, 450, 600, "Agro Supplies Ltd", "SUP-1001", "2026-10-01", "B-22", "", "2027-10-01", "Paid", ""],
+        ["Item Code", "Name", "Category", "Department", "Quantity", "Unit Cost", "Selling Price", "Supplier", "Invoice No", "Purchase Date", "Batch No", "Date Planted", "Expiry Date", "Payment Status", "Amount Paid", "Seeds Per Pack"],
+        ["SEED-001", "Tomato Seed Pack", "Seeds", "Greenhouse", 50, 450, 600, "Agro Supplies Ltd", "SUP-1001", "2026-10-01", "B-22", "", "2027-10-01", "Paid", "", 1000],
     ),
     "sales": (
         ["Invoice No", "Date", "Customer", "Phone", "Item Code", "Item Name", "Quantity", "Unit Price", "Payment Status", "Amount Paid"],
@@ -2576,6 +2777,8 @@ def import_purchases():
         return redirect(url_for("import_data"))
 
     known_names = {r["item_code"]: r["name"] for r in db.all("SELECT item_code, name FROM products WHERE business_id=?", (biz,))}
+    # Items already in stock, plus new ones as the file introduces them, so a seed item's pack size is held to one value
+    stocked = {r["item_code"]: r for r in db.all("SELECT item_code, category, seeds_per_pack FROM products WHERE business_id=?", (biz,))}
     departments = set(department_names(db, biz))
     today = now().strftime("%Y-%m-%d")
     errors, purchases, new_departments = [], [], []
@@ -2627,11 +2830,16 @@ def import_purchases():
             except ValueError as e:
                 problems.append(str(e))
 
+        seeds_per_pack, pack_problem = seeds_per_pack_for(stocked.get(code), rec["category"] or "General", rec["seeds_per_pack"])
+        if pack_problem:
+            problems.append(pack_problem)
+
         if problems:
             errors.append(f"Row {rec['_row']}: " + "; ".join(problems))
             continue
 
         known_names.setdefault(code, name)
+        stocked.setdefault(code, {"category": rec["category"] or "General", "seeds_per_pack": seeds_per_pack})
         dept = rec["department"] or "General"
         if dept not in departments:
             departments.add(dept)
@@ -2641,7 +2849,7 @@ def import_purchases():
             "quantity": qty, "unit_cost": round(unit_cost, 2), "price": None if price is None else round(price, 2),
             "supplier_name": rec["supplier_name"], "invoice_no": rec["invoice_no"], "purchase_date": dates["purchase_date"] or today,
             "batch_no": rec["batch_no"], "date_planted": dates["date_planted"], "expiry_date": dates["expiry_date"],
-            "amount_paid": amount_paid,
+            "amount_paid": amount_paid, "seeds_per_pack": seeds_per_pack,
         })
 
     if errors:

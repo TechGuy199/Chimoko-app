@@ -6,17 +6,24 @@
     <section class="card side">
         <h2>Log a Purchase</h2>
         <p class="muted">Using an existing item code adds the quantity to that item's stock.</p>
-        <form method="post" action="{{ url_for('purchase') }}">
+        <form method="post" action="{{ url_for('purchase') }}" id="purchase-form" data-seed-items="{{ seed_items|tojson|forceescape }}">
             {{ csrf_field() }}
-            <label>Item code <input name="item_code" required></label>
+            <label>Item code <input name="item_code" id="purchase-code" required></label>
             <label>Item name <input name="name" required></label>
-            <label>Category (e.g. Seeds, Fertiliser) <input name="category"></label>
+            <label>Category (e.g. Seeds, Fertiliser) <input name="category" id="purchase-category" list="category-names" autocomplete="off"></label>
+            <datalist id="category-names">
+                {% for c in category_names %}<option value="{{ c }}">{% endfor %}
+            </datalist>
+            <label id="seeds-row" hidden>Seeds per pack (how many seeds are in one pack)
+                <input name="seeds_per_pack" id="purchase-seeds" type="number" min="1" step="1" inputmode="numeric" placeholder="e.g. 1000">
+                <small class="muted" id="seeds-note">Quantity bought below is counted in packs.</small>
+            </label>
             <label>Department
                 <select name="department">
                     {% for d in departments %}<option {{ 'selected' if d == 'General' }}>{{ d }}</option>{% endfor %}
                 </select>
             </label>
-            <label>Quantity bought <input name="quantity" type="number" min="1" step="1" required></label>
+            <label>Quantity bought <span id="quantity-unit" class="muted"></span> <input name="quantity" type="number" min="1" step="1" required></label>
             <label>Unit cost <input name="unit_cost" type="number" min="0" step="0.01" required></label>
             <label>Selling price (blank = keep current, or unit cost if new) <input name="price" type="number" min="0" step="0.01"></label>
             <label>Supplier name <input name="supplier_name"></label>
@@ -40,7 +47,10 @@
     {% macro item_row(i, show_category) %}
     <tr>
         <td>{{ i.item_code }}</td>
-        <td>{{ i.name }}</td>
+        <td>
+            {{ i.name }}
+            {% if i.seeds_per_pack %}<small class="seed-note">{{ '{:,}'.format(i.seeds_per_pack) }} seeds per pack &middot; {{ '{:,}'.format(i.seeds_per_pack * i.quantity) }} seeds in stock</small>{% endif %}
+        </td>
         {% if show_category %}<td>{{ i.category or '—' }}</td>{% endif %}
         <td>{{ i.department }}</td>
         <td>{{ i.supplier_name or '—' }}</td>
@@ -97,3 +107,4 @@
     </section>
 </div>
 {% endblock %}
+{% block scripts %}{% if can('procure') %}<script src="{{ asset('inventory.js') }}"></script>{% endif %}{% endblock %}

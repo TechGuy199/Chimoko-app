@@ -25,6 +25,7 @@
             <li><strong>Required:</strong> Item Code, Quantity, Unit Cost. Name is required when the item code is new.</li>
             <li><strong>Optional:</strong> Category, Department, Selling Price, Supplier, Invoice No, Purchase Date, Batch No, Date Planted, Expiry Date, Payment Status, Amount Paid.</li>
             <li>Payment Status is Paid (default), Unpaid or Partial Payment. Partial Payment needs an Amount Paid.</li>
+            <li><strong>Seed items:</strong> when the Category is Seeds (or contains the word "seed"), add a <strong>Seeds Per Pack</strong> column. It is required for new seed items; Quantity is then counted in packs. A seed item already in stock keeps its pack size, and a different size for the same code is rejected.</li>
             <li>An item code you already have adds the quantity to that item's stock.</li>
             <li>A blank Selling Price keeps the item's current price (a new item uses the unit cost).</li>
             <li>Departments that do not exist yet are created.</li>

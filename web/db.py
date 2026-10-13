@@ -106,6 +106,15 @@ SCHEMA = [
         item_id INTEGER NOT NULL, item_name TEXT NOT NULL, reason TEXT DEFAULT '', status TEXT NOT NULL DEFAULT 'pending',
         created_at TEXT, decided_by TEXT, decided_at TEXT, expires_at TEXT
     )""",
+    # Greenhouse: every time seed packs are sown and the seedlings listed for sale. Keeps the germination
+    # estimate and cost assumptions that were used, so a batch can be looked back on later.
+    """CREATE TABLE IF NOT EXISTS seedling_batches (
+        id {pk}, business_id INTEGER NOT NULL, seed_item_id INTEGER, seed_code TEXT NOT NULL, seed_name TEXT NOT NULL,
+        pos_code TEXT NOT NULL, seedling_name TEXT NOT NULL, packs INTEGER NOT NULL, seeds_per_pack INTEGER NOT NULL,
+        seeds_sown INTEGER NOT NULL, germination_pct DOUBLE PRECISION NOT NULL, seed_unit_cost DOUBLE PRECISION NOT NULL,
+        seedlings INTEGER NOT NULL, cost_per_seedling DOUBLE PRECISION NOT NULL, selling_price DOUBLE PRECISION NOT NULL,
+        created_by TEXT, created_at TEXT
+    )""",
     # Pairs an admin has confirmed are different people, so they stop being suggested as duplicates
     """CREATE TABLE IF NOT EXISTS customer_distinct (
         id {pk}, business_id INTEGER NOT NULL, low_id INTEGER NOT NULL, high_id INTEGER NOT NULL,
@@ -174,6 +183,8 @@ def init_schema():
         add_column(db, "users", "theme", "TEXT")
         add_column(db, "users", "glass", "INTEGER")
         # Alert settings per business: the WhatsApp number and which alerts are switched on (NULL counts as on)
+        # How many seeds one pack holds (seed items only); stock of a seed item is counted in packs
+        add_column(db, "products", "seeds_per_pack", "INTEGER")
         add_column(db, "businesses", "alert_phone", "TEXT")
         add_column(db, "businesses", "alert_low_stock", "INTEGER")
         add_column(db, "businesses", "alert_permission", "INTEGER")
