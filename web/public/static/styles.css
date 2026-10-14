@@ -528,6 +528,11 @@ table.rules input { margin-top: 0; max-width: 140px; }
 .chip.active { border-color: var(--primary); background: var(--primary); color: var(--on-accent); }
 .chip.active small { color: inherit; opacity: 0.85; }
 .item-place { margin: -8px 0 0; }
+.unit { margin-left: 2px; color: var(--text-muted); font-size: 11px; font-weight: 400; }
+.filing { margin: 6px 0 14px; padding: 14px 14px 4px; border: 1px solid var(--line-strong); border-radius: var(--radius-small); background: rgba(var(--ink), 0.03); }
+.filing h3 { margin: 0 0 10px; color: var(--accent); font-size: 12px; font-weight: 650; letter-spacing: 0.07em; text-transform: uppercase; }
+.filing > .muted { margin: 0 0 10px; font-size: 12px; }
+.filing input[readonly] { opacity: 0.7; cursor: not-allowed; }
 .cat-manage .tile-link { display: block; color: inherit; }
 .cat-manage .tile-links { margin: 8px 0 0; font-size: 12px; }
 .edit-tile { margin-top: 8px; font-size: 12px; }

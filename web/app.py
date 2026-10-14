@@ -665,7 +665,33 @@ def checkout():
 
 
 # --- INVENTORY ---
-ITEM_COLUMNS = "id, item_code, name, category, department, batch_no, date_planted, quantity, unit_cost, price, supplier_name, invoice_no, purchase_date, expiry_date, seeds_per_pack"
+ITEM_COLUMNS = "id, item_code, name, category, department, batch_no, date_planted, quantity, unit_cost, price, supplier_name, invoice_no, purchase_date, expiry_date, seeds_per_pack, unit"
+
+# --- Packaging unit: what a quantity of an item is counted in (bag, box, kg, litre...). Seed items are always packs. ---
+DEFAULT_UNITS = ("bag", "bottle", "box", "bundle", "carton", "kg", "litre", "pack", "piece", "roll", "sachet", "tin", "tray")
+SEED_UNIT = "pack"
+
+
+def canonical_unit(typed, known):
+    """A unit name cleaned up, using the spelling already in use when it only differs by capitals or spacing.
+
+    known maps normalised names to the spelling in use. A blank unit stays blank: it means none has been set.
+    """
+    label = clean_name(typed, 30)
+    return known.get(norm(label), label) if label else ""
+
+
+def used_units(db, biz):
+    return {norm(r["unit"]): r["unit"] for r in db.all("SELECT DISTINCT unit FROM products WHERE business_id=? AND unit IS NOT NULL AND unit <> ''", (biz,))}
+
+
+def resolve_unit(db, biz, typed):
+    return canonical_unit(typed, {**{norm(u): u for u in DEFAULT_UNITS}, **used_units(db, biz)})
+
+
+def unit_choices(db, biz):
+    """Suggestions for the unit box: the usual ones plus whatever this business already uses."""
+    return sorted({**{norm(u): u for u in DEFAULT_UNITS}, **used_units(db, biz)}.values(), key=str.lower)
 
 # --- Greenhouse: seed packs are bought, sown, and the seedlings are what goes on sale ---
 # An item is a seed item when its category contains the word "seed" or "seeds" ("Seeds", "Vegetable seeds").
@@ -723,6 +749,26 @@ def seedling_plan(packs, seeds_per_pack, germination_pct, seed_cost):
         "seeds": seeds, "seedlings": seedlings, "cost_per_seedling": cost_per_seedling,
         "break_even_price": round_up_to_cent(cost_per_seedling),
     }
+
+
+def backfill_units():
+    """Seed items are counted in packs, but older ones have no unit recorded. Safe to repeat."""
+    db = Database()
+    try:
+        for biz in [row["id"] for row in db.all("SELECT id FROM businesses")]:
+            for row in db.all("SELECT DISTINCT category FROM products WHERE business_id=? AND (unit IS NULL OR unit = '')", (biz,)):
+                if is_seed_category(row["category"]):
+                    db.execute(
+                        "UPDATE products SET unit=? WHERE business_id=? AND category=? AND (unit IS NULL OR unit = '')", (SEED_UNIT, biz, row["category"])
+                    )
+        db.commit()
+    except DB_ERRORS:
+        db.rollback()
+    finally:
+        db.close()
+
+
+backfill_units()
 
 
 def get_item(db, item_id):
@@ -828,7 +874,7 @@ def inventory():
 def inventory_new():
     """The guided purchase form: which category, which department, then the details."""
     db, biz = get_db(), g.user["business_id"]
-    items = db.all("SELECT item_code, name, category, department, seeds_per_pack FROM products WHERE business_id=? ORDER BY name LIMIT 5000", (biz,))
+    items = db.all("SELECT item_code, name, category, department, seeds_per_pack, unit FROM products WHERE business_id=? ORDER BY name LIMIT 5000", (biz,))
     per_category, per_department = {}, {}
     for i in items:
         per_category[norm(i["category"] or "General")] = per_category.get(norm(i["category"] or "General"), 0) + 1
@@ -836,7 +882,10 @@ def inventory_new():
 
     # Lets the page recognise an item that is already in stock by its code
     known = {
-        i["item_code"]: {"name": i["name"], "category": i["category"] or "General", "department": i["department"] or "General", "seeds": i["seeds_per_pack"] or 0}
+        i["item_code"]: {
+            "name": i["name"], "category": i["category"] or "General", "department": i["department"] or "General",
+            "seeds": i["seeds_per_pack"] or 0, "unit": i["unit"] or "",
+        }
         for i in items
     }
     categories = [{"name": r["name"], "items": per_category.get(norm(r["name"]), 0), "seed": is_seed_category(r["name"])} for r in category_rows(db, biz)]
@@ -847,7 +896,7 @@ def inventory_new():
     want_cat = norm(start["category"] if start else request.args.get("category"))
     want_dept = norm(start["department"] if start else request.args.get("department"))
     return render_template(
-        "inventory_new.html", categories=categories, departments=departments, known=known, today=now().strftime("%Y-%m-%d"),
+        "inventory_new.html", categories=categories, departments=departments, known=known, today=now().strftime("%Y-%m-%d"), units=unit_choices(db, biz),
         pre_category=next((c["name"] for c in categories if norm(c["name"]) == want_cat), ""),
         pre_department=next((d["name"] for d in departments if norm(d["name"]) == want_dept), ""),
         pre_code=code, pre_name=start["name"] if start else "",
@@ -1035,7 +1084,7 @@ def analysis_rows(db, biz, start, end):
     """
     sql = """SELECT pr.id, pr.item_code, pr.name, pr.purchase_date, pr.quantity, pr.unit_cost, pr.total_cost, pr.amount_paid, pr.supplier_name, pr.invoice_no,
                     COALESCE(p.category, pr.category) AS category, COALESCE(p.department, pr.department) AS department,
-                    p.seeds_per_pack AS seeds_per_pack, p.quantity AS in_stock
+                    p.seeds_per_pack AS seeds_per_pack, p.quantity AS in_stock, p.unit AS unit
              FROM procurements pr LEFT JOIN products p ON p.business_id = pr.business_id AND p.item_code = pr.item_code
              WHERE pr.business_id=?"""
     params = [biz]
@@ -1070,7 +1119,7 @@ def analysis_context():
             "code": r["item_code"], "purchases": 0, "qty": 0, "cost": 0.0, "paid": 0.0, "last": "", "seeds_per_pack": r["seeds_per_pack"],
         })
         # Rows run oldest first, so the name, place and stock left over are those of the latest purchase
-        it.update(name=r["name"], category=r["category"], department=r["department"], in_stock=r["in_stock"], last=r["purchase_date"] or "")
+        it.update(name=r["name"], category=r["category"], department=r["department"], in_stock=r["in_stock"], last=r["purchase_date"] or "", unit=r["unit"] or "")
         it["purchases"] += 1
         it["qty"] += r["quantity"]
         it["cost"] += r["total_cost"]
@@ -1103,8 +1152,8 @@ def inventory_analysis_csv():
     ctx = analysis_context()
     return csv_response(
         "inventory-analysis.csv",
-        ["Item Code", "Item", "Category", "Department", "Purchases", "Quantity Bought", "Total Cost", "Average Unit Cost", "Last Purchase", "In Stock Now"],
-        [(i["code"], i["name"], i["category"], i["department"], i["purchases"], i["qty"], round(i["cost"], 2), round(i["avg"], 4), i["last"], i["in_stock"])
+        ["Item Code", "Item", "Category", "Department", "Unit", "Purchases", "Quantity Bought", "Total Cost", "Average Unit Cost", "Last Purchase", "In Stock Now"],
+        [(i["code"], i["name"], i["category"], i["department"], i["unit"], i["purchases"], i["qty"], round(i["cost"], 2), round(i["avg"], 4), i["last"], i["in_stock"])
          for i in ctx["items"]],
     )
 
@@ -1147,6 +1196,7 @@ def purchase():
 
         existing_name = record_purchase(db, biz, {
             "amount_paid": amount_paid, "seeds_per_pack": seeds_per_pack,
+            "unit": SEED_UNIT if seeds_per_pack else resolve_unit(db, biz, text("unit")),
             "item_code": code, "name": name, "category": category, "department": department,
             "quantity": qty, "unit_cost": unit_cost, "price": price, "supplier_name": text("supplier_name"),
             "invoice_no": text("invoice_no"), "purchase_date": text("purchase_date") or now().strftime("%Y-%m-%d"),
@@ -1172,26 +1222,28 @@ def record_purchase(db, biz, p):
     A blank price (None) keeps an existing item's selling price and uses the unit cost for a new item.
     Returns the existing item's name when the code was already in stock, otherwise None. The caller commits.
     """
-    existing = db.one("SELECT id, name, price, category, department FROM products WHERE business_id=? AND item_code=?", (biz, p["item_code"]))
+    existing = db.one("SELECT id, name, price, category, department, unit FROM products WHERE business_id=? AND item_code=?", (biz, p["item_code"]))
     if existing:
-        # A restock is filed where the item already lives, so analysis by category and department stays consistent
+        # A restock is filed where the item already lives, so analysis by category and department stays consistent.
+        # It is counted in the item's own unit too; only an item with no unit yet takes the one given.
         p = dict(p, category=existing["category"], department=existing["department"])
+        unit = existing["unit"] or p.get("unit") or ""
         price = existing["price"] if p["price"] is None else p["price"]
         db.execute(
             """UPDATE products SET quantity = quantity + ?, unit_cost=?, price=?, batch_no=?, supplier_name=?, invoice_no=?, purchase_date=?, expiry_date=?,
-                                  seeds_per_pack = COALESCE(?, seeds_per_pack)
+                                  seeds_per_pack = COALESCE(?, seeds_per_pack), unit=?
                WHERE id=? AND business_id=?""",
             (p["quantity"], p["unit_cost"], price, p["batch_no"], p["supplier_name"], p["invoice_no"], p["purchase_date"], p["expiry_date"],
-             p.get("seeds_per_pack"), existing["id"], biz),
+             p.get("seeds_per_pack"), unit, existing["id"], biz),
         )
     else:
         price = p["unit_cost"] if p["price"] is None else p["price"]
         db.execute(
-            """INSERT INTO products (business_id, item_code, name, category, department, batch_no, date_planted, quantity, unit_cost, price, supplier_name, invoice_no, purchase_date, expiry_date, seeds_per_pack)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            """INSERT INTO products (business_id, item_code, name, category, department, batch_no, date_planted, quantity, unit_cost, price, supplier_name, invoice_no, purchase_date, expiry_date, seeds_per_pack, unit)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 biz, p["item_code"], p["name"], p["category"], p["department"], p["batch_no"], p["date_planted"], p["quantity"],
-                p["unit_cost"], price, p["supplier_name"], p["invoice_no"], p["purchase_date"], p["expiry_date"], p.get("seeds_per_pack"),
+                p["unit_cost"], price, p["supplier_name"], p["invoice_no"], p["purchase_date"], p["expiry_date"], p.get("seeds_per_pack"), p.get("unit") or "",
             ),
         )
     total_cost = round(p["quantity"] * p["unit_cost"], 2)
@@ -1235,7 +1287,7 @@ def item(item_id):
         category_choices.append(current["category"] or "General")
 
     return render_template(
-        "item.html", item=current, departments=department_names(db, biz), category_choices=category_choices,
+        "item.html", item=current, departments=department_names(db, biz), category_choices=category_choices, units=unit_choices(db, biz),
         access={action: item_access_state(db, item_id, action) for action, _ in ITEM_ACTIONS}, actions=ITEM_ACTIONS,
         seed=seed, listing=listing, batches=batches, per_seed=per_seed, seedling_name=(listing or {}).get("name") or seedling_name_for(current["name"]),
     )
@@ -1260,7 +1312,9 @@ def update_item(item_id):
         flash("Item name is required and prices cannot be negative.", "error")
         return redirect(url_for("item", item_id=item_id))
 
-    category, dept = resolve_category(db, biz, text("category")), chosen_department(db, biz)
+    # A field that was not sent stays as it is, so an edit never clears what it was not asked to change
+    category = resolve_category(db, biz, text("category")) if "category" in request.form else current["category"]
+    dept = chosen_department(db, biz) if "department" in request.form else current["department"]
 
     # A seed item always carries its pack size; here an admin can correct a wrong one
     seeds_per_pack = None
@@ -1273,21 +1327,38 @@ def update_item(item_id):
             flash("A seed item needs the number of seeds in one pack (a whole number above zero).", "error")
             return redirect(url_for("item", item_id=item_id))
 
+    # The packaging unit. Seed items are always counted in packs; otherwise it is whatever was typed (blank = none set)
+    if is_seed_category(category):
+        unit = SEED_UNIT
+    elif "unit" in request.form:
+        unit = resolve_unit(db, biz, text("unit"))
+    else:
+        unit = current["unit"] or ""
+
+    re_filed = norm(category) != norm(current["category"]) or norm(dept) != norm(current["department"])
+
     # Item code and quantity are not editable: stock only moves through purchases, transfers and sales
     try:
         db.execute(
             """UPDATE products SET name=?, category=?, department=?, batch_no=?, date_planted=?, unit_cost=?, price=?, supplier_name=?, invoice_no=?, purchase_date=?, expiry_date=?,
-                                  seeds_per_pack = COALESCE(?, seeds_per_pack)
+                                  seeds_per_pack = COALESCE(?, seeds_per_pack), unit=?
                WHERE id=? AND business_id=?""",
             (
                 name, category, dept, text("batch_no"), text("date_planted"), unit_cost, price, text("supplier_name"),
-                text("invoice_no"), text("purchase_date"), text("expiry_date"), seeds_per_pack, item_id, biz,
+                text("invoice_no"), text("purchase_date"), text("expiry_date"), seeds_per_pack, unit, item_id, biz,
             ),
         )
         db.execute(
             "UPDATE pos_products SET name=?, category=?, department=?, price=? WHERE business_id=? AND item_code=?",
             (name, category, dept, price, biz, current["item_code"]),
         )
+        # Re-filing an item moves everything that belongs to it: the seedlings grown from it are listed in its department,
+        # and its purchase history follows it so Procurements, Reports and the analysis all agree. Past sales stay where
+        # they were made, because a sale is something that happened in that department at the time.
+        db.execute("UPDATE pos_products SET department=? WHERE business_id=? AND item_code=?", (dept, biz, current["item_code"] + SEEDLING_SUFFIX))
+        purchases = db.execute(
+            "UPDATE procurements SET category=?, department=? WHERE business_id=? AND item_code=?", (category, dept, biz, current["item_code"])
+        ).rowcount
         use_grant(db, grant)
         db.commit()
     except DB_ERRORS:
@@ -1295,7 +1366,8 @@ def update_item(item_id):
         flash("The item could not be updated. Please try again.", "error")
         return redirect(url_for("item", item_id=item_id))
 
-    flash(f"Details saved for '{name}'.", "ok")
+    moved = f" It is now filed under {category} / {dept}, with its {purchases} purchase record(s) and any listings." if re_filed else ""
+    flash(f"Details saved for '{name}'.{moved}", "ok")
     return redirect(url_for("inventory"))
 
 
@@ -3042,6 +3114,7 @@ PURCHASE_COLUMNS = {
     "payment_status": ("payment status", "status"),
     "amount_paid": ("amount paid", "paid"),
     "seeds_per_pack": ("seeds per pack", "seeds in pack", "seeds in a pack", "pack size", "seeds/pack"),
+    "unit": ("unit", "uom", "unit of measure", "packaging", "packaging unit"),
 }
 SALES_COLUMNS = {
     "invoice_no": ("invoice no", "invoice number", "invoice"),
@@ -3057,8 +3130,8 @@ SALES_COLUMNS = {
 }
 IMPORT_TEMPLATES = {
     "purchases": (
-        ["Item Code", "Name", "Category", "Department", "Quantity", "Unit Cost", "Selling Price", "Supplier", "Invoice No", "Purchase Date", "Batch No", "Date Planted", "Expiry Date", "Payment Status", "Amount Paid", "Seeds Per Pack"],
-        ["SEED-001", "Tomato Seed Pack", "Seeds", "Greenhouse", 50, 450, 600, "Agro Supplies Ltd", "SUP-1001", "2026-10-01", "B-22", "", "2027-10-01", "Paid", "", 1000],
+        ["Item Code", "Name", "Category", "Department", "Quantity", "Unit Cost", "Selling Price", "Supplier", "Invoice No", "Purchase Date", "Batch No", "Date Planted", "Expiry Date", "Payment Status", "Amount Paid", "Seeds Per Pack", "Unit"],
+        ["SEED-001", "Tomato Seed Pack", "Seeds", "Greenhouse", 50, 450, 600, "Agro Supplies Ltd", "SUP-1001", "2026-10-01", "B-22", "", "2027-10-01", "Paid", "", 1000, "pack"],
     ),
     "sales": (
         ["Invoice No", "Date", "Customer", "Phone", "Item Code", "Item Name", "Quantity", "Unit Price", "Payment Status", "Amount Paid"],
@@ -3209,6 +3282,7 @@ def import_purchases():
     stocked = {r["item_code"]: r for r in db.all("SELECT item_code, category, department, seeds_per_pack FROM products WHERE business_id=?", (biz,))}
     departments = set(department_names(db, biz))
     known_categories = {norm(r["name"]): r["name"] for r in category_rows(db, biz)}
+    known_units = {**{norm(u): u for u in DEFAULT_UNITS}, **used_units(db, biz)}
     today = now().strftime("%Y-%m-%d")
     errors, purchases, new_departments, new_categories = [], [], [], []
 
@@ -3274,6 +3348,11 @@ def import_purchases():
             errors.append(f"Row {rec['_row']}: " + "; ".join(problems))
             continue
 
+        # Seed items are counted in packs; otherwise the unit in the file, in the spelling already in use
+        unit = SEED_UNIT if seeds_per_pack else canonical_unit(rec["unit"], known_units)
+        if unit:
+            known_units.setdefault(norm(unit), unit)
+
         known_names.setdefault(code, name)
         if not already:
             stocked[code] = {"category": category, "department": dept, "seeds_per_pack": seeds_per_pack}
@@ -3288,7 +3367,7 @@ def import_purchases():
             "quantity": qty, "unit_cost": round(unit_cost, 2), "price": None if price is None else round(price, 2),
             "supplier_name": rec["supplier_name"], "invoice_no": rec["invoice_no"], "purchase_date": dates["purchase_date"] or today,
             "batch_no": rec["batch_no"], "date_planted": dates["date_planted"], "expiry_date": dates["expiry_date"],
-            "amount_paid": amount_paid, "seeds_per_pack": seeds_per_pack,
+            "amount_paid": amount_paid, "seeds_per_pack": seeds_per_pack, "unit": unit,
         })
 
     if errors:

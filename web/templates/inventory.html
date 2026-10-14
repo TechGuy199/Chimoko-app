@@ -29,7 +29,7 @@
     {% if show_category %}<td>{{ i.category or '—' }}</td>{% endif %}
     <td>{{ i.department }}</td>
     <td>{{ i.supplier_name or '—' }}</td>
-    <td class="num {{ 'warn' if i.quantity < user.low_stock_threshold }}">{{ i.quantity }}</td>
+    <td class="num {{ 'warn' if i.quantity < user.low_stock_threshold }}">{{ i.quantity }}{% if i.unit %} <small class="unit">{{ i.unit }}</small>{% endif %}</td>
     <td class="num">{{ i.unit_cost|money }}</td>
     <td class="num">{{ i.price|money }}</td>
     <td>{{ i.expiry_date or '—' }}</td>

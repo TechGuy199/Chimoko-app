@@ -8,11 +8,27 @@
     const category = document.getElementById("detail-category");
     const detailRow = document.getElementById("detail-seeds-row");
     const detailSeeds = document.getElementById("detail-seeds");
+    const detailUnit = document.getElementById("detail-unit");
+    const detailUnitNote = document.getElementById("detail-unit-note");
+    // The unit the item had before the category was touched, so switching to Seeds and back loses nothing
+    let rememberedUnit = detailUnit && !detailUnit.readOnly ? detailUnit.value : "";
     if (category && detailRow) {
         const showPackSize = function () {
             const isSeed = SEED_WORD.test(category.value);
             detailRow.hidden = !isSeed;
             detailSeeds.required = isSeed;
+            if (detailUnit) {
+                if (isSeed) {
+                    if (!detailUnit.readOnly) rememberedUnit = detailUnit.value;
+                    detailUnit.value = "pack";
+                    detailUnit.readOnly = true;
+                    detailUnitNote.textContent = "Seed items are always counted in packs.";
+                } else if (detailUnit.readOnly) {
+                    detailUnit.value = rememberedUnit;
+                    detailUnit.readOnly = false;
+                    detailUnitNote.textContent = "What the quantity is counted in.";
+                }
+            }
         };
         // The category is a drop-down; "input" and "change" cover every browser
         category.addEventListener("input", showPackSize);

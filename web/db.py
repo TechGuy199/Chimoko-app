@@ -190,6 +190,8 @@ def init_schema():
         # Alert settings per business: the WhatsApp number and which alerts are switched on (NULL counts as on)
         # How many seeds one pack holds (seed items only); stock of a seed item is counted in packs
         add_column(db, "products", "seeds_per_pack", "INTEGER")
+        # The packaging unit stock is counted in (bag, box, kg, litre...); seed items are always counted in packs
+        add_column(db, "products", "unit", "TEXT")
         add_column(db, "businesses", "alert_phone", "TEXT")
         add_column(db, "businesses", "alert_low_stock", "INTEGER")
         add_column(db, "businesses", "alert_permission", "INTEGER")

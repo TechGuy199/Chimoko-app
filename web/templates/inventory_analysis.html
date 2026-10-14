@@ -49,13 +49,13 @@
                     <td>{{ it.department }}</td>
                     <td class="num">{{ it.purchases }}</td>
                     <td class="num">
-                        {{ '{:,}'.format(it.qty) }}
+                        {{ '{:,}'.format(it.qty) }}{% if it.unit %} <small class="unit">{{ it.unit }}</small>{% endif %}
                         {% if it.seeds_per_pack %}<small class="seed-note">{{ '{:,}'.format(it.qty * it.seeds_per_pack) }} seeds</small>{% endif %}
                     </td>
                     <td class="num">{{ it.cost|money }}</td>
                     <td class="num">{{ it.avg|money }}</td>
                     <td>{{ it.last or '—' }}</td>
-                    <td class="num">{{ it.in_stock if it.in_stock is not none else '—' }}</td>
+                    <td class="num">{{ it.in_stock if it.in_stock is not none else '—' }}{% if it.in_stock is not none and it.unit %} <small class="unit">{{ it.unit }}</small>{% endif %}</td>
                 </tr>
             {% else %}
                 <tr><td colspan="9" class="muted center">No purchases match these filters in this period.</td></tr>

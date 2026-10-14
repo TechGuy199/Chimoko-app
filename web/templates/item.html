@@ -41,6 +41,8 @@
     {% else %}
     <span class="muted">&middot; seeds per pack not recorded yet</span>
     {% endif %}
+    {% elif item.unit %}
+    {{ item.unit }}
     {% endif %}
 </p>
 {% if seed and listing %}
@@ -56,21 +58,40 @@
         <form method="post" action="{{ url_for('update_item', item_id=item.id) }}">
             {{ csrf_field() }}
             <fieldset {{ 'disabled' if access.procure.state not in ('own', 'approved') }}>
+                <label>Item name <input name="name" value="{{ item.name }}" required></label>
+
+                <div class="filing">
+                    <h3>Filing &amp; packaging</h3>
+                    <div class="grid">
+                        <label>Category
+                            <select name="category" id="detail-category">
+                                {% for c in category_choices %}<option {{ 'selected' if c == item.category }}>{{ c }}</option>{% endfor %}
+                            </select>
+                        </label>
+                        <label>Department
+                            <select name="department" id="detail-department">
+                                {% for d in departments %}<option {{ 'selected' if d == item.department }}>{{ d }}</option>{% endfor %}
+                            </select>
+                        </label>
+                        <label>Packaging unit
+                            <input name="unit" id="detail-unit" list="unit-choices" maxlength="30" autocomplete="off" placeholder="e.g. bag, box, kg, litre"
+                                   value="{{ item.unit or '' }}" {{ 'readonly' if seed }}>
+                            <small class="muted" id="detail-unit-note">{{ 'Seed items are always counted in packs.' if seed else 'What the quantity is counted in.' }}</small>
+                        </label>
+                        <label id="detail-seeds-row" {{ 'hidden' if not seed }}>Seeds per pack
+                            <input name="seeds_per_pack" id="detail-seeds" type="number" min="1" step="1" inputmode="numeric" value="{{ item.seeds_per_pack or '' }}">
+                        </label>
+                    </div>
+                    <datalist id="unit-choices">
+                        {% for u in units %}<option value="{{ u }}">{% endfor %}
+                    </datalist>
+                    <p class="muted">
+                        Changing the category or department re-files this item with its POS listing and its purchase history; past sales stay in the
+                        department they were made in. Changing the unit does not convert the quantity in stock.
+                    </p>
+                </div>
+
                 <div class="grid">
-                    <label>Item name <input name="name" value="{{ item.name }}" required></label>
-                    <label>Category
-                        <select name="category" id="detail-category">
-                            {% for c in category_choices %}<option {{ 'selected' if c == item.category }}>{{ c }}</option>{% endfor %}
-                        </select>
-                    </label>
-                    <label id="detail-seeds-row" {{ 'hidden' if not seed }}>Seeds per pack
-                        <input name="seeds_per_pack" id="detail-seeds" type="number" min="1" step="1" inputmode="numeric" value="{{ item.seeds_per_pack or '' }}">
-                    </label>
-                    <label>Department
-                        <select name="department">
-                            {% for d in departments %}<option {{ 'selected' if d == item.department }}>{{ d }}</option>{% endfor %}
-                        </select>
-                    </label>
                     <label>Unit cost <input name="unit_cost" type="number" min="0" step="0.01" value="{{ item.unit_cost }}" required></label>
                     <label>Selling price <input name="price" type="number" min="0" step="0.01" value="{{ item.price }}"></label>
                     <label>Supplier name <input name="supplier_name" value="{{ item.supplier_name }}"></label>

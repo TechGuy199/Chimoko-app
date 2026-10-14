@@ -1,6 +1,6 @@
 // Log a purchase. The category and department are picked first, as tiles. After that:
-//  - a seed category asks how many seeds are in one pack (stock is then counted in packs);
-//  - an item code that is already in stock shows its own category and department, and the purchase adds to it.
+//  - a seed category asks how many seeds are in one pack (stock is then counted in packs, and the unit is "pack");
+//  - an item code that is already in stock shows its own category, department and unit, and the purchase adds to it.
 (function () {
     const form = document.getElementById("purchase-form");
     if (!form) return;
@@ -10,7 +10,9 @@
     const row = document.getElementById("seeds-row");
     const seeds = document.getElementById("purchase-seeds");
     const note = document.getElementById("seeds-note");
-    const unit = document.getElementById("quantity-unit");
+    const unit = document.getElementById("purchase-unit");
+    const unitNote = document.getElementById("unit-note");
+    const quantityUnit = document.getElementById("quantity-unit");
     const restock = document.getElementById("restock-note");
     const categories = Array.from(form.querySelectorAll('input[name="category"]'));
     const departments = Array.from(form.querySelectorAll('input[name="department"]'));
@@ -22,6 +24,7 @@
 
     // Same rule as the server: the word "seed" or "seeds" in the category name ("Seedlings" does not count)
     const SEED_WORD = /\bseeds?\b/i;
+    let unitWasForced = false;   // true while the unit box shows a value this script put there
 
     function choose(radios, value) {
         radios.forEach(function (radio) { radio.checked = radio.value === value; });
@@ -30,6 +33,20 @@
     function chosen(radios) {
         const picked = radios.find(function (radio) { return radio.checked; });
         return picked ? picked.value : "";
+    }
+
+    function lockUnit(value, message) {
+        unit.value = value;
+        unit.readOnly = true;
+        unitNote.textContent = message;
+        unitWasForced = true;
+    }
+
+    function freeUnit() {
+        if (unitWasForced) unit.value = "";
+        unit.readOnly = false;
+        unitNote.textContent = "";
+        unitWasForced = false;
     }
 
     function refresh() {
@@ -50,7 +67,15 @@
         const isSeed = SEED_WORD.test(chosen(categories));
         row.hidden = !isSeed;
         seeds.required = isSeed;
-        unit.textContent = isSeed ? "(packs)" : "";
+
+        if (isSeed) {
+            lockUnit("pack", "Seed items are counted in packs.");
+        } else if (item && item.unit) {
+            lockUnit(item.unit, "This item is counted in " + item.unit + ".");
+        } else {
+            freeUnit();
+        }
+        quantityUnit.textContent = unit.value.trim() ? "(" + unit.value.trim() + ")" : "";
 
         if (item && item.seeds) {
             // Already counted in packs of this size, so the size is fixed
@@ -66,6 +91,9 @@
 
     code.addEventListener("input", refresh);
     categories.concat(departments).forEach(function (radio) { radio.addEventListener("change", refresh); });
+    unit.addEventListener("input", function () {
+        quantityUnit.textContent = unit.value.trim() ? "(" + unit.value.trim() + ")" : "";
+    });
     refresh();
 
     // A code that matches an item also fills in its name, unless a name has already been typed
