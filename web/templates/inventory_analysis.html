@@ -1,0 +1,104 @@
+{% extends "base.html" %}
+{% block title %}Inventory analysis — {% endblock %}
+{% block content %}
+<div class="page-head">
+    <h1>Inventory Analysis</h1>
+    <div class="head-actions">
+        <a class="btn" href="{{ inv_link('inventory_analysis_csv') }}">Export CSV</a>
+    </div>
+</div>
+
+{% include "_inventory_filters.html" %}
+
+<form method="get" action="{{ url_for('inventory_analysis') }}" class="toolbar report-filters spaced no-print" id="report-filters">
+    {% for key in ('category', 'department', 'q') %}{% if request.args.get(key) %}<input type="hidden" name="{{ key }}" value="{{ request.args.get(key) }}">{% endif %}{% endfor %}
+    <select name="period" id="report-period" aria-label="Period">
+        {% for value, label in periods %}<option value="{{ value }}" {{ 'selected' if value == period }}>{{ label }}</option>{% endfor %}
+    </select>
+    <span id="custom-range" {{ 'hidden' if period != 'custom' }}>
+        <input type="date" name="from" value="{{ start.isoformat() if start and period == 'custom' }}" aria-label="From">
+        <span class="muted">to</span>
+        <input type="date" name="to" value="{{ end.isoformat() if end and period == 'custom' }}" aria-label="To">
+        <button class="btn primary">Apply</button>
+    </span>
+</form>
+<p class="muted period-line">
+    Purchases from {% if start %}{{ start.strftime('%d %b %Y') }} to {{ end.strftime('%d %b %Y') }}{% else %}all time{% endif %}
+    &middot; {{ facet.category or 'all categories' }} &middot; {{ facet.department or 'all departments' }}{% if search %} &middot; matching &ldquo;{{ search }}&rdquo;{% endif %}
+</p>
+
+<div class="stats">
+    <div class="stat"><span>Total cost</span><strong class="gold">{{ totals.cost|money }}</strong><small>{{ totals['items'] }} item(s)</small></div>
+    <div class="stat"><span>Quantity bought</span><strong>{{ '{:,}'.format(totals.qty) }}</strong><small>units, in the pack or unit each item is counted in</small></div>
+    <div class="stat"><span>Purchases</span><strong>{{ totals.purchases }}</strong></div>
+    <div class="stat"><span>Still owed to suppliers</span><strong class="{{ 'warn' if totals.owed > 0.005 else 'ok' }}">{{ totals.owed|money }}</strong><small>Paid: {{ totals.paid|money }}</small></div>
+</div>
+
+<section class="card">
+    <h2>By Item</h2>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr><th>Item</th><th>Category</th><th>Dept</th><th class="num">Purchases</th><th class="num">Quantity bought</th><th class="num">Total cost</th><th class="num">Average unit cost</th><th>Last bought</th><th class="num">In stock now</th></tr>
+            </thead>
+            <tbody>
+            {% for it in items %}
+                <tr>
+                    <td>{{ it.name }} <small class="seed-note">{{ it.code }}</small></td>
+                    <td>{{ it.category }}</td>
+                    <td>{{ it.department }}</td>
+                    <td class="num">{{ it.purchases }}</td>
+                    <td class="num">
+                        {{ '{:,}'.format(it.qty) }}
+                        {% if it.seeds_per_pack %}<small class="seed-note">{{ '{:,}'.format(it.qty * it.seeds_per_pack) }} seeds</small>{% endif %}
+                    </td>
+                    <td class="num">{{ it.cost|money }}</td>
+                    <td class="num">{{ it.avg|money }}</td>
+                    <td>{{ it.last or '—' }}</td>
+                    <td class="num">{{ it.in_stock if it.in_stock is not none else '—' }}</td>
+                </tr>
+            {% else %}
+                <tr><td colspan="9" class="muted center">No purchases match these filters in this period.</td></tr>
+            {% endfor %}
+            {% if items %}
+                <tr class="total-row">
+                    <td>Total</td><td></td><td></td>
+                    <td class="num">{{ totals.purchases }}</td>
+                    <td class="num">{{ '{:,}'.format(totals.qty) }}</td>
+                    <td class="num">{{ totals.cost|money }}</td>
+                    <td></td><td></td><td></td>
+                </tr>
+            {% endif %}
+            </tbody>
+        </table>
+    </div>
+</section>
+
+<section class="card block">
+    <h2>Purchases{% if history_total > history|length %} <span class="muted">(latest {{ history|length }} of {{ history_total }})</span>{% endif %}</h2>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr><th>Date</th><th>Item</th><th>Supplier</th><th>Invoice</th><th class="num">Qty</th><th class="num">Unit cost</th><th class="num">Total</th><th>Payment</th></tr>
+            </thead>
+            <tbody>
+            {% for r in history %}
+                <tr>
+                    <td>{{ r.purchase_date or '—' }}</td>
+                    <td>{{ r.name }} <small class="seed-note">{{ r.item_code }}</small></td>
+                    <td>{{ r.supplier_name or '—' }}</td>
+                    <td>{{ r.invoice_no or '—' }}</td>
+                    <td class="num">{{ r.quantity }}</td>
+                    <td class="num">{{ r.unit_cost|money }}</td>
+                    <td class="num">{{ r.total_cost|money }}</td>
+                    <td>{{ r.status }}</td>
+                </tr>
+            {% else %}
+                <tr><td colspan="8" class="muted center">Nothing to show.</td></tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endblock %}
+{% block scripts %}<script src="{{ asset('reports.js') }}"></script>{% endblock %}

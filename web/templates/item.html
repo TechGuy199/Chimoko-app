@@ -21,6 +21,14 @@
     <div>
         <a class="back" href="{{ url_for('inventory') }}">&larr; Back to inventory</a>
         <h1>{{ item.name }} <span class="muted">(code {{ item.item_code }})</span></h1>
+        <p class="muted item-place">
+            <a href="{{ url_for('inventory', category=item.category) }}">{{ item.category }}</a> &middot;
+            <a href="{{ url_for('inventory', department=item.department) }}">{{ item.department }}</a>
+        </p>
+    </div>
+    <div class="head-actions">
+        {% if can('procure') %}<a class="btn" href="{{ url_for('inventory_new', code=item.item_code) }}">Restock</a>{% endif %}
+        <a class="btn" href="{{ url_for('inventory_analysis', q=item.item_code) }}">Purchase analysis</a>
     </div>
 </div>
 <p>
@@ -50,7 +58,11 @@
             <fieldset {{ 'disabled' if access.procure.state not in ('own', 'approved') }}>
                 <div class="grid">
                     <label>Item name <input name="name" value="{{ item.name }}" required></label>
-                    <label>Category <input name="category" id="detail-category" value="{{ item.category }}"></label>
+                    <label>Category
+                        <select name="category" id="detail-category">
+                            {% for c in category_choices %}<option {{ 'selected' if c == item.category }}>{{ c }}</option>{% endfor %}
+                        </select>
+                    </label>
                     <label id="detail-seeds-row" {{ 'hidden' if not seed }}>Seeds per pack
                         <input name="seeds_per_pack" id="detail-seeds" type="number" min="1" step="1" inputmode="numeric" value="{{ item.seeds_per_pack or '' }}">
                     </label>

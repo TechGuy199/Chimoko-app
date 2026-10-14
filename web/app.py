@@ -133,7 +133,7 @@ def need(perm):
 def template_globals():
     return {
         "csrf_field": csrf_field, "user": g.get("user"), "can": can, "look": appearance_of(g.get("user")), "themes": THEMES,
-        "asset": asset, "csrf_token": csrf_token,
+        "asset": asset, "csrf_token": csrf_token, "inv_link": inv_link,
     }
 
 
@@ -368,6 +368,79 @@ def department_names(db, biz):
     return [row["name"] for row in db.all("SELECT name FROM departments WHERE business_id=? ORDER BY name", (biz,))]
 
 
+# --- CATEGORIES (the tiles inventory is organised by) ---
+def norm(value):
+    """Capital letters, spacing and stray whitespace do not make two names different."""
+    return " ".join((value or "").split()).lower()
+
+
+def clean_name(value, limit=60):
+    return " ".join((value or "").split())[:limit]
+
+
+def category_rows(db, biz):
+    return db.all("SELECT id, name FROM categories WHERE business_id=? ORDER BY name", (biz,))
+
+
+def resolve_category(db, biz, typed):
+    """The managed category a typed name belongs to; blank means General. A name that is new is added to the list.
+
+    The caller commits, so a purchase that fails afterwards leaves no stray category behind.
+    """
+    label = clean_name(typed) or "General"
+    for row in db.all("SELECT name FROM categories WHERE business_id=?", (biz,)):
+        if norm(row["name"]) == norm(label):
+            return row["name"]
+    db.execute("INSERT INTO categories (business_id, name) VALUES (?, ?)", (biz, label))
+    return label
+
+
+def sync_categories():
+    """Makes the category list match the items already in stock and gives every item the one canonical spelling.
+
+    Runs at start-up. It is what turns the free-text categories of older data into tiles, and it is safe to
+    repeat: once everything is canonical it changes nothing.
+    """
+    db = Database()
+    try:
+        for biz in [row["id"] for row in db.all("SELECT id FROM businesses")]:
+            known = {norm(row["name"]): row["name"] for row in category_rows(db, biz)}
+            if "general" not in known:
+                db.execute("INSERT INTO categories (business_id, name) VALUES (?, 'General')", (biz,))
+                known["general"] = "General"
+
+            spellings = {}      # normalised name -> {spelling: items using it}
+            raw_values = []     # (value stored on items, spelling it stands for)
+            for row in db.all("SELECT category, COUNT(*) AS n FROM products WHERE business_id=? GROUP BY category", (biz,)):
+                label = clean_name(row["category"]) or "General"
+                spellings.setdefault(norm(label), {})[label] = spellings.get(norm(label), {}).get(label, 0) + row["n"]
+                raw_values.append((row["category"], label))
+
+            for key, options in spellings.items():
+                if key not in known:
+                    # The most used spelling wins; a capitalised one wins a tie
+                    best = max(options, key=lambda s: (options[s], s[:1].isupper(), s))
+                    db.execute("INSERT INTO categories (business_id, name) VALUES (?, ?)", (biz, best))
+                    known[key] = best
+
+            for raw, label in raw_values:
+                canonical = known[norm(label)]
+                if raw == canonical:
+                    continue
+                if raw is None:
+                    db.execute("UPDATE products SET category=? WHERE business_id=? AND category IS NULL", (canonical, biz))
+                else:
+                    db.execute("UPDATE products SET category=? WHERE business_id=? AND category=?", (canonical, biz, raw))
+        db.commit()
+    except DB_ERRORS:
+        db.rollback()
+    finally:
+        db.close()
+
+
+sync_categories()
+
+
 def next_invoice_no(db, biz):
     year = now().strftime("%Y")
     # Longest then highest = the largest sequence, whatever order invoices were entered or imported in
@@ -419,6 +492,7 @@ def setup():
                     (business, text("subtitle"), text("contact")),
                 )
                 db.execute("INSERT INTO departments (business_id, name) VALUES (?, 'General')", (biz,))
+                db.execute("INSERT INTO categories (business_id, name) VALUES (?, 'General')", (biz,))
                 uid = db.insert(
                     """INSERT INTO users (business_id, username, password_hash, role, can_sell, can_procure, can_transfer, can_delete)
                        VALUES (?, ?, ?, 'admin', 1, 1, 1, 1)""",
@@ -663,19 +737,78 @@ def chosen_department(db, biz):
     return dept if dept in department_names(db, biz) else "General"
 
 
+INV_PARAMS = ("category", "department", "view", "q", "period", "from", "to")
+
+
+def inv_link(endpoint, **changes):
+    """A link to an inventory page that keeps the filters in force and changes only what is asked."""
+    params = {key: value for key, value in request.args.items() if key in INV_PARAMS}
+    params.update(changes)
+    return url_for(endpoint, **{key: value for key, value in params.items() if value not in (None, "")})
+
+
+def facets(db, biz, rows, measure):
+    """The category tiles and department chips for the rows on screen, plus which of each is selected.
+
+    Each tile counts the rows left after the *other* filter, so a number on a tile is exactly what clicking
+    it shows. A name in the address that matches nothing is ignored. Rows are dicts with category and department.
+    """
+    cats = {norm(r["name"]): r["name"] for r in category_rows(db, biz)}
+    depts = {norm(name): name for name in department_names(db, biz)}
+    for r in rows:
+        cats.setdefault(norm(r["category"] or "General"), clean_name(r["category"]) or "General")
+        depts.setdefault(norm(r["department"] or "General"), clean_name(r["department"]) or "General")
+
+    want_cat, want_dept = norm(request.args.get("category")), norm(request.args.get("department"))
+    want_cat, want_dept = (want_cat if want_cat in cats else ""), (want_dept if want_dept in depts else "")
+
+    def in_cat(row, key):
+        return not key or norm(row["category"] or "General") == key
+
+    def in_dept(row, key):
+        return not key or norm(row["department"] or "General") == key
+
+    return {
+        "tiles": [
+            dict(measure([r for r in rows if in_cat(r, key) and in_dept(r, want_dept)]), name=name, active=key == want_cat, seed=is_seed_category(name))
+            for key, name in sorted(cats.items(), key=lambda pair: pair[1].lower())
+        ],
+        "chips": [
+            dict(measure([r for r in rows if in_dept(r, key) and in_cat(r, want_cat)]), name=name, active=key == want_dept)
+            for key, name in sorted(depts.items(), key=lambda pair: pair[1].lower())
+        ],
+        "all_categories": measure([r for r in rows if in_dept(r, want_dept)]),
+        "all_departments": measure([r for r in rows if in_cat(r, want_cat)]),
+        "category": cats.get(want_cat, ""), "department": depts.get(want_dept, ""),
+        "match": lambda r: in_cat(r, want_cat) and in_dept(r, want_dept),
+    }
+
+
+def stock_measure(subset):
+    return {"items": len(subset), "units": sum(r["quantity"] for r in subset), "value": sum(r["quantity"] * r["unit_cost"] for r in subset)}
+
+
+def cost_measure(subset):
+    return {"purchases": len(subset), "cost": sum(r["total_cost"] or 0.0 for r in subset)}
+
+
 @app.get("/inventory")
 @need(None)
 def inventory():
     db, biz = get_db(), g.user["business_id"]
-    items = db.all(f"SELECT {ITEM_COLUMNS} FROM products WHERE business_id=? ORDER BY name", (biz,))
+    everything = db.all(f"SELECT {ITEM_COLUMNS} FROM products WHERE business_id=? ORDER BY name", (biz,))
+    search = request.args.get("q", "").strip()
+    found = [i for i in everything if not search or norm(search) in norm(i["name"]) or norm(search) in norm(i["item_code"])]
 
-    # Category is its own field on each item (Seeds, Fertiliser, Feed...), separate from the department
-    # "Fertiliser", "fertiliser " and "FERTILISER" are one group, shown under its most used spelling
-    # (a capitalised one wins a tie).
+    # Tiles and chips narrow the list; each item is in exactly one category and one department
+    facet = facets(db, biz, found, stock_measure)
+    items = [i for i in found if facet["match"](i)]
+
+    # Grouped view: "Fertiliser", "fertiliser " and "FERTILISER" are one group, under its most used spelling
     by_category = {}
     for item in items:
-        label = " ".join((item["category"] or "").split()) or "Uncategorised"
-        group = by_category.setdefault(label.lower(), {"spellings": {}, "entries": [], "units": 0, "value": 0.0, "low": 0})
+        label = clean_name(item["category"]) or "Uncategorised"
+        group = by_category.setdefault(norm(label), {"spellings": {}, "entries": [], "units": 0, "value": 0.0, "low": 0})
         group["spellings"][label] = group["spellings"].get(label, 0) + 1
         group["name"] = max(group["spellings"], key=lambda spelling: (group["spellings"][spelling], spelling[:1].isupper(), spelling))
         group["entries"].append(item)
@@ -684,13 +817,224 @@ def inventory():
         group["low"] += 1 if item["quantity"] < g.user["low_stock_threshold"] else 0
     categories = [group for _, group in sorted(by_category.items())]
 
-    # Lets the purchase form recognise a seed item by its code as well as by the category typed
-    seed_items = {i["item_code"]: i["seeds_per_pack"] or 0 for i in items if is_seed_category(i["category"])}
-    category_names = sorted({" ".join((i["category"] or "").split()) for i in items} - {""} | {"Seeds"}, key=str.lower)
-
     return render_template(
         "inventory.html", items=items, categories=categories, view="list" if request.args.get("view") == "list" else "category",
-        departments=department_names(db, biz), today=now().strftime("%Y-%m-%d"), seed_items=seed_items, category_names=category_names,
+        facet=facet, search=search, has_items=bool(everything), mode="stock",
+    )
+
+
+@app.get("/inventory/new")
+@need("procure")
+def inventory_new():
+    """The guided purchase form: which category, which department, then the details."""
+    db, biz = get_db(), g.user["business_id"]
+    items = db.all("SELECT item_code, name, category, department, seeds_per_pack FROM products WHERE business_id=? ORDER BY name LIMIT 5000", (biz,))
+    per_category, per_department = {}, {}
+    for i in items:
+        per_category[norm(i["category"] or "General")] = per_category.get(norm(i["category"] or "General"), 0) + 1
+        per_department[norm(i["department"] or "General")] = per_department.get(norm(i["department"] or "General"), 0) + 1
+
+    # Lets the page recognise an item that is already in stock by its code
+    known = {
+        i["item_code"]: {"name": i["name"], "category": i["category"] or "General", "department": i["department"] or "General", "seeds": i["seeds_per_pack"] or 0}
+        for i in items
+    }
+    categories = [{"name": r["name"], "items": per_category.get(norm(r["name"]), 0), "seed": is_seed_category(r["name"])} for r in category_rows(db, biz)]
+    departments = [{"name": n, "items": per_department.get(norm(n), 0)} for n in department_names(db, biz)]
+
+    code = request.args.get("code", "").strip()
+    start = known.get(code)
+    want_cat = norm(start["category"] if start else request.args.get("category"))
+    want_dept = norm(start["department"] if start else request.args.get("department"))
+    return render_template(
+        "inventory_new.html", categories=categories, departments=departments, known=known, today=now().strftime("%Y-%m-%d"),
+        pre_category=next((c["name"] for c in categories if norm(c["name"]) == want_cat), ""),
+        pre_department=next((d["name"] for d in departments if norm(d["name"]) == want_dept), ""),
+        pre_code=code, pre_name=start["name"] if start else "",
+    )
+
+
+@app.get("/inventory/categories")
+@need(None)
+def categories_page():
+    db, biz = get_db(), g.user["business_id"]
+    totals = {norm(r["category"] or "General"): r for r in db.all(
+        "SELECT category, COUNT(*) AS items, COALESCE(SUM(quantity), 0) AS units FROM products WHERE business_id=? GROUP BY category", (biz,))}
+    tiles = [
+        {"id": r["id"], "name": r["name"], "items": totals.get(norm(r["name"]), {}).get("items", 0), "units": totals.get(norm(r["name"]), {}).get("units", 0),
+         "seed": is_seed_category(r["name"])}
+        for r in category_rows(db, biz)
+    ]
+    return render_template("categories.html", tiles=tiles)
+
+
+@app.post("/inventory/categories")
+@need("procure")
+def add_category():
+    db, biz = get_db(), g.user["business_id"]
+    from_wizard = text("next") == "new"
+
+    def back(category=""):
+        return redirect(url_for("inventory_new", category=category) if from_wizard else url_for("categories_page"))
+
+    name = clean_name(text("category_name"))
+    if not name:
+        flash("Type a name for the new category.", "error")
+        return back()
+    existing = next((r["name"] for r in category_rows(db, biz) if norm(r["name"]) == norm(name)), None)
+    if existing:
+        flash(f"The category '{existing}' already exists." + (" It is selected for you." if from_wizard else ""), "ok" if from_wizard else "error")
+        return back(existing)
+    try:
+        db.execute("INSERT INTO categories (business_id, name) VALUES (?, ?)", (biz, name))
+        db.commit()
+    except DB_ERRORS:
+        db.rollback()
+        flash("The category could not be added. Please try again.", "error")
+        return back()
+    note = " Items in it are counted in packs, so each purchase asks how many seeds a pack holds." if is_seed_category(name) else ""
+    flash(f"Category '{name}' added.{note}", "ok")
+    return back(name)
+
+
+def retag(db, table, biz, old, new):
+    """Moves every row of a table (its name comes from the code, never the request) from one category name to another."""
+    for row in db.all(f"SELECT DISTINCT category FROM {table} WHERE business_id=?", (biz,)):
+        if row["category"] is not None and norm(row["category"]) == norm(old):
+            db.execute(f"UPDATE {table} SET category=? WHERE business_id=? AND category=?", (new, biz, row["category"]))
+
+
+@app.post("/inventory/categories/<int:category_id>/rename")
+@need("admin")
+def rename_category(category_id):
+    db, biz = get_db(), g.user["business_id"]
+    row = db.one("SELECT id, name FROM categories WHERE id=? AND business_id=?", (category_id, biz))
+    if row is None:
+        abort(404)
+    new = clean_name(text("category_name"))
+    clash = next((r for r in category_rows(db, biz) if norm(r["name"]) == norm(new) and r["id"] != category_id), None)
+    if not new:
+        flash("Type the new name.", "error")
+    elif row["name"] == "General":
+        flash("The General category cannot be renamed.", "error")
+    elif clash:
+        flash(f"There is already a category called '{clash['name']}'.", "error")
+    elif is_seed_category(new) != is_seed_category(row["name"]):
+        # A name with the word seed is what makes a category seeds, counted in packs
+        flash("That rename would change whether this category counts as seeds (counted in packs), because the word seed in a name is what marks it. Keep or remove the word seed in both names.", "error")
+    else:
+        try:
+            db.execute("UPDATE categories SET name=? WHERE id=? AND business_id=?", (new, category_id, biz))
+            for table in ("products", "procurements", "pos_products"):
+                retag(db, table, biz, row["name"], new)
+            db.commit()
+        except DB_ERRORS:
+            db.rollback()
+            flash("The category could not be renamed. Please try again.", "error")
+        else:
+            flash(f"'{row['name']}' is now '{new}'. Its items and past purchases moved with it.", "ok")
+    return redirect(url_for("categories_page"))
+
+
+@app.post("/inventory/categories/<int:category_id>/delete")
+@need("admin")
+def delete_category(category_id):
+    db, biz = get_db(), g.user["business_id"]
+    row = db.one("SELECT id, name FROM categories WHERE id=? AND business_id=?", (category_id, biz))
+    if row is None:
+        abort(404)
+    in_use = db.one("SELECT COUNT(*) AS n FROM products WHERE business_id=? AND category=?", (biz, row["name"]))["n"]
+    if row["name"] == "General":
+        flash("The General category cannot be deleted.", "error")
+    elif in_use:
+        flash(f"'{row['name']}' still has {in_use} item(s). Move them to another category first, then delete it.", "error")
+    else:
+        db.execute("DELETE FROM categories WHERE id=? AND business_id=?", (category_id, biz))
+        db.commit()
+        flash(f"Category '{row['name']}' deleted.", "ok")
+    return redirect(url_for("categories_page"))
+
+
+# --- INVENTORY ANALYSIS: what was bought, and what it cost, for any category, department, item and period ---
+def analysis_rows(db, biz, start, end):
+    """Every purchase in the period, each tagged with the item's *current* category and department.
+
+    Using the item's own category means a purchase logged before an item was recategorised still lands with it;
+    purchases of items that have since been deleted keep the category they were logged under.
+    """
+    sql = """SELECT pr.id, pr.item_code, pr.name, pr.purchase_date, pr.quantity, pr.unit_cost, pr.total_cost, pr.amount_paid, pr.supplier_name, pr.invoice_no,
+                    COALESCE(p.category, pr.category) AS category, COALESCE(p.department, pr.department) AS department,
+                    p.seeds_per_pack AS seeds_per_pack, p.quantity AS in_stock
+             FROM procurements pr LEFT JOIN products p ON p.business_id = pr.business_id AND p.item_code = pr.item_code
+             WHERE pr.business_id=?"""
+    params = [biz]
+    if start is not None:
+        sql += " AND pr.purchase_date >= ?"
+        params.append(start.isoformat())
+    if end is not None:
+        sql += " AND pr.purchase_date < ?"
+        params.append((end + datetime.timedelta(days=1)).isoformat())
+    rows = db.all(sql, params)
+    for r in rows:
+        r["category"] = clean_name(r["category"]) or "General"
+        r["department"] = clean_name(r["department"]) or "General"
+        r["quantity"] = r["quantity"] or 0
+        r["total_cost"] = r["total_cost"] or 0.0
+        r["amount_paid"] = r["amount_paid"] if r["amount_paid"] is not None else r["total_cost"]
+        r["status"] = payment_status_for(r["total_cost"], r["amount_paid"])
+    return rows
+
+
+def analysis_context():
+    db, biz = get_db(), g.user["business_id"]
+    choice, start, end = report_period("all")
+    search = request.args.get("q", "").strip()
+    rows = [r for r in analysis_rows(db, biz, start, end) if not search or norm(search) in norm(r["name"]) or norm(search) in norm(r["item_code"])]
+    facet = facets(db, biz, rows, cost_measure)
+    chosen = [r for r in rows if facet["match"](r)]
+
+    items = {}
+    for r in sorted(chosen, key=lambda r: (r["purchase_date"] or "", r["id"])):
+        it = items.setdefault(r["item_code"], {
+            "code": r["item_code"], "purchases": 0, "qty": 0, "cost": 0.0, "paid": 0.0, "last": "", "seeds_per_pack": r["seeds_per_pack"],
+        })
+        # Rows run oldest first, so the name, place and stock left over are those of the latest purchase
+        it.update(name=r["name"], category=r["category"], department=r["department"], in_stock=r["in_stock"], last=r["purchase_date"] or "")
+        it["purchases"] += 1
+        it["qty"] += r["quantity"]
+        it["cost"] += r["total_cost"]
+        it["paid"] += r["amount_paid"]
+    item_list = sorted(items.values(), key=lambda i: (-i["cost"], i["name"].lower()))
+    for it in item_list:
+        it["avg"] = it["cost"] / it["qty"] if it["qty"] else 0.0
+
+    totals = {
+        "items": len(item_list), "purchases": len(chosen), "qty": sum(i["qty"] for i in item_list),
+        "cost": sum(i["cost"] for i in item_list), "paid": sum(i["paid"] for i in item_list),
+    }
+    totals["owed"] = totals["cost"] - totals["paid"]
+    return {
+        "facet": facet, "mode": "analysis", "search": search, "periods": REPORT_PERIODS, "period": choice, "start": start, "end": end,
+        "items": item_list, "totals": totals, "has_items": True,
+        "history": sorted(chosen, key=lambda r: (r["purchase_date"] or "", r["id"]), reverse=True)[:300], "history_total": len(chosen),
+    }
+
+
+@app.get("/inventory/analysis")
+@need(None)
+def inventory_analysis():
+    return render_template("inventory_analysis.html", **analysis_context())
+
+
+@app.get("/inventory/analysis.csv")
+@need(None)
+def inventory_analysis_csv():
+    ctx = analysis_context()
+    return csv_response(
+        "inventory-analysis.csv",
+        ["Item Code", "Item", "Category", "Department", "Purchases", "Quantity Bought", "Total Cost", "Average Unit Cost", "Last Purchase", "In Stock Now"],
+        [(i["code"], i["name"], i["category"], i["department"], i["purchases"], i["qty"], round(i["cost"], 2), round(i["avg"], 4), i["last"], i["in_stock"])
+         for i in ctx["items"]],
     )
 
 
@@ -699,34 +1043,40 @@ def inventory():
 def purchase():
     db, biz = get_db(), g.user["business_id"]
     code, name = text("item_code"), text("name")
+    # A problem sends the user back to the form with the category and department they had picked
+    again = url_for("inventory_new", category=text("category"), department=text("department"))
     try:
         qty = number("quantity", int)
         unit_cost = number("unit_cost")
         price = number("price") if text("price") else None
     except ValueError:
         flash("Quantity must be a whole number; unit cost and selling price must be numbers.", "error")
-        return redirect(url_for("inventory"))
+        return redirect(again)
     if not code or not name or qty <= 0 or unit_cost < 0 or (price is not None and price < 0):
         flash("Item code and name are required, quantity must be above zero and prices cannot be negative.", "error")
-        return redirect(url_for("inventory"))
+        return redirect(again)
     try:
         amount_paid = amount_for_status(text("payment_status"), text("amount_paid"), round(qty * unit_cost, 2))
     except ValueError as e:
         flash(str(e).capitalize() + ".", "error")
-        return redirect(url_for("inventory"))
+        return redirect(again)
 
-    # Seed items must say how many seeds a pack holds
-    category = text("category") or "General"
-    known = db.one("SELECT category, seeds_per_pack FROM products WHERE business_id=? AND item_code=?", (biz, code))
-    seeds_per_pack, problem = seeds_per_pack_for(known, category, text("seeds_per_pack"))
-    if problem:
-        flash(problem[0].upper() + problem[1:] + ".", "error")
-        return redirect(url_for("inventory"))
-
+    known = db.one("SELECT category, department, seeds_per_pack FROM products WHERE business_id=? AND item_code=?", (biz, code))
     try:
+        # An item already in stock keeps its own category and department; a new one is filed where the form says.
+        # A category that is new is added to the list, but only once the whole purchase is saved.
+        category = known["category"] if known else resolve_category(db, biz, text("category"))
+        department = known["department"] if known else chosen_department(db, biz)
+
+        # Seed items must say how many seeds a pack holds
+        seeds_per_pack, problem = seeds_per_pack_for(known, category, text("seeds_per_pack"))
+        if problem:
+            flash(problem[0].upper() + problem[1:] + ".", "error")
+            return redirect(again)
+
         existing_name = record_purchase(db, biz, {
             "amount_paid": amount_paid, "seeds_per_pack": seeds_per_pack,
-            "item_code": code, "name": name, "category": category, "department": chosen_department(db, biz),
+            "item_code": code, "name": name, "category": category, "department": department,
             "quantity": qty, "unit_cost": unit_cost, "price": price, "supplier_name": text("supplier_name"),
             "invoice_no": text("invoice_no"), "purchase_date": text("purchase_date") or now().strftime("%Y-%m-%d"),
             "batch_no": text("batch_no"), "date_planted": text("date_planted"), "expiry_date": text("expiry_date"),
@@ -735,7 +1085,7 @@ def purchase():
     except DB_ERRORS:
         db.rollback()
         flash("The purchase could not be saved. Please try again.", "error")
-        return redirect(url_for("inventory"))
+        return redirect(again)
 
     seed_note = f" That is {qty * seeds_per_pack:,} seeds in {qty:,} pack(s) of {seeds_per_pack:,}." if seeds_per_pack else ""
     if existing_name:
@@ -751,8 +1101,10 @@ def record_purchase(db, biz, p):
     A blank price (None) keeps an existing item's selling price and uses the unit cost for a new item.
     Returns the existing item's name when the code was already in stock, otherwise None. The caller commits.
     """
-    existing = db.one("SELECT id, name, price FROM products WHERE business_id=? AND item_code=?", (biz, p["item_code"]))
+    existing = db.one("SELECT id, name, price, category, department FROM products WHERE business_id=? AND item_code=?", (biz, p["item_code"]))
     if existing:
+        # A restock is filed where the item already lives, so analysis by category and department stays consistent
+        p = dict(p, category=existing["category"], department=existing["department"])
         price = existing["price"] if p["price"] is None else p["price"]
         db.execute(
             """UPDATE products SET quantity = quantity + ?, unit_cost=?, price=?, batch_no=?, supplier_name=?, invoice_no=?, purchase_date=?, expiry_date=?,
@@ -806,8 +1158,13 @@ def item(item_id):
             (biz, current["item_code"]),
         )
 
+    # The category list for the edit form; an item's own category is always offered, even if it was never added to the list
+    category_choices = [r["name"] for r in category_rows(db, biz)]
+    if norm(current["category"]) not in {norm(n) for n in category_choices}:
+        category_choices.append(current["category"] or "General")
+
     return render_template(
-        "item.html", item=current, departments=department_names(db, biz),
+        "item.html", item=current, departments=department_names(db, biz), category_choices=category_choices,
         access={action: item_access_state(db, item_id, action) for action, _ in ITEM_ACTIONS}, actions=ITEM_ACTIONS,
         seed=seed, listing=listing, batches=batches, per_seed=per_seed, seedling_name=(listing or {}).get("name") or seedling_name_for(current["name"]),
     )
@@ -832,7 +1189,7 @@ def update_item(item_id):
         flash("Item name is required and prices cannot be negative.", "error")
         return redirect(url_for("item", item_id=item_id))
 
-    category, dept = text("category") or "General", chosen_department(db, biz)
+    category, dept = resolve_category(db, biz, text("category")), chosen_department(db, biz)
 
     # A seed item always carries its pack size; here an admin can correct a wrong one
     seeds_per_pack = None
@@ -2349,10 +2706,10 @@ REPORT_PERIODS = (
 REPORT_PARAMS = ("period", "from", "to", "view", "dept")
 
 
-def report_period():
+def report_period(default="this_month"):
     """Returns (choice, first day, last day) from the query string; both days are None for 'all time'."""
     today = now().date()
-    choice = request.args.get("period", "this_month")
+    choice = request.args.get("period", default)
     start = end = None
     if choice == "custom":
         try:
@@ -2778,10 +3135,11 @@ def import_purchases():
 
     known_names = {r["item_code"]: r["name"] for r in db.all("SELECT item_code, name FROM products WHERE business_id=?", (biz,))}
     # Items already in stock, plus new ones as the file introduces them, so a seed item's pack size is held to one value
-    stocked = {r["item_code"]: r for r in db.all("SELECT item_code, category, seeds_per_pack FROM products WHERE business_id=?", (biz,))}
+    stocked = {r["item_code"]: r for r in db.all("SELECT item_code, category, department, seeds_per_pack FROM products WHERE business_id=?", (biz,))}
     departments = set(department_names(db, biz))
+    known_categories = {norm(r["name"]): r["name"] for r in category_rows(db, biz)}
     today = now().strftime("%Y-%m-%d")
-    errors, purchases, new_departments = [], [], []
+    errors, purchases, new_departments, new_categories = [], [], [], []
 
     for rec in records:
         problems = []
@@ -2830,7 +3188,14 @@ def import_purchases():
             except ValueError as e:
                 problems.append(str(e))
 
-        seeds_per_pack, pack_problem = seeds_per_pack_for(stocked.get(code), rec["category"] or "General", rec["seeds_per_pack"])
+        # A restock row is filed where the item already lives; a new item uses the category and department in the file,
+        # matched to the managed lists ignoring capitals and spacing. Names that are new are added when the file is saved.
+        already = stocked.get(code)
+        typed_category = clean_name(rec["category"]) or "General"
+        category = already["category"] if already else known_categories.get(norm(typed_category), typed_category)
+        dept = already["department"] if already else (rec["department"] or "General")
+
+        seeds_per_pack, pack_problem = seeds_per_pack_for(already, category, rec["seeds_per_pack"])
         if pack_problem:
             problems.append(pack_problem)
 
@@ -2839,13 +3204,16 @@ def import_purchases():
             continue
 
         known_names.setdefault(code, name)
-        stocked.setdefault(code, {"category": rec["category"] or "General", "seeds_per_pack": seeds_per_pack})
-        dept = rec["department"] or "General"
-        if dept not in departments:
-            departments.add(dept)
-            new_departments.append(dept)
+        if not already:
+            stocked[code] = {"category": category, "department": dept, "seeds_per_pack": seeds_per_pack}
+            if norm(category) not in known_categories:
+                known_categories[norm(category)] = category
+                new_categories.append(category)
+            if dept not in departments:
+                departments.add(dept)
+                new_departments.append(dept)
         purchases.append({
-            "item_code": code, "name": name, "category": rec["category"] or "General", "department": dept,
+            "item_code": code, "name": name, "category": category, "department": dept,
             "quantity": qty, "unit_cost": round(unit_cost, 2), "price": None if price is None else round(price, 2),
             "supplier_name": rec["supplier_name"], "invoice_no": rec["invoice_no"], "purchase_date": dates["purchase_date"] or today,
             "batch_no": rec["batch_no"], "date_planted": dates["date_planted"], "expiry_date": dates["expiry_date"],
@@ -2859,6 +3227,8 @@ def import_purchases():
     try:
         for dept in new_departments:
             db.execute("INSERT INTO departments (business_id, name) VALUES (?, ?)", (biz, dept))
+        for category in new_categories:
+            db.execute("INSERT INTO categories (business_id, name) VALUES (?, ?)", (biz, category))
         for p in purchases:
             if record_purchase(db, biz, p):
                 restocked += 1
@@ -3221,7 +3591,7 @@ RESET_GROUPS = (
 RESET_KEPT = (
     "User accounts: usernames, passwords, roles, permissions and each user's appearance.",
     "Business details and settings: name, contact, currency, low-stock threshold, alert switches and WhatsApp number.",
-    "Departments.",
+    "Departments and inventory categories.",
     "HR settings: statutory rates and non-working days.",
 )
 RESET_PHRASE = "RESET ALL DATA"

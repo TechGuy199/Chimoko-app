@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% block title %}Log a purchase — {% endblock %}
+{% block content %}
+<div class="page-head">
+    <div>
+        <a class="back" href="{{ url_for('inventory') }}">&larr; Back to inventory</a>
+        <h1>Log a Purchase</h1>
+    </div>
+</div>
+
+{# The new-category box sits among the tiles but belongs to this separate form, so pressing Enter in it adds the category #}
+<form id="add-category-form" method="post" action="{{ url_for('add_category') }}">
+    {{ csrf_field() }}
+    <input type="hidden" name="next" value="new">
+</form>
+
+<form method="post" action="{{ url_for('purchase') }}" id="purchase-form" data-items="{{ known|tojson|forceescape }}">
+    {{ csrf_field() }}
+
+    <section class="card">
+        <h2><span class="step">1</span> Which category does it fall under?</h2>
+        <div class="choice-tiles">
+            {% for c in categories %}
+            <label class="choice">
+                <input type="radio" name="category" value="{{ c.name }}" required {{ 'checked' if c.name == pre_category }}>
+                <span class="tile">
+                    <span class="tile-name">{{ c.name }}</span>
+                    <small>{{ c['items'] }} item(s){% if c.seed %} &middot; seeds, counted in packs{% endif %}</small>
+                </span>
+            </label>
+            {% endfor %}
+            <div class="choice new-choice">
+                <span class="tile">
+                    <span class="tile-name">+ New category</span>
+                    <input name="category_name" form="add-category-form" maxlength="60" placeholder="Name" aria-label="Name of a new category">
+                    <button class="btn small" form="add-category-form">Add</button>
+                </span>
+            </div>
+        </div>
+    </section>
+
+    <section class="card block">
+        <h2><span class="step">2</span> Which department?</h2>
+        <div class="choice-tiles">
+            {% for d in departments %}
+            <label class="choice">
+                <input type="radio" name="department" value="{{ d.name }}" required {{ 'checked' if d.name == pre_department }}>
+                <span class="tile">
+                    <span class="tile-name">{{ d.name }}</span>
+                    <small>{{ d['items'] }} item(s)</small>
+                </span>
+            </label>
+            {% endfor %}
+        </div>
+        {% if user.role == 'admin' %}<p class="muted hint">Need another department? Add it under <a href="{{ url_for('settings') }}">Settings</a>.</p>{% endif %}
+    </section>
+
+    <section class="card block narrow-form">
+        <h2><span class="step">3</span> The details</h2>
+        <p id="restock-note" class="flash notice" hidden></p>
+        <label>Item code <input name="item_code" id="purchase-code" required value="{{ pre_code }}"></label>
+        <label>Item name <input name="name" id="purchase-name" required value="{{ pre_name }}"></label>
+        <label id="seeds-row" hidden>Seeds per pack (how many seeds are in one pack)
+            <input name="seeds_per_pack" id="purchase-seeds" type="number" min="1" step="1" inputmode="numeric" placeholder="e.g. 1000">
+            <small class="muted" id="seeds-note">Quantity bought below is counted in packs.</small>
+        </label>
+        <label>Quantity bought <span id="quantity-unit" class="muted"></span> <input name="quantity" type="number" min="1" step="1" required></label>
+        <label>Unit cost <input name="unit_cost" type="number" min="0" step="0.01" required></label>
+        <label>Selling price (blank = keep current, or unit cost if new) <input name="price" type="number" min="0" step="0.01"></label>
+        <label>Supplier name <input name="supplier_name"></label>
+        <label>Supplier invoice number <input name="invoice_no"></label>
+        <label>Purchase date <input name="purchase_date" type="date" value="{{ today }}"></label>
+        <label>Batch number <input name="batch_no"></label>
+        <label>Date planted <input name="date_planted" type="date"></label>
+        <label>Expiry date <input name="expiry_date" type="date"></label>
+        <label>Payment to supplier
+            <select name="payment_status" onchange="document.getElementById('purchase-paid').hidden = this.value !== 'Partial Payment'">
+                <option>Paid</option><option>Partial Payment</option><option>Unpaid</option>
+            </select>
+        </label>
+        <label id="purchase-paid" hidden>Amount paid so far <input name="amount_paid" type="number" min="0" step="0.01"></label>
+        <button class="btn success wide">Log Purchase &amp; Add</button>
+    </section>
+</form>
+{% endblock %}
+{% block scripts %}<script src="{{ asset('inventory.js') }}"></script>{% endblock %}

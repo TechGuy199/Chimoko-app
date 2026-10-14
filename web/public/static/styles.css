@@ -511,6 +511,52 @@ table.rules input { margin-top: 0; max-width: 140px; }
 .range-ends { display: flex; justify-content: space-between; margin-bottom: 16px; color: var(--text-muted); font-size: 11px; }
 .preview-tiles { margin: 0 0 18px; }
 
+/* ---------- Inventory: category tiles, department chips, guided purchase form ---------- */
+.head-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.inv-switch { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+.inv-search { flex: 1 1 240px; max-width: 360px; }
+.inv-search input { margin-top: 0; }
+.cat-tiles { grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); }
+.dept-tile.active { border-color: var(--primary); box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.14), 0 0 0 1px var(--primary), 0 10px 30px var(--shadow); }
+.tile-name { display: block; font-size: 15px; font-weight: 650; color: var(--text-bright); }
+.tile-badge { color: var(--ok-text) !important; }
+.add-tile { border-style: dashed; }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 4px; }
+.chip { padding: 6px 12px; border: 1px solid var(--line-strong); border-radius: 999px; background: rgba(var(--ink), 0.04); color: var(--text); font-weight: 600; transition: background 0.18s var(--ease), border-color 0.18s var(--ease); }
+.chip small { margin-left: 6px; color: var(--text-muted); font-weight: 400; }
+.chip:hover { background: rgba(var(--ink), 0.09); color: var(--text-bright); }
+.chip.active { border-color: var(--primary); background: var(--primary); color: var(--on-accent); }
+.chip.active small { color: inherit; opacity: 0.85; }
+.item-place { margin: -8px 0 0; }
+.cat-manage .tile-link { display: block; color: inherit; }
+.cat-manage .tile-links { margin: 8px 0 0; font-size: 12px; }
+.edit-tile { margin-top: 8px; font-size: 12px; }
+.edit-tile summary { cursor: pointer; color: var(--text-muted); }
+.edit-tile form { margin-top: 8px; display: flex; gap: 6px; }
+.edit-tile input { margin-top: 0; }
+
+.step { display: inline-grid; place-items: center; width: 20px; height: 20px; margin-right: 6px; border-radius: 50%; background: var(--primary); color: var(--on-accent); font-size: 11px; letter-spacing: 0; }
+.choice-tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 10px; }
+.choice { position: relative; display: block; margin: 0; cursor: pointer; }
+.choice input[type="radio"] { position: absolute; opacity: 0; width: 1px; height: 1px; }
+.choice .tile {
+    display: block;
+    height: 100%;
+    padding: 12px 14px;
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius-small);
+    background: rgba(var(--ink), 0.04);
+    transition: border-color 0.18s var(--ease), background 0.18s var(--ease), transform 0.12s var(--ease);
+}
+.choice:hover .tile { background: rgba(var(--ink), 0.08); }
+.choice:active .tile { transform: scale(0.985); }
+.choice input:checked + .tile { border-color: var(--primary); background: rgba(59, 130, 246, 0.16); box-shadow: 0 0 0 1px var(--primary); }
+.choice input:focus-visible + .tile { outline: 2px solid var(--primary); outline-offset: 2px; }
+.choice .tile small { display: block; margin-top: 2px; color: var(--text-muted); }
+.new-choice { cursor: default; }
+.new-choice .tile { border-style: dashed; }
+.new-choice input { margin: 6px 0; }
+
 /* ---------- Danger zone: resetting the app ---------- */
 .danger-zone { border-color: rgba(229, 72, 77, 0.45); }
 .danger-zone h2 { color: var(--warn-text); }

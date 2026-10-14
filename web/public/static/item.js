@@ -14,7 +14,9 @@
             detailRow.hidden = !isSeed;
             detailSeeds.required = isSeed;
         };
+        // The category is a drop-down; "input" and "change" cover every browser
         category.addEventListener("input", showPackSize);
+        category.addEventListener("change", showPackSize);
         showPackSize();
     }
 

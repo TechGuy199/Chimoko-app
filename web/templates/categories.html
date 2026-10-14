@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block title %}Categories — {% endblock %}
+{% block content %}
+<div class="page-head">
+    <div>
+        <a class="back" href="{{ url_for('inventory') }}">&larr; Back to inventory</a>
+        <h1>Categories</h1>
+    </div>
+</div>
+<p class="muted">
+    Every inventory item belongs to one category (Seeds, Fertiliser, Feed&hellip;) and one department. The category is chosen when a purchase is logged.
+    A category with the word <strong>seed</strong> or <strong>seeds</strong> in its name is a seed category: its items are counted in packs and sown into seedlings before they are sold.
+</p>
+
+{% if can('procure') %}
+<section class="card narrow-form">
+    <h2>Add a category</h2>
+    <form method="post" action="{{ url_for('add_category') }}" class="toolbar">
+        {{ csrf_field() }}
+        <input name="category_name" maxlength="60" placeholder="e.g. Seeds, Fertiliser, Feed, Tools" aria-label="Category name" required>
+        <button class="btn success">Add Category</button>
+    </form>
+</section>
+{% endif %}
+
+<div class="dept-tiles cat-tiles spaced">
+    {% for t in tiles %}
+    <div class="dept-tile cat-manage">
+        <a class="tile-link" href="{{ url_for('inventory', category=t.name) }}">
+            <span class="tile-name">{{ t.name }}</span>
+            <small>{{ t['items'] }} item(s) &middot; {{ t.units }} unit(s)</small>
+            {% if t.seed %}<small class="tile-badge">Seeds &middot; counted in packs</small>{% endif %}
+        </a>
+        <p class="tile-links"><a href="{{ url_for('inventory_analysis', category=t.name) }}">Analysis</a></p>
+        {% if user.role == 'admin' and t.name != 'General' %}
+        <details class="edit-tile">
+            <summary>Rename or delete</summary>
+            <form method="post" action="{{ url_for('rename_category', category_id=t.id) }}">
+                {{ csrf_field() }}
+                <input name="category_name" value="{{ t.name }}" maxlength="60" aria-label="New name for {{ t.name }}" required>
+                <button class="btn small primary">Rename</button>
+            </form>
+            {% if not t['items'] %}
+            <form method="post" action="{{ url_for('delete_category', category_id=t.id) }}" data-confirm="Delete the category {{ t.name }}?">
+                {{ csrf_field() }}
+                <button class="btn small danger">Delete</button>
+            </form>
+            {% else %}
+            <small class="muted">To delete it, first move its {{ t['items'] }} item(s) to another category.</small>
+            {% endif %}
+        </details>
+        {% endif %}
+    </div>
+    {% endfor %}
+</div>
+{% endblock %}

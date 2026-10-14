@@ -1,110 +1,90 @@
 {% extends "base.html" %}
 {% block title %}Inventory — {% endblock %}
 {% block content %}
-<div class="split">
-    {% if can('procure') %}
-    <section class="card side">
-        <h2>Log a Purchase</h2>
-        <p class="muted">Using an existing item code adds the quantity to that item's stock.</p>
-        <form method="post" action="{{ url_for('purchase') }}" id="purchase-form" data-seed-items="{{ seed_items|tojson|forceescape }}">
-            {{ csrf_field() }}
-            <label>Item code <input name="item_code" id="purchase-code" required></label>
-            <label>Item name <input name="name" required></label>
-            <label>Category (e.g. Seeds, Fertiliser) <input name="category" id="purchase-category" list="category-names" autocomplete="off"></label>
-            <datalist id="category-names">
-                {% for c in category_names %}<option value="{{ c }}">{% endfor %}
-            </datalist>
-            <label id="seeds-row" hidden>Seeds per pack (how many seeds are in one pack)
-                <input name="seeds_per_pack" id="purchase-seeds" type="number" min="1" step="1" inputmode="numeric" placeholder="e.g. 1000">
-                <small class="muted" id="seeds-note">Quantity bought below is counted in packs.</small>
-            </label>
-            <label>Department
-                <select name="department">
-                    {% for d in departments %}<option {{ 'selected' if d == 'General' }}>{{ d }}</option>{% endfor %}
-                </select>
-            </label>
-            <label>Quantity bought <span id="quantity-unit" class="muted"></span> <input name="quantity" type="number" min="1" step="1" required></label>
-            <label>Unit cost <input name="unit_cost" type="number" min="0" step="0.01" required></label>
-            <label>Selling price (blank = keep current, or unit cost if new) <input name="price" type="number" min="0" step="0.01"></label>
-            <label>Supplier name <input name="supplier_name"></label>
-            <label>Supplier invoice number <input name="invoice_no"></label>
-            <label>Purchase date <input name="purchase_date" type="date" value="{{ today }}"></label>
-            <label>Batch number <input name="batch_no"></label>
-            <label>Date planted <input name="date_planted" type="date"></label>
-            <label>Expiry date <input name="expiry_date" type="date"></label>
-            <label>Payment to supplier
-                <select name="payment_status" onchange="document.getElementById('purchase-paid').hidden = this.value !== 'Partial Payment'">
-                    <option>Paid</option><option>Partial Payment</option><option>Unpaid</option>
-                </select>
-            </label>
-            <label id="purchase-paid" hidden>Amount paid so far <input name="amount_paid" type="number" min="0" step="0.01"></label>
-            <button class="btn success wide">Log Purchase &amp; Add</button>
-        </form>
-    </section>
-    {% endif %}
-
-    {# One item row; the grouped view leaves out the Category column because the group heading says it #}
-    {% macro item_row(i, show_category) %}
-    <tr>
-        <td>{{ i.item_code }}</td>
-        <td>
-            {{ i.name }}
-            {% if i.seeds_per_pack %}<small class="seed-note">{{ '{:,}'.format(i.seeds_per_pack) }} seeds per pack &middot; {{ '{:,}'.format(i.seeds_per_pack * i.quantity) }} seeds in stock</small>{% endif %}
-        </td>
-        {% if show_category %}<td>{{ i.category or '—' }}</td>{% endif %}
-        <td>{{ i.department }}</td>
-        <td>{{ i.supplier_name or '—' }}</td>
-        <td class="num {{ 'warn' if i.quantity < user.low_stock_threshold }}">{{ i.quantity }}</td>
-        <td class="num">{{ i.unit_cost|money }}</td>
-        <td class="num">{{ i.price|money }}</td>
-        <td>{{ i.expiry_date or '—' }}</td>
-        <td class="num"><a class="btn small" href="{{ url_for('item', item_id=i.id) }}">Manage</a></td>
-    </tr>
-    {% endmacro %}
-
-    <section class="card grow">
-        <div class="page-head">
-            <h2>Company Inventory</h2>
-            <span class="segmented" role="group" aria-label="Inventory view">
-                <a href="{{ url_for('inventory') }}" class="{{ 'active' if view == 'category' }}">By category</a>
-                <a href="{{ url_for('inventory', view='list') }}" class="{{ 'active' if view == 'list' }}">Single list</a>
-            </span>
-        </div>
-
-        {% if not items %}
-        <p class="muted center">No inventory yet. Log your first purchase to get started.</p>
-        {% elif view == 'category' %}
-        {% for c in categories %}
-        <details class="group" open>
-            <summary>
-                <strong>{{ c.name }}</strong>
-                <span class="muted">{{ c.entries|length }} item(s) &middot; {{ c.units }} unit(s) &middot; {{ c.value|money }} at cost{% if c.low %} &middot; <span class="warn">{{ c.low }} low on stock</span>{% endif %}</span>
-            </summary>
-            <div class="table-wrap">
-                <table>
-                    <thead>
-                        <tr><th>Code</th><th>Name</th><th>Dept</th><th>Supplier</th><th class="num">Qty</th><th class="num">Unit cost</th><th class="num">Sell price</th><th>Expiry</th><th></th></tr>
-                    </thead>
-                    <tbody>
-                    {% for i in c.entries %}{{ item_row(i, false) }}{% endfor %}
-                    </tbody>
-                </table>
+<div class="page-head">
+    <h1>Inventory</h1>
+    <div class="head-actions">
+        {% if can('procure') %}<a class="btn primary" href="{{ url_for('inventory_new', category=facet.category, department=facet.department) }}">Log a purchase</a>{% endif %}
+        <details class="menu">
+            <summary class="btn">Actions</summary>
+            <div class="menu-panel">
+                <a class="menu-item" href="{{ url_for('categories_page') }}">Categories</a>
+                <a class="menu-item" href="{{ url_for('inventory_analysis') }}">Analysis</a>
+                {% if user.role == 'admin' %}<a class="menu-item" href="{{ url_for('import_data') }}">Import purchases</a>{% endif %}
             </div>
         </details>
-        {% endfor %}
-        {% else %}
+    </div>
+</div>
+
+{% include "_inventory_filters.html" %}
+
+{# One item row; the grouped view leaves out the Category column because the group heading says it #}
+{% macro item_row(i, show_category) %}
+<tr>
+    <td>{{ i.item_code }}</td>
+    <td>
+        {{ i.name }}
+        {% if i.seeds_per_pack %}<small class="seed-note">{{ '{:,}'.format(i.seeds_per_pack) }} seeds per pack &middot; {{ '{:,}'.format(i.seeds_per_pack * i.quantity) }} seeds in stock</small>{% endif %}
+    </td>
+    {% if show_category %}<td>{{ i.category or '—' }}</td>{% endif %}
+    <td>{{ i.department }}</td>
+    <td>{{ i.supplier_name or '—' }}</td>
+    <td class="num {{ 'warn' if i.quantity < user.low_stock_threshold }}">{{ i.quantity }}</td>
+    <td class="num">{{ i.unit_cost|money }}</td>
+    <td class="num">{{ i.price|money }}</td>
+    <td>{{ i.expiry_date or '—' }}</td>
+    <td class="num"><a class="btn small" href="{{ url_for('item', item_id=i.id) }}">Manage</a></td>
+</tr>
+{% endmacro %}
+
+<section class="card block">
+    <div class="page-head">
+        <h2>
+            {% if facet.category or facet.department %}
+            {{ facet.category or 'All categories' }}{% if facet.department %} &middot; {{ facet.department }}{% endif %}
+            <span class="muted">({{ items|length }} item(s))</span>
+            {% else %}Company Inventory{% endif %}
+        </h2>
+        <span class="segmented" role="group" aria-label="Inventory layout">
+            <a href="{{ inv_link('inventory', view='') }}" class="{{ 'active' if view == 'category' }}">By category</a>
+            <a href="{{ inv_link('inventory', view='list') }}" class="{{ 'active' if view == 'list' }}">Single list</a>
+        </span>
+    </div>
+
+    {% if not has_items %}
+    <p class="muted center">No inventory yet. Log your first purchase to get started.</p>
+    {% elif not items %}
+    <p class="muted center">Nothing matches these filters. <a href="{{ url_for('inventory') }}">Clear them</a></p>
+    {% elif view == 'category' %}
+    {% for c in categories %}
+    <details class="group" open>
+        <summary>
+            <strong>{{ c.name }}</strong>
+            <span class="muted">{{ c.entries|length }} item(s) &middot; {{ c.units }} unit(s) &middot; {{ c.value|money }} at cost{% if c.low %} &middot; <span class="warn">{{ c.low }} low on stock</span>{% endif %}</span>
+        </summary>
         <div class="table-wrap">
             <table>
                 <thead>
-                    <tr><th>Code</th><th>Name</th><th>Category</th><th>Dept</th><th>Supplier</th><th class="num">Qty</th><th class="num">Unit cost</th><th class="num">Sell price</th><th>Expiry</th><th></th></tr>
+                    <tr><th>Code</th><th>Name</th><th>Dept</th><th>Supplier</th><th class="num">Qty</th><th class="num">Unit cost</th><th class="num">Sell price</th><th>Expiry</th><th></th></tr>
                 </thead>
                 <tbody>
-                {% for i in items %}{{ item_row(i, true) }}{% endfor %}
+                {% for i in c.entries %}{{ item_row(i, false) }}{% endfor %}
                 </tbody>
             </table>
         </div>
-        {% endif %}
-    </section>
-</div>
+    </details>
+    {% endfor %}
+    {% else %}
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr><th>Code</th><th>Name</th><th>Category</th><th>Dept</th><th>Supplier</th><th class="num">Qty</th><th class="num">Unit cost</th><th class="num">Sell price</th><th>Expiry</th><th></th></tr>
+            </thead>
+            <tbody>
+            {% for i in items %}{{ item_row(i, true) }}{% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+</section>
 {% endblock %}
-{% block scripts %}{% if can('procure') %}<script src="{{ asset('inventory.js') }}"></script>{% endif %}{% endblock %}

@@ -1,0 +1,40 @@
+{# The category tiles and department chips shared by the stock view and the analysis view.
+   Expects: facet (from facets()), mode ('stock' or 'analysis'), search. Clicking a tile or chip keeps every other filter. #}
+{% set endpoint = 'inventory' if mode == 'stock' else 'inventory_analysis' %}
+
+<div class="inv-switch no-print">
+    <span class="segmented" role="group" aria-label="Inventory view">
+        <a href="{{ inv_link('inventory') }}" class="{{ 'active' if mode == 'stock' }}">Stock</a>
+        <a href="{{ inv_link('inventory_analysis') }}" class="{{ 'active' if mode == 'analysis' }}">Analysis</a>
+    </span>
+    <form method="get" action="{{ url_for(endpoint) }}" class="inv-search">
+        {% for key in ('category', 'department', 'view', 'period', 'from', 'to') %}{% if request.args.get(key) %}<input type="hidden" name="{{ key }}" value="{{ request.args.get(key) }}">{% endif %}{% endfor %}
+        <input name="q" type="search" value="{{ search }}" placeholder="Search by item name or code" aria-label="Search items">
+    </form>
+</div>
+
+<h2>Categories</h2>
+<div class="dept-tiles cat-tiles">
+    <a class="dept-tile {{ 'active' if not facet.category }}" href="{{ inv_link(endpoint, category='') }}">
+        <span class="tile-name">All categories</span>
+        <small>{% if mode == 'stock' %}{{ facet.all_categories['items'] }} item(s) &middot; {{ facet.all_categories.units }} unit(s){% else %}{{ facet.all_categories.cost|money }} bought{% endif %}</small>
+    </a>
+    {% for t in facet.tiles %}
+    <a class="dept-tile {{ 'active' if t.active }}" href="{{ inv_link(endpoint, category=t.name) }}">
+        <span class="tile-name">{{ t.name }}</span>
+        <small>{% if mode == 'stock' %}{{ t['items'] }} item(s) &middot; {{ t.units }} unit(s){% else %}{{ t.cost|money }} bought{% endif %}</small>
+        {% if t.seed %}<small class="tile-badge">Seeds &middot; counted in packs</small>{% endif %}
+    </a>
+    {% endfor %}
+    {% if can('procure') %}
+    <a class="dept-tile add-tile no-print" href="{{ url_for('categories_page') }}"><span class="tile-name">+ Categories</span><small>Add or manage</small></a>
+    {% endif %}
+</div>
+
+<h2 class="spaced">Departments</h2>
+<div class="chips">
+    <a class="chip {{ 'active' if not facet.department }}" href="{{ inv_link(endpoint, department='') }}">All departments <small>{% if mode == 'stock' %}{{ facet.all_departments['items'] }}{% else %}{{ facet.all_departments.cost|money }}{% endif %}</small></a>
+    {% for c in facet.chips %}
+    <a class="chip {{ 'active' if c.active }}" href="{{ inv_link(endpoint, department=c.name) }}">{{ c.name }} <small>{% if mode == 'stock' %}{{ c['items'] }}{% else %}{{ c.cost|money }}{% endif %}</small></a>
+    {% endfor %}
+</div>

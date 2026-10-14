@@ -32,6 +32,11 @@ SCHEMA = [
     """CREATE TABLE IF NOT EXISTS departments (
         id {pk}, business_id INTEGER NOT NULL, name TEXT NOT NULL, UNIQUE (business_id, name)
     )""",
+    # The managed list of inventory categories shown as tiles. An item keeps its category by name, so the
+    # name is what links the two. A name with the word seed or seeds marks a seed category (counted in packs).
+    """CREATE TABLE IF NOT EXISTS categories (
+        id {pk}, business_id INTEGER NOT NULL, name TEXT NOT NULL, UNIQUE (business_id, name)
+    )""",
     """CREATE TABLE IF NOT EXISTS products (
         id {pk}, business_id INTEGER NOT NULL, item_code TEXT NOT NULL, name TEXT NOT NULL,
         category TEXT DEFAULT '', department TEXT DEFAULT 'General', batch_no TEXT DEFAULT '', date_planted TEXT DEFAULT '',
