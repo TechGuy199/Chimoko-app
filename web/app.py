@@ -3200,6 +3200,84 @@ def upload_too_large(error):
     return redirect(url_for("import_data"))
 
 
+# --- RESET THE APP (ADMIN) ---
+# A reset wipes the records the app has logged for this business. It keeps what makes the app usable
+# and was set up rather than logged: user accounts (with their permissions and appearance), the business
+# profile and its settings, departments, and the HR statutory rules. Each group is (what an admin reads
+# on the confirmation page, the tables behind it); the first table of a group is the one that is counted.
+RESET_GROUPS = (
+    ("Inventory items", ("products",)),
+    ("Items listed for sale in the POS", ("pos_products",)),
+    ("Purchases", ("procurements",)),
+    ("Invoices and farm-use notes", ("invoices", "invoice_items")),
+    ("Payment changes", ("payment_log",)),
+    ("Customer accounts", ("customers", "customer_aliases", "customer_distinct")),
+    ("Employees", ("employees",)),
+    ("Payslips", ("payroll",)),
+    ("Sowing batches", ("seedling_batches",)),
+    ("Alerts", ("notifications",)),
+    ("Permission requests", ("permission_requests",)),
+)
+RESET_KEPT = (
+    "User accounts: usernames, passwords, roles, permissions and each user's appearance.",
+    "Business details and settings: name, contact, currency, low-stock threshold, alert switches and WhatsApp number.",
+    "Departments.",
+    "HR settings: statutory rates and non-working days.",
+)
+RESET_PHRASE = "RESET ALL DATA"
+
+
+def reset_counts(db, biz):
+    # Table names come from the constants above, never from the request
+    return [(label, db.one(f"SELECT COUNT(*) AS n FROM {tables[0]} WHERE business_id=?", (biz,))["n"]) for label, tables in RESET_GROUPS]
+
+
+@app.get("/settings/reset")
+@need("admin")
+def reset_page():
+    counts = reset_counts(get_db(), g.user["business_id"])
+    return render_template("reset.html", counts=counts, total=sum(n for _, n in counts), phrase=RESET_PHRASE, kept=RESET_KEPT)
+
+
+@app.post("/settings/reset")
+@need("admin")
+def reset_app():
+    db, biz = get_db(), g.user["business_id"]
+    back = redirect(url_for("reset_page"))
+
+    # Two deliberate steps: type the phrase, and prove it is really the admin by giving their own password
+    if request.form.get("phrase", "").strip() != RESET_PHRASE:
+        flash(f"Type {RESET_PHRASE} exactly to confirm. Nothing was deleted.", "error")
+        return back
+    me = db.one("SELECT password_hash FROM users WHERE id=?", (g.user["id"],))
+    if not me or not check_password_hash(me["password_hash"], request.form.get("password", "")):
+        flash("That password is not correct. Nothing was deleted.", "error")
+        return back
+
+    # Everything is deleted in one transaction and only for this business: if any step fails, nothing is lost
+    deleted = 0
+    try:
+        for label, tables in RESET_GROUPS:
+            for position, table in enumerate(tables):
+                removed = db.execute(f"DELETE FROM {table} WHERE business_id=?", (biz,)).rowcount
+                if position == 0:
+                    deleted += removed
+        # The only trace left is who did it, shown to the admins
+        notify(
+            db, "reset", "The app was reset",
+            f"{g.user['username']} reset the app and deleted {deleted:,} records. Accounts and settings were kept.",
+            url_for("notifications"),
+        )
+        db.commit()
+    except DB_ERRORS:
+        db.rollback()
+        flash("The reset could not be completed, so nothing was deleted. Please try again.", "error")
+        return back
+
+    flash(f"The app has been reset: {deleted:,} records were deleted. User accounts and settings were kept.", "ok")
+    return redirect(url_for("settings"))
+
+
 # --- SETTINGS (ADMIN) ---
 @app.route("/settings", methods=["GET", "POST"])
 @need("admin")

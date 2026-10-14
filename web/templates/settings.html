@@ -81,4 +81,13 @@
     <p class="muted">Your own theme and transparency. Each user sets theirs from the menu under their name; this does not change anyone else's.</p>
     {% with back='settings' %}{% include "_appearance.html" %}{% endwith %}
 </section>
+
+<section class="card block danger-zone narrow-form" id="reset">
+    <h2>Danger zone</h2>
+    <p>
+        <strong>Reset the app</strong> permanently deletes every record logged here: inventory, purchases, sales, customers, payroll and the rest.
+        User accounts and your settings are kept. You will be shown exactly what goes before anything is deleted.
+    </p>
+    <a class="btn danger" href="{{ url_for('reset_page') }}">Reset the app&hellip;</a>
+</section>
 {% endblock %}
