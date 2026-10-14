@@ -10,7 +10,10 @@
             <div class="menu-panel">
                 <a class="menu-item" href="{{ url_for('categories_page') }}">Categories</a>
                 <a class="menu-item" href="{{ url_for('inventory_analysis') }}">Analysis</a>
-                {% if user.role == 'admin' %}<a class="menu-item" href="{{ url_for('import_data') }}">Import purchases</a>{% endif %}
+                {% if user.role == 'admin' %}
+                <a class="menu-item" href="{{ url_for('import_data') }}">Import purchases</a>
+                <a class="menu-item danger" href="{{ url_for('clear_inventory_page') }}">Clear inventory</a>
+                {% endif %}
             </div>
         </details>
     </div>

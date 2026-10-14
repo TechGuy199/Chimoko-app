@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block title %}Clear Inventory — {% endblock %}
+{% block content %}
+<div class="page-head">
+    <div>
+        <a class="back" href="{{ url_for('inventory') }}">&larr; Back to inventory</a>
+        <h1>Clear Inventory</h1>
+    </div>
+</div>
+
+<section class="card danger-zone">
+    <h2>This cannot be undone</h2>
+    <p>
+        Clearing permanently deletes every inventory item, its POS listing and the greenhouse records built on it for
+        <strong>{{ user.business_name }}</strong>. Inventory starts empty again. Once it is done there is no way to bring the items back.
+    </p>
+    <p class="muted">
+        Before you continue, export anything you may still need. Inventory Analysis has an Export CSV button.
+        If your database host keeps backups, check how to restore from one before deleting.
+    </p>
+</section>
+
+<div class="split spaced">
+    <section class="card grow">
+        <h2>Will be deleted</h2>
+        <div class="table-wrap">
+            <table>
+                <tbody>
+                {% for label, count in counts %}
+                    <tr><td>{{ label }}</td><td class="num {{ 'muted' if not count }}">{{ '{:,}'.format(count) }}</td></tr>
+                {% endfor %}
+                    <tr class="total-row"><td>Total records</td><td class="num">{{ '{:,}'.format(total) }}</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </section>
+
+    <section class="card side">
+        <h2>Will be kept</h2>
+        <ul>
+            {% for line in kept %}<li>{{ line }}</li>{% endfor %}
+        </ul>
+        <p class="muted">Other users stay signed in and keep their logins; they will simply see an empty inventory.</p>
+    </section>
+</div>
+
+<section class="card block danger-zone narrow-form">
+    <h2>Confirm</h2>
+    <form method="post" action="{{ url_for('clear_inventory') }}" autocomplete="off"
+          data-confirm="This permanently deletes {{ '{:,}'.format(total) }} inventory record(s) for {{ user.business_name }}.&#10;&#10;There is no undo. Clear inventory now?">
+        {{ csrf_field() }}
+        <label>Your password, to show it is you
+            <input name="password" type="password" required autocomplete="current-password">
+        </label>
+        <label>Type <strong>{{ phrase }}</strong> to confirm
+            <input name="phrase" required autocomplete="off" spellcheck="false" placeholder="{{ phrase }}">
+        </label>
+        <div class="toolbar">
+            <button class="btn danger">Clear inventory</button>
+            <a class="btn" href="{{ url_for('inventory') }}">Cancel</a>
+        </div>
+    </form>
+</section>
+{% endblock %}

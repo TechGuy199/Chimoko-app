@@ -6,4 +6,19 @@
     <p class="muted">These choices are yours alone. Other users keep their own, and yours follow you to any device you sign in on.</p>
     {% include "_appearance.html" %}
 </section>
+
+<section class="card narrow-form block">
+    <h2>Change Password</h2>
+    <p class="muted">
+        {% if user.role == 'admin' %}An admin's password can only be changed here, by you, with your current one. Keep it somewhere safe.
+        {% else %}You can change your own password here. If you forget it, ask an admin to set a new one from Operators.{% endif %}
+    </p>
+    <form method="post" action="{{ url_for('change_password') }}" autocomplete="off">
+        {{ csrf_field() }}
+        <label>Current password <input name="current_password" type="password" required autocomplete="current-password"></label>
+        <label>New password (8 characters or more) <input name="new_password" type="password" minlength="8" required autocomplete="new-password"></label>
+        <label>Confirm new password <input name="confirm_password" type="password" minlength="8" required autocomplete="new-password"></label>
+        <button class="btn primary">Change Password</button>
+    </form>
+</section>
 {% endblock %}

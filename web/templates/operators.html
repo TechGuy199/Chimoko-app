@@ -37,9 +37,10 @@
             {{ csrf_field() }}
             {% if editing %}<input type="hidden" name="id" value="{{ editing.id }}">{% endif %}
             <label>Username <input name="username" value="{{ editing.username if editing }}" required></label>
-            <label>{{ 'New password (blank = keep current)' if editing else 'Password (8 characters or more)' }}
+            <label>{{ 'Reset password (blank = keep current)' if editing else 'Password (8 characters or more)' }}
                 <input name="password" type="password" minlength="8" autocomplete="new-password" {{ 'required' if not editing }}>
             </label>
+            {% if editing %}<p class="muted hint">Use this if {{ editing.username }} forgot their password. They are not told the old one; give them the new one directly.</p>{% endif %}
             <label class="check"><input type="checkbox" name="can_sell" {{ 'checked' if not editing or editing.can_sell }}> Can process sales (POS)</label>
             <label class="check"><input type="checkbox" name="can_procure" {{ 'checked' if not editing or editing.can_procure }}> Can log purchases / edit inventory</label>
             <label class="check"><input type="checkbox" name="can_transfer" {{ 'checked' if not editing or editing.can_transfer }}> Can transfer stock &amp; farm use</label>

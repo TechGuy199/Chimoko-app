@@ -206,6 +206,29 @@ def appearance():
     return render_template("appearance.html")
 
 
+@app.post("/account/password")
+@need(None)
+def change_password():
+    """Lets a signed-in user (admin or operator) change their own password, proving it is them with their current one."""
+    db = get_db()
+    back = redirect(url_for("appearance"))
+    me = db.one("SELECT password_hash FROM users WHERE id=?", (g.user["id"],))
+    current, new, confirm = request.form.get("current_password", ""), request.form.get("new_password", ""), request.form.get("confirm_password", "")
+    if not me or not check_password_hash(me["password_hash"], current):
+        flash("Your current password is not correct. Nothing was changed.", "error")
+    elif len(new) < 8:
+        flash("Choose a new password of at least 8 characters.", "error")
+    elif new != confirm:
+        flash("The two new passwords do not match.", "error")
+    elif check_password_hash(me["password_hash"], new):
+        flash("That is already your current password. Choose a different one.", "error")
+    else:
+        db.execute("UPDATE users SET password_hash=? WHERE id=?", (generate_password_hash(new), g.user["id"]))
+        db.commit()
+        flash("Your password has been changed.", "ok")
+    return back
+
+
 @app.template_filter("money4")
 def money_precise(value):
     """Per-seed costs are tiny (ZMW 0.0625), so they are shown to four decimals instead of two."""
@@ -5348,6 +5371,23 @@ RESET_KEPT = (
 )
 RESET_PHRASE = "RESET ALL DATA"
 
+# A narrower version of the same reset, scoped to inventory alone: items, their POS listings, and the greenhouse
+# records that live on top of them. Purchase history (Procurements) and sales history are kept, since those are
+# financial records rather than stock, and deleting an item elsewhere already keeps its own history for the same reason.
+CLEAR_INVENTORY_GROUPS = (
+    ("Inventory items", ("products",)),
+    ("Items listed for sale in the POS", ("pos_products",)),
+    ("Sowing batches", ("seedling_batches",)),
+    ("Planting records", ("plantings",)),
+    ("Pre-orders", ("preorders",)),
+)
+CLEAR_INVENTORY_KEPT = (
+    "Procurements (purchase history) and supplier statements.",
+    "Sales history, invoices and customer statements.",
+    "Categories and departments.",
+)
+CLEAR_INVENTORY_PHRASE = "CLEAR INVENTORY"
+
 
 def reset_counts(db, biz):
     # Table names come from the constants above, never from the request
@@ -5398,6 +5438,53 @@ def reset_app():
 
     flash(f"The app has been reset: {deleted:,} records were deleted. User accounts and settings were kept.", "ok")
     return redirect(url_for("settings"))
+
+
+def clear_inventory_counts(db, biz):
+    return [(label, db.one(f"SELECT COUNT(*) AS n FROM {tables[0]} WHERE business_id=?", (biz,))["n"]) for label, tables in CLEAR_INVENTORY_GROUPS]
+
+
+@app.get("/inventory/clear")
+@need("admin")
+def clear_inventory_page():
+    counts = clear_inventory_counts(get_db(), g.user["business_id"])
+    return render_template("clear_inventory.html", counts=counts, total=sum(n for _, n in counts), phrase=CLEAR_INVENTORY_PHRASE, kept=CLEAR_INVENTORY_KEPT)
+
+
+@app.post("/inventory/clear")
+@need("admin")
+def clear_inventory():
+    db, biz = get_db(), g.user["business_id"]
+    back = redirect(url_for("clear_inventory_page"))
+
+    if request.form.get("phrase", "").strip() != CLEAR_INVENTORY_PHRASE:
+        flash(f"Type {CLEAR_INVENTORY_PHRASE} exactly to confirm. Nothing was deleted.", "error")
+        return back
+    me = db.one("SELECT password_hash FROM users WHERE id=?", (g.user["id"],))
+    if not me or not check_password_hash(me["password_hash"], request.form.get("password", "")):
+        flash("That password is not correct. Nothing was deleted.", "error")
+        return back
+
+    deleted = 0
+    try:
+        for label, tables in CLEAR_INVENTORY_GROUPS:
+            for position, table in enumerate(tables):
+                removed = db.execute(f"DELETE FROM {table} WHERE business_id=?", (biz,)).rowcount
+                if position == 0:
+                    deleted += removed
+        notify(
+            db, "reset", "Inventory was cleared",
+            f"{g.user['username']} cleared inventory and deleted {deleted:,} record(s). Purchase and sales history were kept.",
+            url_for("notifications"),
+        )
+        db.commit()
+    except DB_ERRORS:
+        db.rollback()
+        flash("Inventory could not be cleared, so nothing was deleted. Please try again.", "error")
+        return back
+
+    flash(f"Inventory was cleared: {deleted:,} record(s) were deleted. Purchase and sales history were kept.", "ok")
+    return redirect(url_for("inventory"))
 
 
 # --- SETTINGS (ADMIN) ---
