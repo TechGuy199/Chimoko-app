@@ -6,6 +6,7 @@
     <section class="card">
         <h1>{{ p.name }}{% if p.item_code %} <span class="muted">(code {{ p.item_code }})</span>{% endif %}</h1>
         <dl class="facts">
+            {% if supplier %}<dt>Supplier account</dt><dd><a href="{{ url_for('supplier_statement', supplier_id=supplier.id) }}">{{ supplier.name }}</a></dd>{% endif %}
             <dt>In inventory</dt><dd>{{ 'Yes, added to stock' if p.in_inventory else 'No, an expense only' }}</dd>
             <dt>Category / department</dt><dd>{{ p.category or '—' }} / {{ p.department or '—' }}</dd>
             <dt>Purchase date</dt><dd>{{ p.purchase_date or '—' }}</dd>
@@ -24,3 +25,4 @@
     {% endwith %}
 </div>
 {% endblock %}
+{% block scripts %}{% if methods %}<script src="{{ asset('payment_method.js') }}"></script>{% endif %}{% endblock %}

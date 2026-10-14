@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block title %}Possible duplicate suppliers — {% endblock %}
+{% block content %}
+<p><a href="{{ url_for('suppliers') }}">&larr; All suppliers</a></p>
+<h1>Possible Duplicate Suppliers</h1>
+<p class="muted">
+    These pairs of accounts may be the same supplier: they share a phone number, share a name, or have very similar names.
+    Merging moves every purchase and payment from one account onto the other's statement and removes the emptied account. A merge cannot be undone.
+</p>
+
+{% for pair in pairs %}
+<section class="card block dup-pair">
+    <p class="dup-reason">{{ pair.reason }}</p>
+    <div class="dup-sides">
+        {% for me, other in ((pair.a, pair.b), (pair.b, pair.a)) %}
+        <div class="dup-side">
+            <strong><a href="{{ url_for('supplier_statement', supplier_id=me.id) }}">{{ me.name }}</a></strong>
+            <dl class="facts">
+                <dt>Phone</dt><dd>{{ me.phone or '—' }}</dd>
+                <dt>Supplier since</dt><dd>{{ (me.created_at or '')[:10] or '—' }}</dd>
+                <dt>Purchases</dt><dd>{{ me.purchases }}</dd>
+                <dt>Total bought</dt><dd>{{ me.total|money }}</dd>
+                <dt>We owe</dt><dd>{{ me.owed|money }}</dd>
+            </dl>
+            <form method="post" action="{{ url_for('merge_suppliers') }}" data-confirm="Merge &quot;{{ other.name }}&quot; into &quot;{{ me.name }}&quot;?&#10;&#10;All of its purchases and payments move onto that statement and the other account is removed. This cannot be undone.">
+                {{ csrf_field() }}
+                <input type="hidden" name="keep" value="{{ me.id }}">
+                <input type="hidden" name="remove" value="{{ other.id }}">
+                <button class="btn success">Keep this one, merge the other into it</button>
+            </form>
+        </div>
+        {% endfor %}
+    </div>
+    <form method="post" action="{{ url_for('mark_suppliers_distinct') }}">
+        {{ csrf_field() }}
+        <input type="hidden" name="a" value="{{ pair.a.id }}">
+        <input type="hidden" name="b" value="{{ pair.b.id }}">
+        <button class="btn">Not the same supplier</button>
+    </form>
+</section>
+{% else %}
+<section class="card"><p class="muted center">No possible duplicates found.</p></section>
+{% endfor %}
+
+{% if total > pairs|length %}<p class="muted">Showing the first {{ pairs|length }} of {{ total }} pairs. Deal with these and more will appear.</p>{% endif %}
+{% endblock %}

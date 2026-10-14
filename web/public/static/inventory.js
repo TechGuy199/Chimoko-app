@@ -104,6 +104,29 @@
         }
     }
 
+    // What is paid to a named supplier is kept with its method and reference number, so those boxes show once there is a supplier
+    // and something was paid. A known supplier also fills in their phone number.
+    const supplier = document.getElementById("purchase-supplier");
+    const supplierPhone = document.getElementById("purchase-supplier-phone");
+    const payStatus = document.getElementById("purchase-status");
+    const payRow = document.getElementById("pay-method-row");
+    const payMethod = document.getElementById("purchase-method");
+    function updatePayment() {
+        const show = payStatus.value !== "Unpaid" && supplier.value.trim() !== "";
+        payRow.hidden = !show;
+        payMethod.required = show;
+    }
+    supplier.addEventListener("input", updatePayment);
+    payStatus.addEventListener("change", updatePayment);
+    supplier.addEventListener("change", function () {
+        const typed = supplier.value.trim().toLowerCase();
+        const matches = Array.from(document.querySelectorAll("#known-suppliers option")).filter(function (option) {
+            return option.value.toLowerCase() === typed;
+        });
+        if (matches.length === 1 && !supplierPhone.value.trim()) supplierPhone.value = matches[0].dataset.phone || "";
+    });
+    updatePayment();
+
     box.addEventListener("change", refresh);
     code.addEventListener("input", refresh);
     categories.concat(departments).forEach(function (radio) { radio.addEventListener("change", refresh); });

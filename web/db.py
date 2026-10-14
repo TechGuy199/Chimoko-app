@@ -129,6 +129,30 @@ SCHEMA = [
         seedlings INTEGER NOT NULL, cost_per_seedling DOUBLE PRECISION NOT NULL, selling_price DOUBLE PRECISION NOT NULL,
         created_by TEXT, created_at TEXT
     )""",
+    # Supplier accounts, opened from the supplier named on a purchase. They work like customer accounts: aliases remember the spellings
+    # of accounts that were merged away, and distinct pairs are ones an admin said are different suppliers.
+    """CREATE TABLE IF NOT EXISTS suppliers (
+        id {pk}, business_id INTEGER NOT NULL, name TEXT NOT NULL, phone TEXT DEFAULT '',
+        name_key TEXT NOT NULL, phone_key TEXT NOT NULL, created_at TEXT,
+        UNIQUE (business_id, name_key, phone_key)
+    )""",
+    """CREATE TABLE IF NOT EXISTS supplier_aliases (
+        id {pk}, business_id INTEGER NOT NULL, name_key TEXT NOT NULL, phone_key TEXT NOT NULL, supplier_id INTEGER NOT NULL,
+        UNIQUE (business_id, name_key, phone_key)
+    )""",
+    """CREATE TABLE IF NOT EXISTS supplier_distinct (
+        id {pk}, business_id INTEGER NOT NULL, low_id INTEGER NOT NULL, high_id INTEGER NOT NULL,
+        UNIQUE (business_id, low_id, high_id)
+    )""",
+    # Every payment made to a supplier: how it was paid and the receipt or reference number. A negative amount is a correction.
+    # allocations say which purchases a payment settled (oldest first for a lump sum).
+    """CREATE TABLE IF NOT EXISTS supplier_payments (
+        id {pk}, business_id INTEGER NOT NULL, supplier_id INTEGER NOT NULL, amount DOUBLE PRECISION NOT NULL, method TEXT NOT NULL,
+        reference TEXT DEFAULT '', paid_on TEXT, note TEXT DEFAULT '', recorded_by TEXT, recorded_at TEXT
+    )""",
+    """CREATE TABLE IF NOT EXISTS supplier_payment_allocations (
+        id {pk}, business_id INTEGER NOT NULL, payment_id INTEGER NOT NULL, procurement_id INTEGER NOT NULL, amount DOUBLE PRECISION NOT NULL
+    )""",
     # Greenhouse planting records. seedlings is the number expected to be ready (seeds planted less the expected mortality),
     # or the real count once the batch is marked ready. pos_code is the code the batch is sold under in the POS.
     """CREATE TABLE IF NOT EXISTS plantings (
@@ -212,6 +236,9 @@ def init_schema():
         add_column(db, "invoices", "customer_id", "INTEGER")
         # Whether a purchase was also added to inventory. Every purchase before this existed went into inventory, so they count as yes.
         add_column(db, "procurements", "in_inventory", "INTEGER DEFAULT 1")
+        # The supplier account a purchase belongs to, and the supplier payment a payment-log row came from
+        add_column(db, "procurements", "supplier_id", "INTEGER")
+        add_column(db, "payment_log", "payment_id", "INTEGER")
         # Each user's own appearance choices: colour theme and how see-through the interface is (0-100)
         add_column(db, "users", "theme", "TEXT")
         add_column(db, "users", "glass", "INTEGER")

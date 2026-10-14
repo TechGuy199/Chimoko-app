@@ -914,7 +914,8 @@ def purchase_form(origin):
     asked = request.args.get("inventory")
     as_inventory = bool(start) or (asked == "1" if asked in ("0", "1") else origin == "inventory")
     return render_template(
-        "inventory_new.html", origin=origin, as_inventory=as_inventory, categories=categories, departments=departments, known=known, today=now().strftime("%Y-%m-%d"), units=unit_choices(db, biz),
+        "inventory_new.html", origin=origin, as_inventory=as_inventory, categories=categories, methods=PAYMENT_METHODS,
+        known_suppliers=db.all("SELECT name, phone FROM suppliers WHERE business_id=? ORDER BY name LIMIT 1000", (biz,)), departments=departments, known=known, today=now().strftime("%Y-%m-%d"), units=unit_choices(db, biz),
         pre_category=next((c["name"] for c in categories if norm(c["name"]) == want_cat), ""),
         pre_department=next((d["name"] for d in departments if norm(d["name"]) == want_dept), ""),
         pre_code=code, pre_name=start["name"] if start else "",
@@ -1211,6 +1212,13 @@ def purchase():
     except ValueError as e:
         flash(str(e).capitalize() + ".", "error")
         return redirect(again)
+    # What is paid to a named supplier is kept with its method and reference number (for cash, the receipt number)
+    method, reference = NOT_RECORDED, ""
+    if amount_paid > 0.005 and text("supplier_name"):
+        method, reference, problem = read_payment_details(strict=False)
+        if problem:
+            flash(problem, "error")
+            return redirect(again)
 
     known = db.one("SELECT category, department, seeds_per_pack FROM products WHERE business_id=? AND item_code=?", (biz, code)) if inventory else None
     try:
@@ -1231,7 +1239,8 @@ def purchase():
             "in_inventory": inventory, "amount_paid": amount_paid, "seeds_per_pack": seeds_per_pack,
             "unit": (SEED_UNIT if seeds_per_pack else resolve_unit(db, biz, text("unit"))) if inventory else "",
             "item_code": code, "name": name, "category": category, "department": department,
-            "quantity": qty, "unit_cost": unit_cost, "price": price, "supplier_name": text("supplier_name"),
+            "quantity": qty, "unit_cost": unit_cost, "price": price, "supplier_name": text("supplier_name"), "supplier_phone": text("supplier_phone"),
+            "payment_method": method, "payment_reference": reference,
             "invoice_no": text("invoice_no"), "purchase_date": text("purchase_date") or now().strftime("%Y-%m-%d"),
             "batch_no": text("batch_no") if inventory else "", "date_planted": text("date_planted") if inventory else "", "expiry_date": text("expiry_date"),
         })
@@ -1285,15 +1294,24 @@ def record_purchase(db, biz, p):
             ),
         )
     total_cost = round(p["quantity"] * p["unit_cost"], 2)
-    db.execute(
-        """INSERT INTO procurements (business_id, item_code, name, category, department, supplier_name, invoice_no, purchase_date, quantity, unit_cost, total_cost, expiry_date, amount_paid, in_inventory)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+    paid_now = total_cost if p.get("amount_paid") is None else p["amount_paid"]
+    # The supplier named on the purchase gets an account (or the existing one is used), so the purchase lands on their statement
+    supplier_id = supplier_for(db, biz, p["supplier_name"], p.get("supplier_phone"), p["purchase_date"] or now().strftime("%Y-%m-%d"))
+    procurement_id = db.insert(
+        """INSERT INTO procurements (business_id, item_code, name, category, department, supplier_name, invoice_no, purchase_date, quantity, unit_cost, total_cost, expiry_date, amount_paid, in_inventory, supplier_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             biz, p["item_code"], existing["name"] if existing else p["name"], p["category"], p["department"], p["supplier_name"],
             p["invoice_no"], p["purchase_date"], p["quantity"], p["unit_cost"], total_cost, p["expiry_date"],
-            total_cost if p.get("amount_paid") is None else p["amount_paid"], 1 if inventory else 0,
+            paid_now, 1 if inventory else 0, supplier_id,
         ),
     )
+    if supplier_id and paid_now > 0.005:
+        # What was paid when the purchase was logged is a payment to the supplier too, with its method and reference
+        add_supplier_payment(
+            db, biz, supplier_id, paid_now, p.get("payment_method") or NOT_RECORDED, p.get("payment_reference") or "", p["purchase_date"],
+            "Paid when the purchase was logged", [(procurement_id, paid_now)], apply=False,
+        )
     if inventory:
         db.execute("UPDATE pos_products SET price=? WHERE business_id=? AND item_code=?", (price, biz, p["item_code"]))
     return existing["name"] if existing else None
@@ -1822,7 +1840,7 @@ def invoice_payment(invoice_id):
 
 
 # --- PROCUREMENTS ---
-PROCUREMENT_COLUMNS = "id, purchase_date, supplier_name, invoice_no, item_code, name, category, department, quantity, unit_cost, total_cost, expiry_date, amount_paid, COALESCE(in_inventory, 1) AS in_inventory"
+PROCUREMENT_COLUMNS = "id, purchase_date, supplier_name, invoice_no, item_code, name, category, department, quantity, unit_cost, total_cost, expiry_date, amount_paid, COALESCE(in_inventory, 1) AS in_inventory, supplier_id"
 PROCUREMENT_KINDS = (("", "All purchases"), ("inventory", "Inventory items"), ("expense", "Not in inventory"))
 
 
@@ -1856,7 +1874,11 @@ def get_procurement(db, purchase_id):
 @need("admin")
 def procurement(purchase_id):
     db = get_db()
-    return render_template("purchase.html", p=get_procurement(db, purchase_id), payments=payment_history(db, "purchase", purchase_id))
+    p = get_procurement(db, purchase_id)
+    return render_template(
+        "purchase.html", p=p, payments=payment_history(db, "purchase", purchase_id), methods=PAYMENT_METHODS if p["supplier_id"] else None,
+        supplier=db.one("SELECT id, name FROM suppliers WHERE id=? AND business_id=?", (p["supplier_id"], g.user["business_id"])) if p["supplier_id"] else None,
+    )
 
 
 @app.post("/procurements/<int:purchase_id>/payment")
@@ -1864,6 +1886,37 @@ def procurement(purchase_id):
 def procurement_payment(purchase_id):
     db = get_db()
     p = get_procurement(db, purchase_id)
+    here = redirect(url_for("procurement", purchase_id=purchase_id))
+    if p["supplier_id"]:
+        # A purchase from a supplier on file: the change is a payment to that supplier, kept with how it was paid
+        try:
+            new_paid = p["total_cost"] if request.form.get("mark_paid") else round(number("amount_paid"), 2)
+            if not 0 <= new_paid <= p["total_cost"] + 0.005:
+                raise ValueError("amount_paid")
+            new_paid = min(new_paid, p["total_cost"])
+        except ValueError:
+            flash(f"Enter an amount between 0 and the purchase total ({money(p['total_cost'])}).", "error")
+            return here
+        change = round(new_paid - p["amount_paid"], 2)
+        if abs(change) < 0.005:
+            flash("The amount paid is unchanged.", "ok")
+            return here
+        method, reference, paid_on = "Correction", "", today_str()
+        if change > 0:
+            method, reference, problem = read_payment_details(strict=False)
+            if problem:
+                flash(problem, "error")
+                return here
+        try:
+            add_supplier_payment(db, g.user["business_id"], p["supplier_id"], change, method, reference, paid_on, text("note")[:150], [(purchase_id, change)])
+            db.commit()
+        except DB_ERRORS:
+            db.rollback()
+            flash("The payment could not be saved. Please try again.", "error")
+            return here
+        flash("Payment updated." if change > 0 else "Payment corrected.", "ok")
+        return here
+
     try:
         new_paid = update_payment(db, "purchase", purchase_id, p["total_cost"], p["amount_paid"])
     except ValueError:
@@ -2901,8 +2954,15 @@ def find_duplicates(db, biz):
            WHERE c.business_id=? GROUP BY c.id, c.name, c.phone, c.name_key, c.phone_key, c.created_at ORDER BY c.id LIMIT ?""",
         (biz, DUPLICATE_SCAN_LIMIT),
     )
+    return duplicate_pairs(people, distinct_pairs(db, biz))
+
+
+def duplicate_pairs(people, ruled_out):
+    """Pairs of accounts that may be the same party, strongest evidence first. Shared by customers and suppliers.
+
+    people are dicts with id, name_key and phone_key; ruled_out holds pair_key pairs an admin said are different.
+    """
     by_id = {p["id"]: p for p in people}
-    ruled_out = distinct_pairs(db, biz)
     found = {}
 
     def suggest(a, b, rank, reason):
@@ -3057,6 +3117,556 @@ def link_existing_customers():
 
 
 link_existing_customers()
+
+
+# --- SUPPLIER STATEMENTS (ADMIN) ---
+# A supplier account is opened from the supplier named on a purchase, the way a customer account is opened from a sale. Every
+# payment to a supplier is kept with how it was paid and the receipt or reference number. A payment entered on a statement is
+# spread over the supplier's unpaid purchases, oldest first.
+PAYMENT_METHODS = (
+    ("Cash", "Receipt number"), ("Bank transfer", "Transaction reference"), ("Mobile money", "Transaction ID"),
+    ("Cheque", "Cheque number"), ("Card", "Card slip number"), ("Other", "Reference number"),
+)
+METHOD_LABELS = dict(PAYMENT_METHODS)
+NOT_RECORDED = "Not recorded"
+METHOD_ALIASES = {
+    "bank": "Bank transfer", "transfer": "Bank transfer", "eft": "Bank transfer", "bank deposit": "Bank transfer", "momo": "Mobile money",
+    "mobile": "Mobile money", "airtel money": "Mobile money", "mtn money": "Mobile money", "check": "Cheque", "credit card": "Card", "debit card": "Card",
+}
+
+
+def method_from_text(raw):
+    """A payment method written in a file or form, matched to one of the known ones; None when it is not recognised."""
+    key = " ".join((raw or "").lower().split())
+    for method in METHOD_LABELS:
+        if method.lower() == key:
+            return method
+    return METHOD_ALIASES.get(key)
+
+
+def supplier_key(name):
+    return " ".join((name or "").lower().split())
+
+
+def supplier_for(db, biz, name, phone, when):
+    """Finds or opens the supplier account for a purchase. Returns None when no supplier is named."""
+    name, phone = (name or "").strip(), (phone or "").strip()
+    nkey, pkey = supplier_key(name), phone_key(phone)
+    if not nkey:
+        return None
+    exact = db.one("SELECT id FROM suppliers WHERE business_id=? AND name_key=? AND phone_key=?", (biz, nkey, pkey))
+    if exact:
+        return exact["id"]
+    merged = db.one(
+        """SELECT s.id FROM supplier_aliases a JOIN suppliers s ON s.id = a.supplier_id
+           WHERE a.business_id=? AND a.name_key=? AND a.phone_key=?""",
+        (biz, nkey, pkey),
+    )
+    if merged:
+        return merged["id"]
+    same = db.all("SELECT id, phone_key FROM suppliers WHERE business_id=? AND name_key=? LIMIT 2", (biz, nkey))
+    if len(same) == 1:
+        # No phone number given: the one account with this name. A phone number given for an account that had none is added to it.
+        if not pkey:
+            return same[0]["id"]
+        if not same[0]["phone_key"]:
+            db.execute("UPDATE suppliers SET phone=?, phone_key=? WHERE id=?", (phone, pkey, same[0]["id"]))
+            return same[0]["id"]
+    return db.insert(
+        "INSERT INTO suppliers (business_id, name, phone, name_key, phone_key, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (biz, name, phone, nkey, pkey, when),
+    )
+
+
+def read_payment_details(strict):
+    """Reads the payment method and its reference number from the form. Returns (method, reference, None) or (None, None, what is wrong).
+
+    A reference is needed with every method; for cash the receipt number is enough. A form that sends no method at all
+    (an older client) is accepted as 'Not recorded' unless strict.
+    """
+    if "payment_method" not in request.form and not strict:
+        return NOT_RECORDED, "", None
+    method = method_from_text(text("payment_method"))
+    if method is None:
+        return None, None, "Choose how it was paid: " + ", ".join(m.lower() for m in METHOD_LABELS) + "."
+    reference = " ".join(text("payment_reference").split())[:60]
+    if not reference:
+        label = METHOD_LABELS[method]
+        return None, None, f"Enter the {label.lower()} for this {method.lower()} payment." + (" For cash the receipt number is enough." if method == "Cash" else "")
+    return method, reference, None
+
+
+def add_supplier_payment(db, biz, supplier_id, amount, method, reference, paid_on, note, allocations, apply=True):
+    """Records a payment to a supplier and the purchases it settled. The caller commits.
+
+    allocations is a list of (procurement id, amount). With apply, each purchase's amount paid is raised by its share and the
+    change is written to its payment history; without it (a purchase logged already paid) only the record is made.
+    A negative amount is a correction.
+    """
+    stamp = now().strftime("%Y-%m-%d %H:%M:%S")
+    payment_id = db.insert(
+        """INSERT INTO supplier_payments (business_id, supplier_id, amount, method, reference, paid_on, note, recorded_by, recorded_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (biz, supplier_id, round(amount, 2), method, reference, paid_on, note, g.user["username"], stamp),
+    )
+    how = method + (f", {METHOD_LABELS[method].lower()} {reference}" if reference and method in METHOD_LABELS else "")
+    for procurement_id, part in allocations:
+        if apply:
+            row = db.one("SELECT COALESCE(amount_paid, total_cost) AS paid FROM procurements WHERE id=? AND business_id=?", (procurement_id, biz))
+            new_paid = round(row["paid"] + part, 2)
+            db.execute("UPDATE procurements SET amount_paid=? WHERE id=? AND business_id=?", (new_paid, procurement_id, biz))
+            db.execute(
+                """INSERT INTO payment_log (business_id, kind, ref_id, old_paid, new_paid, note, changed_by, changed_at, payment_id)
+                   VALUES (?, 'purchase', ?, ?, ?, ?, ?, ?, ?)""",
+                (biz, procurement_id, row["paid"], new_paid, (how + (f": {note}" if note else ""))[:200], g.user["username"], stamp, payment_id),
+            )
+        db.execute(
+            "INSERT INTO supplier_payment_allocations (business_id, payment_id, procurement_id, amount) VALUES (?, ?, ?, ?)",
+            (biz, payment_id, procurement_id, round(part, 2)),
+        )
+    return payment_id
+
+
+@app.get("/suppliers")
+@need("admin")
+def suppliers():
+    db, biz = get_db(), g.user["business_id"]
+    q = request.args.get("q", "").strip()
+    owing = request.args.get("balance", "") if request.args.get("balance") in ("owing", "settled") else ""
+    sql = """SELECT s.id, s.name, s.phone, COUNT(pr.id) AS purchases, COALESCE(SUM(pr.total_cost), 0) AS total,
+                    COALESCE(SUM(pr.total_cost - COALESCE(pr.amount_paid, pr.total_cost)), 0) AS owed
+             FROM suppliers s LEFT JOIN procurements pr ON pr.supplier_id = s.id
+             WHERE s.business_id=?"""
+    params = [biz]
+    if q:
+        sql += " AND (s.name_key LIKE ?"
+        params.append(f"%{supplier_key(q)}%")
+        if phone_key(q):
+            sql += " OR s.phone_key LIKE ?"
+            params.append(f"%{phone_key(q)}%")
+        sql += ")"
+    sql += " GROUP BY s.id, s.name, s.phone"
+    if owing == "owing":
+        sql += " HAVING COALESCE(SUM(pr.total_cost - COALESCE(pr.amount_paid, pr.total_cost)), 0) > 0.005"
+    elif owing == "settled":
+        sql += " HAVING COALESCE(SUM(pr.total_cost - COALESCE(pr.amount_paid, pr.total_cost)), 0) <= 0.005"
+    sql += " ORDER BY s.name LIMIT 100"
+    rows = db.all(sql, params)
+    totals = db.one(
+        "SELECT COALESCE(SUM(total_cost - COALESCE(amount_paid, total_cost)), 0) AS owed FROM procurements WHERE business_id=? AND supplier_id IS NOT NULL", (biz,)
+    )
+    return render_template(
+        "suppliers.html", results=rows, q=q, balance=owing, duplicate_count=len(find_supplier_duplicates(db, biz)), owed_all=totals["owed"],
+    )
+
+
+def get_supplier(db, supplier_id):
+    supplier = db.one("SELECT id, name, phone, created_at FROM suppliers WHERE id=? AND business_id=?", (supplier_id, g.user["business_id"]))
+    if supplier is None:
+        abort(404)
+    return supplier
+
+
+def supplier_statement_data(db, supplier_id, start="", end=""):
+    """Everything a supplier statement shows, shared by the page and the PDF. start and end (YYYY-MM-DD, either may be blank) limit what is listed."""
+    biz = g.user["business_id"]
+    purchases = db.all(
+        """SELECT id, purchase_date, invoice_no, item_code, name, quantity, unit_cost, total_cost, COALESCE(amount_paid, total_cost) AS amount_paid,
+                  COALESCE(in_inventory, 1) AS in_inventory, category, department
+           FROM procurements WHERE supplier_id=? AND business_id=? ORDER BY purchase_date, id""",
+        (supplier_id, biz),
+    )
+    payments = db.all(
+        """SELECT id, amount, method, reference, paid_on, note, recorded_by, recorded_at FROM supplier_payments
+           WHERE supplier_id=? AND business_id=? ORDER BY paid_on, id""",
+        (supplier_id, biz),
+    )
+    allocations = db.all(
+        """SELECT a.payment_id, a.procurement_id, a.amount FROM supplier_payment_allocations a
+           JOIN supplier_payments sp ON sp.id = a.payment_id WHERE sp.supplier_id=? AND a.business_id=?""",
+        (supplier_id, biz),
+    )
+    recorded, covered = {}, {}
+    for a in allocations:
+        recorded[a["procurement_id"]] = recorded.get(a["procurement_id"], 0.0) + a["amount"]
+        covered.setdefault(a["payment_id"], []).append(a)
+    by_id = {p["id"]: p for p in purchases}
+    for p in purchases:
+        p["balance"] = round(p["total_cost"] - p["amount_paid"], 2)
+        p["status"] = payment_status_for(p["total_cost"], p["amount_paid"])
+        p["label"] = p["invoice_no"] or p["name"]
+
+    # The statement: every purchase as a charge and every payment as a credit, in date order with a running balance. Whatever was
+    # paid on a purchase before payments were recorded individually shows as one payment with no method.
+    entries = []
+    for p in purchases:
+        what = f"{p['quantity']} x {p['name']}" + (f" (invoice {p['invoice_no']})" if p["invoice_no"] else "")
+        entries.append({"at": p["purchase_date"] or "", "order": 0, "id": p["id"], "what": "Purchase", "detail": what, "charge": p["total_cost"], "paid": 0.0, "method": "", "reference": ""})
+        loose = round(p["amount_paid"] - recorded.get(p["id"], 0.0), 2)
+        if abs(loose) > 0.005:
+            entries.append({
+                "at": p["purchase_date"] or "", "order": 1, "id": p["id"], "what": "Payment" if loose > 0 else "Payment correction", "charge": 0.0, "paid": loose,
+                "detail": f"{p['label']}: paid before payments were recorded one by one", "method": NOT_RECORDED, "reference": "",
+            })
+    pay_rows = []
+    for sp in payments:
+        covers = ", ".join(
+            f"{by_id[a['procurement_id']]['label'] if a['procurement_id'] in by_id else 'a purchase'} ({money(a['amount'])})" for a in covered.get(sp["id"], [])
+        )
+        pay_rows.append(dict(sp, covers=covers))
+        reference = (METHOD_LABELS.get(sp["method"], "Reference") + " " + sp["reference"]) if sp["reference"] else ""
+        detail = " · ".join(part for part in (sp["method"], reference, covers, sp["note"]) if part)
+        entries.append({
+            "at": sp["paid_on"] or "", "order": 1, "id": sp["id"], "what": "Payment" if sp["amount"] > 0 else "Payment correction", "detail": detail,
+            "charge": 0.0, "paid": sp["amount"], "method": sp["method"], "reference": sp["reference"],
+        })
+    entries.sort(key=lambda e: (e["at"], e["order"], e["id"]))
+
+    balance, opening, shown = 0.0, 0.0, []
+    for e in entries:
+        balance = round(balance + e["charge"] - e["paid"], 2)
+        e["balance"] = balance
+        if start and e["at"] < start:
+            opening = balance
+        elif not end or e["at"] <= end:
+            shown.append(e)
+    by_method = {}
+    for e in shown:
+        if e["paid"]:
+            m = by_method.setdefault(e["method"], {"method": e["method"], "count": 0, "amount": 0.0})
+            m["count"] += 1
+            m["amount"] = round(m["amount"] + e["paid"], 2)
+    in_period = [p for p in pay_rows if (not start or (p["paid_on"] or "") >= start) and (not end or (p["paid_on"] or "") <= end)]
+
+    summary = {
+        "purchases": len(purchases), "total": round(sum(p["total_cost"] for p in purchases), 2),
+        "paid": round(sum(p["amount_paid"] for p in purchases), 2), "owed": round(sum(p["balance"] for p in purchases), 2),
+    }
+    return {
+        "purchases": purchases, "entries": shown, "payments": sorted(in_period, key=lambda p: (p["paid_on"] or "", p["id"]), reverse=True),
+        "by_method": sorted(by_method.values(), key=lambda m: -m["amount"]), "summary": summary, "printed": now().strftime("%d %b %Y %H:%M"),
+        "period": {
+            "start": start, "end": end, "on": bool(start or end), "opening": opening,
+            "charged": round(sum(e["charge"] for e in shown), 2), "paid": round(sum(e["paid"] for e in shown), 2),
+        },
+    }
+
+
+def statement_period():
+    """The from/to dates of a statement filter; a value that is not a date is ignored."""
+    start = day_or_none(request.args.get("from", "")) if request.args.get("from") else None
+    end = day_or_none(request.args.get("to", "")) if request.args.get("to") else None
+    if start and end and start > end:
+        start, end = end, start
+    return start or "", end or ""
+
+
+@app.get("/suppliers/<int:supplier_id>")
+@need("admin")
+def supplier_statement(supplier_id):
+    db, biz = get_db(), g.user["business_id"]
+    start, end = statement_period()
+    return render_template(
+        "supplier.html", supplier=get_supplier(db, supplier_id), twins=supplier_twins(db, biz, supplier_id), methods=PAYMENT_METHODS, methods_labels=METHOD_LABELS,
+        today=today_str(), start=start, end=end, **supplier_statement_data(db, supplier_id, start, end),
+    )
+
+
+@app.get("/suppliers/<int:supplier_id>/statement.pdf")
+@need("admin")
+def supplier_statement_pdf(supplier_id):
+    db = get_db()
+    supplier = get_supplier(db, supplier_id)
+    start, end = statement_period()
+    pdf = supplier_pdf(supplier, supplier_statement_data(db, supplier_id, start, end))
+    filename = "supplier-statement-" + (re.sub(r"[^A-Za-z0-9]+", "-", supplier["name"]).strip("-") or "supplier") + ".pdf"
+    return Response(pdf, mimetype="application/pdf", headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
+def supplier_pdf(supplier, data):
+    """Lays the supplier statement out on A4 pages and returns the PDF as bytes."""
+    from xml.sax.saxutils import escape
+
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+    from reportlab.lib.units import mm
+    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+
+    base = getSampleStyleSheet()
+    small = ParagraphStyle("small", parent=base["Normal"], fontSize=8, leading=10)
+    centre = ParagraphStyle("centre", parent=base["Normal"], alignment=1, fontSize=9, leading=12)
+    title = ParagraphStyle("title", parent=base["Title"], fontSize=16, spaceAfter=2)
+    heading = ParagraphStyle("heading", parent=base["Heading3"], fontSize=11, spaceBefore=10, spaceAfter=4)
+    grey, line = colors.HexColor("#eeeeee"), colors.HexColor("#bbbbbb")
+
+    def cell(value):
+        return Paragraph(escape(str(value)), small)
+
+    def amount(value, blank_zero=False):
+        return "" if blank_zero and not value else money(value)
+
+    def table(rows, widths, numeric_from, bold_last=False):
+        style = [
+            ("FONTSIZE", (0, 0), (-1, -1), 8), ("LEADING", (0, 0), (-1, -1), 10), ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"), ("BACKGROUND", (0, 0), (-1, 0), grey),
+            ("LINEBELOW", (0, 0), (-1, -1), 0.4, line), ("ALIGN", (numeric_from, 0), (-1, -1), "RIGHT"),
+        ]
+        if bold_last:
+            style.append(("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"))
+        return Table(rows, colWidths=[w * mm for w in widths], repeatRows=1, style=TableStyle(style))
+
+    summary, period = data["summary"], data["period"]
+    story = [Paragraph(escape(g.user["business_name"]), title)]
+    for extra in (g.user["subtitle"], g.user["contact"]):
+        if extra:
+            story.append(Paragraph(escape(extra), centre))
+    covering = f"{period['start'] or 'the start'} to {period['end'] or 'today'}" if period["on"] else "all dates"
+    story += [
+        Spacer(1, 4), Paragraph("<b>SUPPLIER STATEMENT</b>", centre), Spacer(1, 8),
+        Table(
+            [
+                ["Supplier", cell(supplier["name"]), "Purchases", str(summary["purchases"])],
+                ["Phone", cell(supplier["phone"] or "-"), "Total bought", money(summary["total"])],
+                ["Covering", cell(covering), "Total paid", money(summary["paid"])],
+                ["Statement date", data["printed"], "Balance owed", money(summary["owed"])],
+            ],
+            colWidths=[28 * mm, 62 * mm, 30 * mm, 60 * mm],
+            style=TableStyle([
+                ("FONTSIZE", (0, 0), (-1, -1), 9), ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("TEXTCOLOR", (0, 0), (0, -1), colors.grey), ("TEXTCOLOR", (2, 0), (2, -1), colors.grey),
+                ("ALIGN", (3, 0), (3, -1), "RIGHT"), ("FONTNAME", (2, 3), (3, 3), "Helvetica-Bold"), ("BOX", (0, 0), (-1, -1), 0.4, line),
+            ]),
+        ),
+        Paragraph("Statement of account", heading),
+    ]
+    ledger = [["Date", "Entry", "Details", "Charged", "Paid", "Balance owed"]]
+    if period["on"]:
+        ledger.append(["", cell("Balance brought forward"), "", "", "", money(period["opening"])])
+    for e in data["entries"]:
+        ledger.append([e["at"], cell(e["what"]), cell(e["detail"]), amount(e["charge"], True), amount(e["paid"], True), money(e["balance"])])
+    if data["entries"]:
+        ledger.append(["Totals", "", "", money(period["charged"]), money(period["paid"]), money(summary["owed"])])
+        story.append(table(ledger, (22, 26, 70, 22, 22, 22), 3, bold_last=True))
+    else:
+        story.append(Paragraph("No purchases or payments in this period.", small))
+
+    if data["payments"]:
+        story.append(Paragraph("Payments made", heading))
+        rows = [["Date", "Method", "Reference", "Amount", "Recorded by", "Covers"]]
+        for p in data["payments"]:
+            rows.append([p["paid_on"] or "", cell(p["method"]), cell(p["reference"] or "-"), money(p["amount"]), cell(p["recorded_by"] or "-"), cell(p["covers"] or "-")])
+        story.append(table(rows, (22, 26, 30, 22, 24, 56), 3))
+    if data["by_method"]:
+        story.append(Paragraph("Payments by method", heading))
+        rows = [["Method", "Payments", "Amount"]] + [[cell(m["method"]), str(m["count"]), money(m["amount"])] for m in data["by_method"]]
+        story.append(table(rows, (60, 30, 40), 1))
+
+    def footer(canvas, doc):
+        canvas.setFont("Helvetica", 7)
+        canvas.setFillColor(colors.grey)
+        canvas.drawString(15 * mm, 9 * mm, f"{supplier['name']} - statement printed {data['printed']}")
+        canvas.drawRightString(A4[0] - 15 * mm, 9 * mm, f"Page {doc.page}")
+
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buffer, pagesize=A4, leftMargin=15 * mm, rightMargin=15 * mm, topMargin=14 * mm, bottomMargin=16 * mm,
+        title=f"Supplier statement - {supplier['name']}", author=g.user["business_name"],
+    )
+    doc.build(story, onFirstPage=footer, onLaterPages=footer)
+    return buffer.getvalue()
+
+
+@app.post("/suppliers/<int:supplier_id>/payment")
+@need("admin")
+def supplier_payment(supplier_id):
+    """Spreads one payment to the supplier over their unpaid purchases, oldest first, and records how it was paid."""
+    db, biz = get_db(), g.user["business_id"]
+    get_supplier(db, supplier_id)
+    back = redirect(url_for("supplier_statement", supplier_id=supplier_id))
+    unpaid = [
+        u for u in db.all(
+            """SELECT id, total_cost, COALESCE(amount_paid, total_cost) AS paid FROM procurements
+               WHERE supplier_id=? AND business_id=? ORDER BY purchase_date, id""",
+            (supplier_id, biz),
+        ) if u["total_cost"] - u["paid"] > 0.005
+    ]
+    owed = round(sum(u["total_cost"] - u["paid"] for u in unpaid), 2)
+    try:
+        amount = round(number("amount"), 2)
+    except ValueError:
+        amount = 0.0
+    if amount <= 0 or amount > owed + 0.005:
+        flash(f"Enter an amount above zero and no more than the {money(owed)} owed to this supplier.", "error")
+        return back
+    method, reference, problem = read_payment_details(strict=True)
+    if problem:
+        flash(problem, "error")
+        return back
+    paid_on = day_or_none(text("paid_on")) if text("paid_on") else today_str()
+    if paid_on is None:
+        flash("Enter the date the payment was made.", "error")
+        return back
+
+    allocations, remaining = [], min(amount, owed)
+    for u in unpaid:
+        if remaining <= 0.005:
+            break
+        part = round(min(remaining, u["total_cost"] - u["paid"]), 2)
+        allocations.append((u["id"], part))
+        remaining = round(remaining - part, 2)
+    try:
+        add_supplier_payment(db, biz, supplier_id, amount, method, reference, paid_on, text("note")[:150], allocations)
+        db.commit()
+    except DB_ERRORS:
+        db.rollback()
+        flash("The payment could not be saved. Please try again.", "error")
+        return back
+    flash(f"Recorded {money(amount)} paid by {method.lower()} (reference {reference}) across {len(allocations)} purchase(s), oldest first. Balance now owed: {money(owed - min(amount, owed))}.", "ok")
+    return back
+
+
+@app.post("/suppliers/<int:supplier_id>/update")
+@need("admin")
+def update_supplier(supplier_id):
+    db, biz = get_db(), g.user["business_id"]
+    get_supplier(db, supplier_id)
+    name, phone = text("name"), text("phone")
+    nkey, pkey = supplier_key(name), phone_key(phone)
+    clash = db.one("SELECT id FROM suppliers WHERE business_id=? AND name_key=? AND phone_key=? AND id<>?", (biz, nkey, pkey, supplier_id))
+    if not nkey:
+        flash("The supplier needs a name.", "error")
+    elif clash:
+        flash("Another supplier account already has that name and phone number.", "error")
+    else:
+        db.execute("UPDATE suppliers SET name=?, phone=?, name_key=?, phone_key=? WHERE id=? AND business_id=?", (name, phone, nkey, pkey, supplier_id, biz))
+        db.commit()
+        flash("Supplier details saved. Purchases already logged keep the supplier name typed on them.", "ok")
+    return redirect(url_for("supplier_statement", supplier_id=supplier_id))
+
+
+SUPPLIER_COLUMNS = "id, name, phone, name_key, phone_key, created_at"
+
+
+def supplier_distinct_pairs(db, biz):
+    return {(r["low_id"], r["high_id"]) for r in db.all("SELECT low_id, high_id FROM supplier_distinct WHERE business_id=?", (biz,))}
+
+
+def find_supplier_duplicates(db, biz):
+    """Pairs of supplier accounts that may be the same supplier, strongest evidence first."""
+    people = db.all(
+        """SELECT s.id, s.name, s.phone, s.name_key, s.phone_key, s.created_at,
+                  COUNT(pr.id) AS purchases, COALESCE(SUM(pr.total_cost), 0) AS total,
+                  COALESCE(SUM(pr.total_cost - COALESCE(pr.amount_paid, pr.total_cost)), 0) AS owed
+           FROM suppliers s LEFT JOIN procurements pr ON pr.supplier_id = s.id
+           WHERE s.business_id=? GROUP BY s.id, s.name, s.phone, s.name_key, s.phone_key, s.created_at ORDER BY s.id LIMIT ?""",
+        (biz, DUPLICATE_SCAN_LIMIT),
+    )
+    return duplicate_pairs(people, supplier_distinct_pairs(db, biz))
+
+
+def supplier_twins(db, biz, supplier_id):
+    """Other accounts sharing this supplier's phone number, unless an admin already said they are different suppliers."""
+    me = db.one("SELECT phone_key FROM suppliers WHERE id=? AND business_id=?", (supplier_id, biz))
+    if not me or not me["phone_key"]:
+        return []
+    others = db.all("SELECT id, name, phone FROM suppliers WHERE business_id=? AND phone_key=? AND id<>? ORDER BY id", (biz, me["phone_key"], supplier_id))
+    ruled_out = supplier_distinct_pairs(db, biz)
+    return [other for other in others if pair_key(supplier_id, other["id"]) not in ruled_out]
+
+
+@app.get("/suppliers/duplicates")
+@need("admin")
+def supplier_duplicates():
+    pairs = find_supplier_duplicates(get_db(), g.user["business_id"])
+    return render_template("supplier_duplicates.html", pairs=pairs[:DUPLICATES_SHOWN], total=len(pairs))
+
+
+def supplier_pair_from_form(db, biz, first, second):
+    a = db.one(f"SELECT {SUPPLIER_COLUMNS} FROM suppliers WHERE id=? AND business_id=?", (request.form.get(first, type=int), biz))
+    b = db.one(f"SELECT {SUPPLIER_COLUMNS} FROM suppliers WHERE id=? AND business_id=?", (request.form.get(second, type=int), biz))
+    return (a, b) if a and b and a["id"] != b["id"] else (None, None)
+
+
+@app.post("/suppliers/merge")
+@need("admin")
+def merge_suppliers():
+    db, biz = get_db(), g.user["business_id"]
+    keep, remove = supplier_pair_from_form(db, biz, "keep", "remove")
+    if keep is None:
+        flash("Those two accounts could not be found. One may already have been merged.", "error")
+        return redirect(url_for("supplier_duplicates"))
+
+    try:
+        moved = db.execute("UPDATE procurements SET supplier_id=? WHERE supplier_id=? AND business_id=?", (keep["id"], remove["id"], biz)).rowcount
+        paid = db.execute("UPDATE supplier_payments SET supplier_id=? WHERE supplier_id=? AND business_id=?", (keep["id"], remove["id"], biz)).rowcount
+        # The removed account's spelling, and any spellings merged into it earlier, now lead to the kept account
+        db.execute("UPDATE supplier_aliases SET supplier_id=? WHERE supplier_id=? AND business_id=?", (keep["id"], remove["id"], biz))
+        db.execute("DELETE FROM supplier_aliases WHERE business_id=? AND name_key=? AND phone_key=?", (biz, remove["name_key"], remove["phone_key"]))
+        db.execute(
+            "INSERT INTO supplier_aliases (business_id, name_key, phone_key, supplier_id) VALUES (?, ?, ?, ?)",
+            (biz, remove["name_key"], remove["phone_key"], keep["id"]),
+        )
+        db.execute("DELETE FROM supplier_distinct WHERE business_id=? AND (low_id=? OR high_id=?)", (biz, remove["id"], remove["id"]))
+        db.execute("DELETE FROM suppliers WHERE id=? AND business_id=?", (remove["id"], biz))
+
+        since = min(keep["created_at"] or "9999", remove["created_at"] or "9999")
+        phone, pkey = keep["phone"], keep["phone_key"]
+        if not pkey and remove["phone_key"]:
+            taken = db.one(
+                "SELECT id FROM suppliers WHERE business_id=? AND name_key=? AND phone_key=? AND id<>?",
+                (biz, keep["name_key"], remove["phone_key"], keep["id"]),
+            )
+            if not taken:
+                phone, pkey = remove["phone"], remove["phone_key"]
+        db.execute(
+            "UPDATE suppliers SET phone=?, phone_key=?, created_at=? WHERE id=? AND business_id=?",
+            (phone, pkey, None if since == "9999" else since, keep["id"], biz),
+        )
+        db.commit()
+    except DB_ERRORS:
+        db.rollback()
+        flash("The merge could not be saved, so nothing was changed. Please try again.", "error")
+        return redirect(url_for("supplier_duplicates"))
+
+    flash(f"Merged '{remove['name']}' into '{keep['name']}': {moved} purchase(s) and {paid} payment(s) moved onto this statement.", "ok")
+    return redirect(url_for("supplier_statement", supplier_id=keep["id"]))
+
+
+@app.post("/suppliers/distinct")
+@need("admin")
+def mark_suppliers_distinct():
+    db, biz = get_db(), g.user["business_id"]
+    a, b = supplier_pair_from_form(db, biz, "a", "b")
+    if a is not None:
+        low, high = pair_key(a["id"], b["id"])
+        if not db.one("SELECT id FROM supplier_distinct WHERE business_id=? AND low_id=? AND high_id=?", (biz, low, high)):
+            db.execute("INSERT INTO supplier_distinct (business_id, low_id, high_id) VALUES (?, ?, ?)", (biz, low, high))
+            db.commit()
+        flash(f"Noted: '{a['name']}' and '{b['name']}' are different suppliers. They will not be suggested again.", "ok")
+    back_to = request.form.get("back_to", type=int)
+    return redirect(url_for("supplier_statement", supplier_id=back_to) if back_to else url_for("supplier_duplicates"))
+
+
+def link_existing_suppliers():
+    """Opens accounts for suppliers named on purchases logged before supplier accounts existed. Safe to repeat."""
+    db = Database()
+    try:
+        unlinked = db.all(
+            "SELECT id, business_id, supplier_name, purchase_date FROM procurements WHERE supplier_id IS NULL AND supplier_name IS NOT NULL AND supplier_name <> '' ORDER BY id"
+        )
+        for p in unlinked:
+            supplier_id = supplier_for(db, p["business_id"], p["supplier_name"], "", p["purchase_date"])
+            if supplier_id:
+                db.execute("UPDATE procurements SET supplier_id=? WHERE id=?", (supplier_id, p["id"]))
+        db.commit()
+    except DB_ERRORS:
+        db.rollback()
+    finally:
+        db.close()
+
+
+link_existing_suppliers()
 
 
 # --- REPORTS ---
@@ -3334,6 +3944,9 @@ PURCHASE_COLUMNS = {
     "seeds_per_pack": ("seeds per pack", "seeds in pack", "seeds in a pack", "pack size", "seeds/pack"),
     "unit": ("unit", "uom", "unit of measure", "packaging", "packaging unit"),
     "in_inventory": ("in inventory", "inventory", "inventory item", "add to inventory", "also inventory"),
+    "supplier_phone": ("supplier phone", "supplier contact", "supplier phone number"),
+    "payment_method": ("payment method", "method", "mode of payment", "paid by", "payment mode"),
+    "payment_reference": ("payment reference", "reference", "receipt number", "receipt no", "reference number", "transaction id", "payment ref"),
 }
 YES_WORDS = ("yes", "y", "true", "1", "x")
 NO_WORDS = ("no", "n", "false", "0")
@@ -3351,8 +3964,8 @@ SALES_COLUMNS = {
 }
 IMPORT_TEMPLATES = {
     "purchases": (
-        ["Item Code", "Name", "Category", "Department", "Quantity", "Unit Cost", "Selling Price", "Supplier", "Invoice No", "Purchase Date", "Batch No", "Date Planted", "Expiry Date", "Payment Status", "Amount Paid", "Seeds Per Pack", "Unit", "In Inventory"],
-        ["SEED-001", "Tomato Seed Pack", "Seeds", "Greenhouse", 50, 450, 600, "Agro Supplies Ltd", "SUP-1001", "2026-10-01", "B-22", "", "2027-10-01", "Paid", "", 1000, "pack", "Yes"],
+        ["Item Code", "Name", "Category", "Department", "Quantity", "Unit Cost", "Selling Price", "Supplier", "Invoice No", "Purchase Date", "Batch No", "Date Planted", "Expiry Date", "Payment Status", "Amount Paid", "Seeds Per Pack", "Unit", "In Inventory", "Supplier Phone", "Payment Method", "Payment Reference"],
+        ["SEED-001", "Tomato Seed Pack", "Seeds", "Greenhouse", 50, 450, 600, "Agro Supplies Ltd", "SUP-1001", "2026-10-01", "B-22", "", "2027-10-01", "Paid", "", 1000, "pack", "Yes", "0977123456", "Bank transfer", "TRX-5521"],
     ),
     "sales": (
         ["Invoice No", "Date", "Customer", "Phone", "Item Code", "Item Name", "Quantity", "Unit Price", "Payment Status", "Amount Paid"],
@@ -3561,6 +4174,17 @@ def import_purchases():
             except ValueError as e:
                 problems.append(str(e))
 
+        # How a payment to a named supplier was made. Optional in a file (older records have none); when given, it needs its reference number.
+        pay_method, pay_ref = NOT_RECORDED, ""
+        if not problems and amount_paid and amount_paid > 0.005 and rec["supplier_name"] and (rec["payment_method"] or rec["payment_reference"]):
+            found_method = method_from_text(rec["payment_method"])
+            if found_method is None:
+                problems.append(f"payment method '{rec['payment_method']}' must be one of: " + ", ".join(METHOD_LABELS))
+            elif not rec["payment_reference"]:
+                problems.append(f"a {found_method.lower()} payment needs its {METHOD_LABELS[found_method].lower()}")
+            else:
+                pay_method, pay_ref = found_method, rec["payment_reference"][:60]
+
         # A restock row is filed where the item already lives; a new item uses the category and department in the file,
         # matched to the managed lists ignoring capitals and spacing. Names that are new are added when the file is saved.
         already = stocked.get(code) if inventory else None
@@ -3598,7 +4222,8 @@ def import_purchases():
         purchases.append({
             "item_code": code, "name": name, "category": category, "department": dept,
             "quantity": qty, "unit_cost": round(unit_cost, 2), "price": None if price is None else round(price, 2),
-            "supplier_name": rec["supplier_name"], "invoice_no": rec["invoice_no"], "purchase_date": dates["purchase_date"] or today,
+            "supplier_name": rec["supplier_name"], "supplier_phone": rec["supplier_phone"], "payment_method": pay_method, "payment_reference": pay_ref,
+            "invoice_no": rec["invoice_no"], "purchase_date": dates["purchase_date"] or today,
             "batch_no": rec["batch_no"] if inventory else "", "date_planted": dates["date_planted"] if inventory else "", "expiry_date": dates["expiry_date"],
             "amount_paid": amount_paid, "seeds_per_pack": seeds_per_pack, "unit": unit, "in_inventory": inventory,
         })
@@ -4705,6 +5330,8 @@ RESET_GROUPS = (
     ("Payment changes", ("payment_log",)),
     ("Deleted invoice records", ("deleted_invoices",)),
     ("Customer accounts", ("customers", "customer_aliases", "customer_distinct")),
+    ("Supplier accounts", ("suppliers", "supplier_aliases", "supplier_distinct")),
+    ("Supplier payments", ("supplier_payments", "supplier_payment_allocations")),
     ("Employees", ("employees",)),
     ("Payslips", ("payroll",)),
     ("Sowing batches", ("seedling_batches",)),

@@ -26,7 +26,7 @@
                 {% for r in rows %}
                     <tr>
                         <td>{{ r.purchase_date }}</td>
-                        <td>{{ r.supplier_name or '—' }}</td>
+                        <td>{% if user.role == 'admin' and r.supplier_id %}<a href="{{ url_for('supplier_statement', supplier_id=r.supplier_id) }}">{{ r.supplier_name }}</a>{% else %}{{ r.supplier_name or '—' }}{% endif %}</td>
                         <td>{{ r.invoice_no or '—' }}</td>
                         <td>{{ r.item_code or '—' }}</td>
                         <td>{{ r.name }}</td>

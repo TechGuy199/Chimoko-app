@@ -9,6 +9,19 @@
             </label>
             <label>Note (optional, e.g. "Mobile money, ref 1234") <input name="note" maxlength="200"></label>
         </div>
+        {% if methods %}
+        {# A purchase from a supplier on file: raising the amount is a payment to that supplier, so it needs its method and reference #}
+        <div class="grid">
+            <label>How it was paid
+                <select name="payment_method" data-method-select>
+                    <option value="">Choose a method</option>
+                    {% for method, label in methods %}<option value="{{ method }}" data-reference-label="{{ label }}">{{ method }}</option>{% endfor %}
+                </select>
+            </label>
+            <label><span data-reference-text>Reference number</span> <input name="payment_reference" maxlength="60" data-reference autocomplete="off"></label>
+        </div>
+        <p class="muted">Needed when the amount paid goes up. Every method needs its reference number; for cash the receipt number is enough.</p>
+        {% endif %}
         <button class="btn primary">Save Payment</button>
         <button class="btn success" name="mark_paid" value="1" formnovalidate>Mark as Fully Paid</button>
     </form>

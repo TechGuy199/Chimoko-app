@@ -1,0 +1,205 @@
+{% extends "base.html" %}
+{% block title %}{{ supplier.name }} statement — {% endblock %}
+{% block content %}
+{% set filter_args = {'from': start, 'to': end} if period.on else {} %}
+<div class="page-head no-print">
+    <div>
+        <a class="back" href="{{ url_for('suppliers') }}">&larr; All suppliers</a>
+        <h1>{{ supplier.name }}</h1>
+    </div>
+    <details class="menu">
+        <summary class="btn primary">Actions</summary>
+        <div class="menu-panel">
+            <a class="menu-item" href="{{ url_for('supplier_statement_pdf', supplier_id=supplier.id, **filter_args) }}">Download PDF</a>
+            <button type="button" class="menu-item" onclick="window.print()">Print</button>
+            <a class="menu-item" href="{{ url_for('supplier_duplicates') }}">Find duplicates</a>
+        </div>
+    </details>
+</div>
+
+{% for twin in twins %}
+<section class="card no-print twin-prompt">
+    <p>
+        <strong>Same phone number as another account.</strong>
+        <a href="{{ url_for('supplier_statement', supplier_id=twin.id) }}">{{ twin.name }}</a> ({{ twin.phone }}) has the same phone number as {{ supplier.name }}.
+        Are they the same supplier?
+    </p>
+    <div class="toolbar">
+        <form method="post" action="{{ url_for('merge_suppliers') }}" data-confirm="Merge &quot;{{ twin.name }}&quot; into &quot;{{ supplier.name }}&quot;?&#10;&#10;All of its purchases and payments move onto this statement and the other account is removed. This cannot be undone.">
+            {{ csrf_field() }}
+            <input type="hidden" name="keep" value="{{ supplier.id }}">
+            <input type="hidden" name="remove" value="{{ twin.id }}">
+            <button class="btn success">Yes, merge {{ twin.name }} into this statement</button>
+        </form>
+        <form method="post" action="{{ url_for('mark_suppliers_distinct') }}">
+            {{ csrf_field() }}
+            <input type="hidden" name="a" value="{{ supplier.id }}">
+            <input type="hidden" name="b" value="{{ twin.id }}">
+            <input type="hidden" name="back_to" value="{{ supplier.id }}">
+            <button class="btn">No, different suppliers</button>
+        </form>
+    </div>
+</section>
+{% endfor %}
+
+{% if summary.owed > 0.005 %}
+<section class="card no-print lump-sum" id="pay">
+    <h2>Record a Payment</h2>
+    <p class="muted">
+        One amount is spread over this supplier's unpaid purchases, starting with the oldest. We owe {{ summary.owed|money }}.
+        Every payment needs how it was paid and its reference number; for cash the receipt number is enough.
+    </p>
+    <form method="post" action="{{ url_for('supplier_payment', supplier_id=supplier.id) }}">
+        {{ csrf_field() }}
+        <div class="grid">
+            <label>Amount paid
+                <input name="amount" type="number" min="0.01" max="{{ '%.2f'|format(summary.owed) }}" step="0.01" placeholder="0.00" required>
+            </label>
+            <label>How it was paid
+                <select name="payment_method" data-method-select data-require-reference required>
+                    <option value="">Choose a method</option>
+                    {% for method, label in methods %}<option value="{{ method }}" data-reference-label="{{ label }}">{{ method }}</option>{% endfor %}
+                </select>
+            </label>
+            <label><span data-reference-text>Reference number</span> <input name="payment_reference" maxlength="60" autocomplete="off" data-reference></label>
+            <label>Date paid <input name="paid_on" type="date" value="{{ today }}"></label>
+        </div>
+        <label>Note (optional) <input name="note" maxlength="150"></label>
+        <button class="btn success">Record Payment</button>
+    </form>
+</section>
+{% endif %}
+
+<form method="get" class="toolbar no-print" id="statement-filter">
+    <label class="check">From <input type="date" name="from" value="{{ start }}"></label>
+    <label class="check">To <input type="date" name="to" value="{{ end }}"></label>
+    <button class="btn">Filter statement</button>
+    {% if period.on %}<a class="btn" href="{{ url_for('supplier_statement', supplier_id=supplier.id) }}">Show everything</a>{% endif %}
+</form>
+
+<article class="statement">
+    <header>
+        <h1>{{ user.business_name }}</h1>
+        {% if user.contact %}<p class="muted">{{ user.contact }}</p>{% endif %}
+        <p class="doc-type">Supplier Statement</p>
+    </header>
+
+    <dl class="facts">
+        <dt>Supplier</dt><dd><strong>{{ supplier.name }}</strong></dd>
+        <dt>Phone</dt><dd>{{ supplier.phone or '—' }}</dd>
+        <dt>Supplier since</dt><dd>{{ (supplier.created_at or '')[:10] or '—' }}</dd>
+        <dt>Statement date</dt><dd>{{ printed }}</dd>
+        {% if period.on %}<dt>Showing</dt><dd>{{ start or 'the start' }} to {{ end or 'today' }}</dd>{% endif %}
+    </dl>
+
+    <div class="stats spaced">
+        <div class="stat"><span>Purchases</span><strong>{{ summary.purchases }}</strong></div>
+        <div class="stat"><span>Total bought</span><strong>{{ summary.total|money }}</strong></div>
+        <div class="stat"><span>Total paid</span><strong>{{ summary.paid|money }}</strong></div>
+        <div class="stat"><span>Balance owed</span><strong class="{{ 'warn' if summary.owed > 0.005 else 'ok' }}">{{ summary.owed|money }}</strong></div>
+    </div>
+    {% if period.on %}
+    <p class="muted">In this period: bought {{ period.charged|money }}, paid {{ period.paid|money }}. The totals above are for all dates.</p>
+    {% endif %}
+
+    <h2 class="spaced">Statement of Account</h2>
+    <div class="table-wrap">
+        <table>
+            <thead><tr><th>Date</th><th>Entry</th><th>Details</th><th class="num">Charged</th><th class="num">Paid</th><th class="num">Balance owed</th></tr></thead>
+            <tbody>
+            {% if period.on %}
+                <tr><td></td><td colspan="4">Balance brought forward</td><td class="num">{{ period.opening|money }}</td></tr>
+            {% endif %}
+            {% for e in entries %}
+                <tr>
+                    <td>{{ e.at or '—' }}</td>
+                    <td>{{ e.what }}</td>
+                    <td class="wrap">{{ e.detail }}</td>
+                    <td class="num">{{ e.charge|money if e.charge else '' }}</td>
+                    <td class="num">{{ e.paid|money if e.paid else '' }}</td>
+                    <td class="num">{{ e.balance|money }}</td>
+                </tr>
+            {% else %}
+                <tr><td colspan="6" class="muted center">{{ 'No purchases or payments in this period.' if period.on else 'No purchases yet.' }}</td></tr>
+            {% endfor %}
+            {% if entries %}
+                <tr class="total-row"><td colspan="3">Totals</td><td class="num">{{ period.charged|money }}</td><td class="num">{{ period.paid|money }}</td><td class="num">{{ summary.owed|money }}</td></tr>
+            {% endif %}
+            </tbody>
+        </table>
+    </div>
+
+    <h2 class="spaced">Payments Made</h2>
+    <div class="table-wrap">
+        <table>
+            <thead><tr><th>Date paid</th><th>Method</th><th>Reference</th><th class="num">Amount</th><th>Covers</th><th>Recorded by</th></tr></thead>
+            <tbody>
+            {% for p in payments %}
+                <tr>
+                    <td>{{ p.paid_on or '—' }}</td>
+                    <td>{{ p.method }}</td>
+                    <td>{{ p.reference or '—' }}{% if p.reference %}<br><small class="muted">{{ methods_labels.get(p.method, 'Reference') }}</small>{% endif %}</td>
+                    <td class="num">{{ p.amount|money }}</td>
+                    <td class="wrap">{{ p.covers or '—' }}{% if p.note %}<br><small class="muted">{{ p.note }}</small>{% endif %}</td>
+                    <td>{{ p.recorded_by or '—' }}<br><small class="muted">{{ p.recorded_at }}</small></td>
+                </tr>
+            {% else %}
+                <tr><td colspan="6" class="muted center">No payments recorded {{ 'in this period' if period.on }}.</td></tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+
+    {% if by_method %}
+    <h2 class="spaced">Payments by Method</h2>
+    <div class="table-wrap">
+        <table>
+            <thead><tr><th>Method</th><th class="num">Payments</th><th class="num">Amount</th></tr></thead>
+            <tbody>
+            {% for m in by_method %}
+                <tr><td>{{ m.method }}</td><td class="num">{{ m.count }}</td><td class="num">{{ m.amount|money }}</td></tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+
+    <h2 class="spaced">Purchases in Full</h2>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr><th>Date</th><th>Invoice</th><th>Item</th><th class="num">Qty</th><th class="num">Unit cost</th><th class="num">Total</th><th class="num">Paid</th><th class="num">Owed</th><th>Status</th></tr>
+            </thead>
+            <tbody>
+            {% for p in purchases %}
+                <tr>
+                    <td>{{ p.purchase_date or '—' }}</td>
+                    <td>{{ p.invoice_no or '—' }}</td>
+                    <td>{{ p.name }}{% if not p.in_inventory %} <small class="muted">expense</small>{% endif %}</td>
+                    <td class="num">{{ p.quantity }}</td>
+                    <td class="num">{{ p.unit_cost|money }}</td>
+                    <td class="num">{{ p.total_cost|money }}</td>
+                    <td class="num">{{ p.amount_paid|money }}</td>
+                    <td class="num {{ 'warn' if p.balance > 0.005 }}">{{ p.balance|money }}</td>
+                    <td>{{ p.status }} <a class="no-print" href="{{ url_for('procurement', purchase_id=p.id) }}">payments</a></td>
+                </tr>
+            {% else %}
+                <tr><td colspan="9" class="muted center">Nothing yet.</td></tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</article>
+
+<section class="card block no-print narrow-form">
+    <h2>Edit Supplier Details</h2>
+    <form method="post" action="{{ url_for('update_supplier', supplier_id=supplier.id) }}">
+        {{ csrf_field() }}
+        <label>Name <input name="name" value="{{ supplier.name }}" required></label>
+        <label>Phone number <input name="phone" value="{{ supplier.phone }}"></label>
+        <button class="btn primary">Save</button>
+    </form>
+    <p class="muted">To correct a payment on one purchase, open it from Procurements or use "payments" in the table above.</p>
+</section>
+{% endblock %}
+{% block scripts %}<script src="{{ asset('payment_method.js') }}"></script>{% endblock %}

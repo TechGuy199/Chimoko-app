@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block title %}Supplier Statements — {% endblock %}
+{% block content %}
+<h1>Supplier Statements</h1>
+<form method="get" class="toolbar" id="supplier-search">
+    <input name="q" id="supplier-q" type="search" value="{{ q }}" placeholder="Type a supplier's name or phone number" autocomplete="off" autofocus>
+    <select name="balance" onchange="this.form.submit()" aria-label="Balance filter">
+        <option value="" {{ 'selected' if not balance }}>All suppliers</option>
+        <option value="owing" {{ 'selected' if balance == 'owing' }}>Owed money</option>
+        <option value="settled" {{ 'selected' if balance == 'settled' }}>Fully paid</option>
+    </select>
+    <button class="btn primary">Search</button>
+    {% if q or balance %}<a class="btn" href="{{ url_for('suppliers') }}">Clear</a>{% endif %}
+    <a class="btn" href="{{ url_for('supplier_duplicates') }}">Find Duplicates</a>
+</form>
+
+<div class="stats">
+    <div class="stat"><span>Owed to suppliers</span><strong class="{{ 'warn' if owed_all > 0 }}">{{ owed_all|money }}</strong><small>across all supplier accounts</small></div>
+</div>
+
+{% if duplicate_count %}
+<div class="flash notice">
+    {{ duplicate_count }} pair(s) of accounts look like the same supplier.
+    <a href="{{ url_for('supplier_duplicates') }}">Review and merge</a>
+</div>
+{% endif %}
+
+<section class="card">
+    <div class="table-wrap">
+        <table>
+            <thead><tr><th>Supplier</th><th>Phone</th><th class="num">Purchases</th><th class="num">Total bought</th><th class="num">We owe</th><th></th></tr></thead>
+            <tbody>
+            {% for s in results %}
+                <tr>
+                    <td><a href="{{ url_for('supplier_statement', supplier_id=s.id) }}">{{ s.name }}</a></td>
+                    <td>{{ s.phone or '—' }}</td>
+                    <td class="num">{{ s.purchases }}</td>
+                    <td class="num">{{ s.total|money }}</td>
+                    <td class="num {{ 'warn' if s.owed > 0.005 }}">{{ s.owed|money }}</td>
+                    <td class="num"><a class="btn small" href="{{ url_for('supplier_statement', supplier_id=s.id) }}">Statement</a></td>
+                </tr>
+            {% else %}
+                <tr><td colspan="6" class="muted center">
+                    {% if q or balance %}No supplier matches that search.{% else %}No supplier accounts yet. One is opened automatically when a purchase is logged with a supplier name.{% endif %}
+                </td></tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% if results|length == 100 %}<p class="muted">Showing the first 100. Type more of the name or number to narrow it down.</p>{% endif %}
+</section>
+{% endblock %}
+{% block scripts %}
+<script>
+    // Search as you type: wait for a short pause, then reload the list with the cursor kept at the end
+    (function () {
+        const box = document.getElementById("supplier-q");
+        let timer;
+        box.setSelectionRange(box.value.length, box.value.length);
+        box.addEventListener("input", function () {
+            clearTimeout(timer);
+            timer = setTimeout(function () { document.getElementById("supplier-search").submit(); }, 450);
+        });
+    })();
+</script>
+{% endblock %}
