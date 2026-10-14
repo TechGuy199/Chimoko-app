@@ -20,13 +20,14 @@
 <div class="split spaced">
     <section class="card grow">
         <h2>Purchases</h2>
-        <p>Each row is one purchase. It is added to inventory and to the Procurements log, exactly like the "Log a Purchase" form.</p>
+        <p>Each row is one purchase. It is logged in Procurements and, unless the row says it is not an inventory item, added to inventory too, exactly like the "Log a Purchase" form.</p>
         <ul class="muted">
             <li><strong>Required:</strong> Item Code, Quantity, Unit Cost. Name is required when the item code is new.</li>
             <li><strong>Optional:</strong> Category, Department, Selling Price, Supplier, Invoice No, Purchase Date, Batch No, Date Planted, Expiry Date, Payment Status, Amount Paid.</li>
             <li>Payment Status is Paid (default), Unpaid or Partial Payment. Partial Payment needs an Amount Paid.</li>
             <li><strong>Seed items:</strong> when the Category is Seeds (or contains the word "seed"), add a <strong>Seeds Per Pack</strong> column. It is required for new seed items; Quantity is then counted in packs. A seed item already in stock keeps its pack size, and a different size for the same code is rejected.</li>
             <li><strong>Unit</strong> (optional): what the quantity is counted in, such as bag, box, kg or litre. Seed items are always packs. An item already in stock keeps its unit.</li>
+            <li><strong>In Inventory</strong> (optional): Yes or No. Blank means Yes, so existing files work unchanged. A <strong>No</strong> row is an expense (fuel, repairs, services) logged in Procurements only: it needs a Name but not an Item Code, and its Seeds Per Pack, Unit, Selling Price, Batch No and Date Planted are ignored. An Item Code that is already an inventory item cannot be used on a No row.</li>
             <li>An item code you already have adds the quantity to that item's stock.</li>
             <li>A blank Selling Price keeps the item's current price (a new item uses the unit cost).</li>
             <li>Departments that do not exist yet are created.</li>

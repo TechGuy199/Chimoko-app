@@ -210,6 +210,8 @@ def init_schema():
         add_column(db, "procurements", "amount_paid", "DOUBLE PRECISION")
         db.execute("UPDATE procurements SET amount_paid = total_cost WHERE amount_paid IS NULL")
         add_column(db, "invoices", "customer_id", "INTEGER")
+        # Whether a purchase was also added to inventory. Every purchase before this existed went into inventory, so they count as yes.
+        add_column(db, "procurements", "in_inventory", "INTEGER DEFAULT 1")
         # Each user's own appearance choices: colour theme and how see-through the interface is (0-100)
         add_column(db, "users", "theme", "TEXT")
         add_column(db, "users", "glass", "INTEGER")

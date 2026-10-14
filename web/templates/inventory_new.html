@@ -3,7 +3,8 @@
 {% block content %}
 <div class="page-head">
     <div>
-        <a class="back" href="{{ url_for('inventory') }}">&larr; Back to inventory</a>
+        {% if origin == 'procurements' %}<a class="back" href="{{ url_for('procurements') }}">&larr; Back to procurements</a>
+        {% else %}<a class="back" href="{{ url_for('inventory') }}">&larr; Back to inventory</a>{% endif %}
         <h1>Log a Purchase</h1>
     </div>
 </div>
@@ -16,8 +17,24 @@
 
 <form method="post" action="{{ url_for('purchase') }}" id="purchase-form" data-items="{{ known|tojson|forceescape }}">
     {{ csrf_field() }}
+    <input type="hidden" name="origin" value="{{ origin }}">
 
     <section class="card">
+        {# The 0 is sent first, so an unticked box still says "no"; a tick sends 1 after it and wins #}
+        <label class="check inventory-switch">
+            <input type="hidden" name="in_inventory" value="0">
+            <input type="checkbox" name="in_inventory" id="purchase-inventory" value="1" {{ 'checked' if as_inventory }}>
+            <span>
+                <strong>This is also an inventory item</strong><br>
+                <small class="muted">
+                    Tick it for stock you keep, use or sell: it is added to inventory, and asks for its unit, selling price and (for seeds) pack size.
+                    Leave it unticked for an expense such as fuel, repairs or a service. Either way the purchase is logged in Procurements.
+                </small>
+            </span>
+        </label>
+    </section>
+
+    <section class="card block">
         <h2><span class="step">1</span> Which category does it fall under?</h2>
         <div class="choice-tiles">
             {% for c in categories %}
@@ -58,13 +75,13 @@
     <section class="card block narrow-form">
         <h2><span class="step">3</span> The details</h2>
         <p id="restock-note" class="flash notice" hidden></p>
-        <label>Item code <input name="item_code" id="purchase-code" required value="{{ pre_code }}"></label>
+        <label>Item code <span class="muted" id="code-hint"></span> <input name="item_code" id="purchase-code" required value="{{ pre_code }}"></label>
         <label>Item name <input name="name" id="purchase-name" required value="{{ pre_name }}"></label>
         <label id="seeds-row" hidden>Seeds per pack (how many seeds are in one pack)
             <input name="seeds_per_pack" id="purchase-seeds" type="number" min="1" step="1" inputmode="numeric" placeholder="e.g. 1000">
             <small class="muted" id="seeds-note">Quantity bought below is counted in packs.</small>
         </label>
-        <label>Packaging unit (what the quantity is counted in: bag, box, kg, litre&hellip;)
+        <label data-inventory-only>Packaging unit (what the quantity is counted in: bag, box, kg, litre&hellip;)
             <input name="unit" id="purchase-unit" list="unit-choices" maxlength="30" autocomplete="off" placeholder="e.g. bag">
             <small class="muted" id="unit-note"></small>
         </label>
@@ -73,12 +90,12 @@
         </datalist>
         <label>Quantity bought <span id="quantity-unit" class="muted"></span> <input name="quantity" type="number" min="1" step="1" required></label>
         <label>Unit cost <input name="unit_cost" type="number" min="0" step="0.01" required></label>
-        <label>Selling price (blank = keep current, or unit cost if new) <input name="price" type="number" min="0" step="0.01"></label>
+        <label data-inventory-only>Selling price (blank = keep current, or unit cost if new) <input name="price" type="number" min="0" step="0.01"></label>
         <label>Supplier name <input name="supplier_name"></label>
         <label>Supplier invoice number <input name="invoice_no"></label>
         <label>Purchase date <input name="purchase_date" type="date" value="{{ today }}"></label>
-        <label>Batch number <input name="batch_no"></label>
-        <label>Date planted <input name="date_planted" type="date"></label>
+        <label data-inventory-only>Batch number <input name="batch_no"></label>
+        <label data-inventory-only>Date planted <input name="date_planted" type="date"></label>
         <label>Expiry date <input name="expiry_date" type="date"></label>
         <label>Payment to supplier
             <select name="payment_status" onchange="document.getElementById('purchase-paid').hidden = this.value !== 'Partial Payment'">
@@ -86,7 +103,7 @@
             </select>
         </label>
         <label id="purchase-paid" hidden>Amount paid so far <input name="amount_paid" type="number" min="0" step="0.01"></label>
-        <button class="btn success wide">Log Purchase &amp; Add</button>
+        <button class="btn success wide" id="purchase-submit">Log Purchase &amp; Add to Inventory</button>
     </section>
 </form>
 {% endblock %}

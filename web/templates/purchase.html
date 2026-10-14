@@ -4,8 +4,10 @@
 <p><a href="{{ url_for('procurements') }}">&larr; Back to procurements</a></p>
 <div class="payment-wrap">
     <section class="card">
-        <h1>{{ p.name }} <span class="muted">(code {{ p.item_code }})</span></h1>
+        <h1>{{ p.name }}{% if p.item_code %} <span class="muted">(code {{ p.item_code }})</span>{% endif %}</h1>
         <dl class="facts">
+            <dt>In inventory</dt><dd>{{ 'Yes, added to stock' if p.in_inventory else 'No, an expense only' }}</dd>
+            <dt>Category / department</dt><dd>{{ p.category or '—' }} / {{ p.department or '—' }}</dd>
             <dt>Purchase date</dt><dd>{{ p.purchase_date or '—' }}</dd>
             <dt>Supplier</dt><dd>{{ p.supplier_name or '—' }}</dd>
             <dt>Supplier invoice no</dt><dd>{{ p.invoice_no or '—' }}</dd>

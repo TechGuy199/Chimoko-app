@@ -1,4 +1,5 @@
-// Log a purchase. The category and department are picked first, as tiles. After that:
+// Log a purchase. A box says whether it is also an inventory item (unticked: an expense, logged in Procurements only).
+// The category and department are picked as tiles. For an inventory item, after that:
 //  - a seed category asks how many seeds are in one pack (stock is then counted in packs, and the unit is "pack");
 //  - an item code that is already in stock shows its own category, department and unit, and the purchase adds to it.
 (function () {
@@ -14,6 +15,10 @@
     const unitNote = document.getElementById("unit-note");
     const quantityUnit = document.getElementById("quantity-unit");
     const restock = document.getElementById("restock-note");
+    const box = document.getElementById("purchase-inventory");
+    const codeHint = document.getElementById("code-hint");
+    const submit = document.getElementById("purchase-submit");
+    const inventoryOnly = Array.from(form.querySelectorAll("[data-inventory-only]"));
     const categories = Array.from(form.querySelectorAll('input[name="category"]'));
     const departments = Array.from(form.querySelectorAll('input[name="department"]'));
 
@@ -50,8 +55,15 @@
     }
 
     function refresh() {
+        // Unticked, the purchase is only an expense: no stock, unit, selling price or pack size, and the code is optional
+        const inventory = box.checked;
+        inventoryOnly.forEach(function (label) { label.hidden = !inventory; });
+        code.required = inventory;
+        codeHint.textContent = inventory ? "" : "(optional)";
+        submit.textContent = inventory ? "Log Purchase & Add to Inventory" : "Log Purchase";
+
         const typedCode = code.value.trim();
-        const item = Object.prototype.hasOwnProperty.call(known, typedCode) ? known[typedCode] : null;
+        const item = inventory && Object.prototype.hasOwnProperty.call(known, typedCode) ? known[typedCode] : null;
 
         if (item) {
             // An item already in stock keeps its own category and department
@@ -64,11 +76,14 @@
             restock.hidden = true;
         }
 
-        const isSeed = SEED_WORD.test(chosen(categories));
+        const isSeed = inventory && SEED_WORD.test(chosen(categories));
         row.hidden = !isSeed;
         seeds.required = isSeed;
 
-        if (isSeed) {
+        if (!inventory) {
+            freeUnit();
+            unit.value = "";
+        } else if (isSeed) {
             lockUnit("pack", "Seed items are counted in packs.");
         } else if (item && item.unit) {
             lockUnit(item.unit, "This item is counted in " + item.unit + ".");
@@ -89,6 +104,7 @@
         }
     }
 
+    box.addEventListener("change", refresh);
     code.addEventListener("input", refresh);
     categories.concat(departments).forEach(function (radio) { radio.addEventListener("change", refresh); });
     unit.addEventListener("input", function () {
@@ -99,6 +115,6 @@
     // A code that matches an item also fills in its name, unless a name has already been typed
     code.addEventListener("change", function () {
         const item = Object.prototype.hasOwnProperty.call(known, code.value.trim()) ? known[code.value.trim()] : null;
-        if (item && !name.value.trim()) name.value = item.name;
+        if (box.checked && item && !name.value.trim()) name.value = item.name;
     });
 })();
