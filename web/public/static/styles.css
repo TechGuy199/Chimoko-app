@@ -534,6 +534,14 @@ table.rules input { margin-top: 0; max-width: 140px; }
 .edit-tile summary { cursor: pointer; color: var(--text-muted); }
 .edit-tile form { margin-top: 8px; display: flex; gap: 6px; }
 .edit-tile input { margin-top: 0; }
+.cat-manage { position: relative; }
+.merge-tick { position: absolute; top: 10px; right: 10px; display: block; margin: 0; cursor: pointer; }
+.merge-tick input { width: 18px; height: 18px; }
+.merge-cell { width: 28px; padding-right: 0; }
+.merge-bar .toolbar { margin-bottom: 0; }
+.merge-bar input[name="category_name"] { flex: 0 1 280px; margin-top: 0; }
+.merge-form input { margin: 4px 0 8px; }
+.merge-count { font-size: 12px; margin: 6px 0 0; }
 
 .step { display: inline-grid; place-items: center; width: 20px; height: 20px; margin-right: 6px; border-radius: 50%; background: var(--primary); color: var(--on-accent); font-size: 11px; letter-spacing: 0; }
 .choice-tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 10px; }

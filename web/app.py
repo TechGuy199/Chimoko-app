@@ -897,11 +897,82 @@ def add_category():
     return back(name)
 
 
-def retag(db, table, biz, old, new):
-    """Moves every row of a table (its name comes from the code, never the request) from one category name to another."""
-    for row in db.all(f"SELECT DISTINCT category FROM {table} WHERE business_id=?", (biz,)):
-        if row["category"] is not None and norm(row["category"]) == norm(old):
-            db.execute(f"UPDATE {table} SET category=? WHERE business_id=? AND category=?", (new, biz, row["category"]))
+def retag(db, table, biz, old, new, column="category"):
+    """Moves every row of a table from one name to another in a category or department column.
+
+    The table and column come from the code, never from the request. Returns how many rows moved.
+    """
+    moved = 0
+    for row in db.all(f"SELECT DISTINCT {column} AS value FROM {table} WHERE business_id=?", (biz,)):
+        if row["value"] is not None and norm(row["value"]) == norm(old):
+            moved += db.execute(f"UPDATE {table} SET {column}=? WHERE business_id=? AND {column}=?", (new, biz, row["value"])).rowcount
+    return moved
+
+
+def plan_merge(all_rows, ids, target, kind):
+    """Works out merging several categories or departments into one name. Nothing is changed here.
+
+    Returns (row that stays, rows that go, final name, None), or (None, None, None, what is wrong).
+    The name given may be one of the ticked ones (that one stays) or a new one. It may not be an unticked
+    one, because that would quietly swallow it. General is the default and can only be merged *into*.
+    """
+    wanted = {i for i in ids}
+    chosen = [r for r in all_rows if r["id"] in wanted]
+    if len(wanted) < 2:
+        return None, None, None, f"Tick at least two {kind}s to merge."
+    if len(chosen) != len(wanted):
+        return None, None, None, f"Some of the ticked {kind}s no longer exist. Refresh the page and try again."
+    target = clean_name(target)
+    if not target:
+        return None, None, None, f"Type the name for the merged {kind}."
+    if any(r["name"] == "General" for r in chosen) and norm(target) != "general":
+        return None, None, None, f"General is the default {kind} and cannot be renamed or removed. To merge into it, name the result General."
+    clash = next((r for r in all_rows if r["id"] not in wanted and norm(r["name"]) == norm(target)), None)
+    if clash:
+        return None, None, None, f"There is already a {kind} called '{clash['name']}'. Tick it as well to merge into it."
+    keep = next((r for r in chosen if norm(r["name"]) == norm(target)), chosen[0])
+    final = keep["name"] if norm(keep["name"]) == norm(target) else target
+    return keep, [r for r in chosen if r is not keep], final, None
+
+
+def read_ids():
+    return [int(value) for value in request.form.getlist("ids") if value.isdigit()]
+
+
+@app.post("/inventory/categories/merge")
+@need("admin")
+def merge_categories():
+    db, biz = get_db(), g.user["business_id"]
+    back = redirect(url_for("categories_page"))
+    keep, others, final, problem = plan_merge(category_rows(db, biz), read_ids(), text("category_name"), "category")
+    if problem:
+        flash(problem, "error")
+        return back
+    # A name with the word seed is what makes a category seeds, counted in packs, so seed and other categories do not mix
+    if len({is_seed_category(r["name"]) for r in [keep] + others} | {is_seed_category(final)}) > 1:
+        flash("Seed categories (counted in packs) and other categories cannot be merged together, and the new name must match: use the word seed in the name only if all of them are seed categories.", "error")
+        return back
+
+    try:
+        for r in others:
+            for table in ("products", "procurements", "pos_products"):
+                retag(db, table, biz, r["name"], final)
+            db.execute("DELETE FROM categories WHERE id=? AND business_id=?", (r["id"], biz))
+        if keep["name"] != final:
+            db.execute("UPDATE categories SET name=? WHERE id=? AND business_id=?", (final, keep["id"], biz))
+            for table in ("products", "procurements", "pos_products"):
+                retag(db, table, biz, keep["name"], final)
+        items = db.one("SELECT COUNT(*) AS n FROM products WHERE business_id=? AND category=?", (biz, final))["n"]
+        purchases = db.one("SELECT COUNT(*) AS n FROM procurements WHERE business_id=? AND category=?", (biz, final))["n"]
+        db.commit()
+    except DB_ERRORS:
+        db.rollback()
+        flash("The merge could not be completed, so nothing was changed. Please try again.", "error")
+        return back
+
+    names = ", ".join(f"'{r['name']}'" for r in [keep] + others)
+    flash(f"Merged {names} into '{final}'. It now holds {items} item(s) and {purchases} purchase record(s); the others were removed.", "ok")
+    return redirect(url_for("categories_page"))
 
 
 @app.post("/inventory/categories/<int:category_id>/rename")
@@ -3707,6 +3778,41 @@ def delete_department(dept_id):
     db.commit()
     flash(f"Department '{dept['name']}' deleted. Its items moved to 'General'.", "ok")
     return redirect(url_for("settings"))
+
+
+@app.post("/settings/departments/merge")
+@need("admin")
+def merge_departments():
+    db, biz = get_db(), g.user["business_id"]
+    back = redirect(url_for("settings"))
+    rows = db.all("SELECT id, name FROM departments WHERE business_id=? ORDER BY name", (biz,))
+    keep, others, final, problem = plan_merge(rows, read_ids(), text("department_name"), "department")
+    if problem:
+        flash(problem, "error")
+        return back
+
+    # Items, purchases, POS listings and past sales all carry the department by name, so all of them move
+    tables = ("products", "pos_products", "procurements", "invoice_items")
+    try:
+        for r in others:
+            for table in tables:
+                retag(db, table, biz, r["name"], final, column="department")
+            db.execute("DELETE FROM departments WHERE id=? AND business_id=?", (r["id"], biz))
+        if keep["name"] != final:
+            db.execute("UPDATE departments SET name=? WHERE id=? AND business_id=?", (final, keep["id"], biz))
+            for table in tables:
+                retag(db, table, biz, keep["name"], final, column="department")
+        items = db.one("SELECT COUNT(*) AS n FROM products WHERE business_id=? AND department=?", (biz, final))["n"]
+        sales = db.one("SELECT COUNT(*) AS n FROM invoice_items WHERE business_id=? AND department=?", (biz, final))["n"]
+        db.commit()
+    except DB_ERRORS:
+        db.rollback()
+        flash("The merge could not be completed, so nothing was changed. Please try again.", "error")
+        return back
+
+    names = ", ".join(f"'{r['name']}'" for r in [keep] + others)
+    flash(f"Merged {names} into '{final}'. It now holds {items} item(s) and {sales} sale line(s); the others were removed.", "ok")
+    return back
 
 
 # --- OPERATORS (ADMIN) ---

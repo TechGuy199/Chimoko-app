@@ -23,9 +23,31 @@
 </section>
 {% endif %}
 
+{% if user.role == 'admin' %}
+{# The tick-boxes sit on the tiles but belong to this form, so the tiles can keep their own rename and delete forms #}
+<section class="card block merge-bar">
+    <h2>Merge categories</h2>
+    <p class="muted">
+        Tick two or more categories below and give them one name. Their items, purchases and listings all move to it and the ticked categories are removed.
+        Seed categories can only be merged with other seed categories. This cannot be undone.
+    </p>
+    <form id="merge-categories-form" method="post" action="{{ url_for('merge_categories') }}" class="toolbar" data-merge data-noun="category" data-plural="categories">
+        {{ csrf_field() }}
+        <input name="category_name" maxlength="60" placeholder="Name for the merged category" aria-label="Name for the merged category" autocomplete="off">
+        <button class="btn primary" disabled>Merge ticked categories</button>
+        <span class="muted merge-count" role="status">Nothing ticked yet.</span>
+    </form>
+</section>
+{% endif %}
+
 <div class="dept-tiles cat-tiles spaced">
     {% for t in tiles %}
     <div class="dept-tile cat-manage">
+        {% if user.role == 'admin' %}
+        <label class="merge-tick" title="Tick to merge">
+            <input type="checkbox" name="ids" value="{{ t.id }}" form="merge-categories-form" data-name="{{ t.name }}" aria-label="Merge {{ t.name }}">
+        </label>
+        {% endif %}
         <a class="tile-link" href="{{ url_for('inventory', category=t.name) }}">
             <span class="tile-name">{{ t.name }}</span>
             <small>{{ t['items'] }} item(s) &middot; {{ t.units }} unit(s)</small>
@@ -54,3 +76,4 @@
     {% endfor %}
 </div>
 {% endblock %}
+{% block scripts %}{% if user.role == 'admin' %}<script src="{{ asset('merge.js') }}"></script>{% endif %}{% endblock %}

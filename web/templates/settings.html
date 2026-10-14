@@ -26,6 +26,7 @@
             <tbody>
             {% for d in departments %}
                 <tr>
+                    <td class="merge-cell"><input type="checkbox" name="ids" value="{{ d.id }}" form="merge-departments-form" data-name="{{ d.name }}" aria-label="Merge {{ d.name }}"></td>
                     <td>{{ d.name }}</td>
                     <td class="num">
                         {% if d.name != 'General' %}
@@ -39,6 +40,18 @@
             {% endfor %}
             </tbody>
         </table>
+
+        <form id="merge-departments-form" method="post" action="{{ url_for('merge_departments') }}" class="merge-form" data-merge data-noun="department" data-plural="departments">
+            {{ csrf_field() }}
+            <h2 class="spaced">Merge departments</h2>
+            <p class="muted">
+                Tick two or more departments above and give them one name. Their items, purchases, listings and past sales move to it,
+                and the ticked departments are removed. This cannot be undone.
+            </p>
+            <input name="department_name" maxlength="60" placeholder="Name for the merged department" aria-label="Name for the merged department" autocomplete="off">
+            <button class="btn primary" disabled>Merge ticked departments</button>
+            <p class="muted merge-count" role="status">Nothing ticked yet.</p>
+        </form>
     </section>
 </div>
 
@@ -91,3 +104,4 @@
     <a class="btn danger" href="{{ url_for('reset_page') }}">Reset the app&hellip;</a>
 </section>
 {% endblock %}
+{% block scripts %}<script src="{{ asset('merge.js') }}"></script>{% endblock %}
