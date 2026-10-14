@@ -111,6 +111,15 @@ SCHEMA = [
         item_id INTEGER NOT NULL, item_name TEXT NOT NULL, reason TEXT DEFAULT '', status TEXT NOT NULL DEFAULT 'pending',
         created_at TEXT, decided_by TEXT, decided_at TEXT, expires_at TEXT
     )""",
+    # The permanent record of an invoice that was deleted: what it held (as it was), who deleted it, who allowed it and why.
+    # Nothing deletes from this table except a full reset of the app.
+    """CREATE TABLE IF NOT EXISTS deleted_invoices (
+        id {pk}, business_id INTEGER NOT NULL, invoice_no TEXT NOT NULL, kind TEXT, customer_name TEXT, customer_phone TEXT,
+        payment_status TEXT, total DOUBLE PRECISION NOT NULL DEFAULT 0, amount_paid DOUBLE PRECISION NOT NULL DEFAULT 0,
+        balance_due DOUBLE PRECISION NOT NULL DEFAULT 0, created_by TEXT, created_at TEXT, items_json TEXT DEFAULT '[]',
+        payments_json TEXT DEFAULT '[]', stock_note TEXT DEFAULT '', reason TEXT NOT NULL, deleted_by TEXT NOT NULL,
+        approved_by TEXT DEFAULT '', request_id INTEGER, deleted_at TEXT
+    )""",
     # Greenhouse: every time seed packs are sown and the seedlings listed for sale. Keeps the germination
     # estimate and cost assumptions that were used, so a batch can be looked back on later.
     """CREATE TABLE IF NOT EXISTS seedling_batches (

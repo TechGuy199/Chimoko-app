@@ -3,8 +3,9 @@
 {% block content %}
 <h1>Permission Requests</h1>
 <p class="muted">
-    When an operator's account is not allowed to edit, transfer or delete an item, they can ask here.
-    Approving allows that one action on that one item, once, within {{ minutes }} minutes. It does not change the operator's permissions.
+    When an operator's account is not allowed to edit, transfer or delete an item, or an operator wants to delete an invoice, they ask here.
+    Approving allows that one action on that one item or invoice, once, within {{ minutes }} minutes. It does not change the operator's permissions.
+    Approved invoice deletions are kept, with the reason, under <a href="{{ url_for('deleted_invoices') }}">Deletion Records</a>.
 </p>
 
 <section class="card">
@@ -17,7 +18,12 @@
                     <td>{{ r.created_at }}</td>
                     <td>{{ r.username }}</td>
                     <td>{{ actions.get(r.action, r.action) }}</td>
-                    <td><a href="{{ url_for('item', item_id=r.item_id) }}">{{ r.item_name }}</a></td>
+                    <td>
+                        {% if r.action == delete_invoice %}
+                            {% if r.status == 'used' %}<a href="{{ url_for('deleted_invoices') }}">Invoice {{ r.item_name }}</a>
+                            {% else %}<a href="{{ url_for('invoice', invoice_id=r.item_id) }}">Invoice {{ r.item_name }}</a>{% endif %}
+                        {% else %}<a href="{{ url_for('item', item_id=r.item_id) }}">{{ r.item_name }}</a>{% endif %}
+                    </td>
                     <td class="wrap">{{ r.reason or '—' }}</td>
                     <td>
                         {% if r.status == 'pending' %}<strong class="gold">Waiting</strong>

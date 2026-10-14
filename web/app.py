@@ -454,8 +454,10 @@ def next_invoice_no(db, biz):
             seq = int(last["invoice_no"].rsplit("-", 1)[1]) + 1
         except (ValueError, IndexError):
             pass
-    # Imported invoices can carry any number, so make sure the candidate really is free
-    while db.one("SELECT id FROM invoices WHERE business_id=? AND invoice_no=?", (biz, f"INV-{year}-{seq:04d}")):
+    # Imported invoices can carry any number, so make sure the candidate really is free. A number whose invoice was
+    # deleted stays taken, so the deletion record can never be confused with a later invoice.
+    while (db.one("SELECT id FROM invoices WHERE business_id=? AND invoice_no=?", (biz, f"INV-{year}-{seq:04d}"))
+           or db.one("SELECT id FROM deleted_invoices WHERE business_id=? AND invoice_no=?", (biz, f"INV-{year}-{seq:04d}"))):
         seq += 1
     return f"INV-{year}-{seq:04d}"
 
@@ -1594,7 +1596,156 @@ def invoice(invoice_id):
         (invoice_id, biz),
     )
     twins = phone_twins(db, biz, inv["customer_id"]) if inv["customer_id"] and g.user["role"] == "admin" else []
-    return render_template("invoice.html", inv=inv, lines=lines, payments=payment_history(db, "sale", invoice_id), twins=twins)
+    # An operator needs an admin's one-time approval; an admin only needs to confirm with their password
+    asked = None if g.user["role"] == "admin" else active_request(db, invoice_id, DELETE_INVOICE)
+    if asked and asked["status"] == "approved":
+        asked = {**asked, "until": (asked["expires_at"] or "")[11:16]}
+    return render_template(
+        "invoice.html", inv=inv, lines=lines, payments=payment_history(db, "sale", invoice_id), twins=twins, asked=asked,
+        stock_to=("inventory" if inv["kind"] == "FARM_USE" else "the POS"),
+    )
+
+
+def invoice_stock_table(kind):
+    """Where an invoice's items came from, and so where they go back to: farm use drew on inventory, a sale on the POS."""
+    return "products" if kind == "FARM_USE" else "pos_products"
+
+
+@app.post("/invoices/<int:invoice_id>/request-deletion")
+@need(None)
+def request_invoice_deletion(invoice_id):
+    db, biz = get_db(), g.user["business_id"]
+    inv = db.one("SELECT id, invoice_no, customer_name, total FROM invoices WHERE id=? AND business_id=?", (invoice_id, biz))
+    if inv is None:
+        abort(404)
+    back = redirect(url_for("invoice", invoice_id=invoice_id))
+    if g.user["role"] == "admin":
+        flash("Admins delete invoices directly, with their password.", "ok")
+        return back
+    if active_request(db, invoice_id, DELETE_INVOICE):
+        flash("You already have a request to delete this invoice waiting or approved.", "ok")
+        return back
+    reason = " ".join(text("reason").split())[:300]
+    if len(reason) < 5:
+        flash("Say why this invoice should be deleted (at least a few words). The admin reads it before answering.", "error")
+        return back
+
+    request_id = db.insert(
+        """INSERT INTO permission_requests (business_id, user_id, username, action, item_id, item_name, reason, status, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)""",
+        (biz, g.user["id"], g.user["username"], DELETE_INVOICE, invoice_id, inv["invoice_no"], reason, now().strftime("%Y-%m-%d %H:%M:%S")),
+    )
+    if alert_enabled("permission"):
+        notify(
+            db, "permission", f"Permission request from {g.user['username']}",
+            f"{g.user['username']} asks to delete invoice {inv['invoice_no']} ({inv['customer_name']}, {money(inv['total'])}). Reason: {reason}. Open the app to approve or deny.",
+            url_for("permission_requests") + f"#request-{request_id}", whatsapp=True,
+        )
+    db.commit()
+    flash("Your request has been sent to the admin. You will get a popup here when they answer.", "ok")
+    return back
+
+
+@app.post("/invoices/<int:invoice_id>/delete")
+@need(None)
+def delete_invoice(invoice_id):
+    db, biz = get_db(), g.user["business_id"]
+    inv = db.one(
+        """SELECT id, invoice_no, kind, customer_name, customer_phone, payment_status, total, amount_paid, balance_due, created_by, created_at
+           FROM invoices WHERE id=? AND business_id=?""",
+        (invoice_id, biz),
+    )
+    if inv is None:
+        abort(404)
+    back = redirect(url_for("invoice", invoice_id=invoice_id))
+
+    grant = None
+    if g.user["role"] == "admin":
+        reason = " ".join(text("reason").split())[:300]
+        if len(reason) < 5:
+            flash("Say why the invoice is being deleted (at least a few words). It is kept in the deletion records. Nothing was deleted.", "error")
+            return back
+        me = db.one("SELECT password_hash FROM users WHERE id=?", (g.user["id"],))
+        if not me or not check_password_hash(me["password_hash"], request.form.get("password", "")):
+            flash("That password is not correct. Nothing was deleted.", "error")
+            return back
+        approved_by = g.user["username"]
+    else:
+        # The operator's own words are what was approved, so they are what gets recorded
+        row = active_request(db, invoice_id, DELETE_INVOICE)
+        if not row or row["status"] != "approved":
+            flash("An admin has to approve deleting this invoice first. Use the request button.", "error")
+            return back
+        grant, reason, approved_by = row, row["reason"], row["decided_by"] or ""
+
+    lines = db.all(
+        "SELECT item_code, item_name, department, batch_no, qty, unit_price, line_total FROM invoice_items WHERE invoice_id=? AND business_id=? ORDER BY id",
+        (invoice_id, biz),
+    )
+    payments = db.all(
+        "SELECT old_paid, new_paid, note, changed_by, changed_at FROM payment_log WHERE business_id=? AND kind='sale' AND ref_id=? ORDER BY id",
+        (biz, invoice_id),
+    )
+
+    # Everything happens in one transaction: either the invoice is gone and recorded, or nothing changed
+    try:
+        table = invoice_stock_table(inv["kind"])
+        missing = []
+        if request.form.get("return_stock"):
+            for line in lines:
+                back_in = db.execute(
+                    f"UPDATE {table} SET quantity = quantity + ? WHERE business_id=? AND item_code=?", (line["qty"], biz, line["item_code"]),
+                ).rowcount
+                if back_in != 1:
+                    missing.append(line["item_code"])
+            where = "inventory" if table == "products" else "POS stock"
+            stock_note = f"Items returned to {where}." if not missing else f"Items returned to {where}, except {', '.join(missing)} (no longer listed)."
+        else:
+            stock_note = "Items were not returned to stock."
+
+        db.execute("DELETE FROM invoice_items WHERE invoice_id=? AND business_id=?", (invoice_id, biz))
+        db.execute("DELETE FROM payment_log WHERE business_id=? AND kind='sale' AND ref_id=?", (biz, invoice_id))
+        db.execute("DELETE FROM invoices WHERE id=? AND business_id=?", (invoice_id, biz))
+        db.insert(
+            """INSERT INTO deleted_invoices (business_id, invoice_no, kind, customer_name, customer_phone, payment_status, total, amount_paid, balance_due,
+                                             created_by, created_at, items_json, payments_json, stock_note, reason, deleted_by, approved_by, request_id, deleted_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                biz, inv["invoice_no"], inv["kind"], inv["customer_name"], inv["customer_phone"], inv["payment_status"], inv["total"],
+                inv["amount_paid"], inv["balance_due"], inv["created_by"], inv["created_at"], json.dumps(lines), json.dumps(payments),
+                stock_note, reason, g.user["username"], approved_by, grant["id"] if grant else None, now().strftime("%Y-%m-%d %H:%M:%S"),
+            ),
+        )
+        use_grant(db, grant)
+        if grant:
+            notify(
+                db, "deletion", f"Invoice {inv['invoice_no']} was deleted",
+                f"{g.user['username']} deleted invoice {inv['invoice_no']} ({money(inv['total'])}) with your approval. Reason: {reason}.",
+                url_for("deleted_invoices"),
+            )
+        db.commit()
+    except DB_ERRORS:
+        db.rollback()
+        flash("The invoice could not be deleted, so nothing was changed. Please try again.", "error")
+        return back
+
+    flash(f"Invoice {inv['invoice_no']} was deleted and recorded in the deletion records. {stock_note}", "ok")
+    return redirect(url_for("history"))
+
+
+@app.get("/records/deleted-invoices")
+@need("admin")
+def deleted_invoices():
+    rows = get_db().all(
+        """SELECT id, invoice_no, kind, customer_name, customer_phone, payment_status, total, amount_paid, balance_due, created_by, created_at,
+                  items_json, payments_json, stock_note, reason, deleted_by, approved_by, deleted_at
+           FROM deleted_invoices WHERE business_id=? ORDER BY id DESC LIMIT 500""",
+        (g.user["business_id"],),
+    )
+    for r in rows:
+        r["lines"] = json.loads(r["items_json"] or "[]")
+        r["payments"] = json.loads(r["payments_json"] or "[]")
+    return render_template("deleted_invoices.html", rows=rows, total=sum(r["total"] for r in rows))
 
 
 @app.post("/invoices/<int:invoice_id>/payment")
@@ -1934,6 +2085,9 @@ def delete_payslip(payslip_id):
 ALERT_KINDS = (("low_stock", "Low stock"), ("permission", "Requests for admin permission"))
 ITEM_ACTIONS = (("procure", "edit this item's details"), ("transfer", "transfer or use this item's stock"), ("delete", "delete this item"))
 GRANT_MINUTES = 60
+# An operator's request to delete one invoice travels through the same request/approve/spend-once flow as the item actions
+DELETE_INVOICE = "delete_invoice"
+REQUEST_LABELS = {**dict(ITEM_ACTIONS), DELETE_INVOICE: "delete this invoice"}
 WHATSAPP_TIMEOUT = 6
 
 
@@ -2139,7 +2293,7 @@ def test_alert():
 def active_request(db, item_id, action):
     """The signed-in user's latest request for this action on this item that is still pending or approved and unexpired."""
     row = db.one(
-        """SELECT id, status, expires_at FROM permission_requests
+        """SELECT id, status, expires_at, reason, decided_by FROM permission_requests
            WHERE business_id=? AND user_id=? AND item_id=? AND action=? AND status IN ('pending', 'approved') ORDER BY id DESC LIMIT 1""",
         (g.user["business_id"], g.user["id"], item_id, action),
     )
@@ -2217,7 +2371,7 @@ def permission_requests():
            FROM permission_requests WHERE business_id=? ORDER BY CASE WHEN status='pending' THEN 0 ELSE 1 END, id DESC LIMIT 200""",
         (g.user["business_id"],),
     )
-    return render_template("requests.html", rows=rows, actions=dict(ITEM_ACTIONS), minutes=GRANT_MINUTES)
+    return render_template("requests.html", rows=rows, actions=REQUEST_LABELS, delete_invoice=DELETE_INVOICE, minutes=GRANT_MINUTES)
 
 
 @app.post("/requests/<int:request_id>/decide")
@@ -2236,18 +2390,19 @@ def decide_request(request_id):
         "UPDATE permission_requests SET status=?, decided_by=?, decided_at=?, expires_at=? WHERE id=?",
         ("approved" if approve else "denied", g.user["username"], stamp.strftime("%Y-%m-%d %H:%M:%S"), expires, request_id),
     )
-    what = dict(ITEM_ACTIONS)[row["action"]]
+    what = REQUEST_LABELS[row["action"]]
+    target = url_for("invoice", invoice_id=row["item_id"]) if row["action"] == DELETE_INVOICE else url_for("item", item_id=row["item_id"])
     if approve:
         notify(
             db, "decision", "Request approved",
             f"{g.user['username']} approved your request to {what}: {row['item_name']}. It covers one use and lasts {GRANT_MINUTES} minutes.",
-            url_for("item", item_id=row["item_id"]), for_user_id=row["user_id"],
+            target, for_user_id=row["user_id"],
         )
     else:
         notify(
             db, "decision", "Request denied",
             f"{g.user['username']} did not approve your request to {what}: {row['item_name']}.",
-            url_for("item", item_id=row["item_id"]), for_user_id=row["user_id"],
+            target, for_user_id=row["user_id"],
         )
     db.commit()
     flash("Request approved. The operator has been notified." if approve else "Request denied. The operator has been notified.", "ok")
@@ -3731,6 +3886,7 @@ RESET_GROUPS = (
     ("Purchases", ("procurements",)),
     ("Invoices and farm-use notes", ("invoices", "invoice_items")),
     ("Payment changes", ("payment_log",)),
+    ("Deleted invoice records", ("deleted_invoices",)),
     ("Customer accounts", ("customers", "customer_aliases", "customer_distinct")),
     ("Employees", ("employees",)),
     ("Payslips", ("payroll",)),

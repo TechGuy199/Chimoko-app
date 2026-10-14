@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% block title %}Deletion Records — {% endblock %}
+{% block content %}
+<div class="page-head">
+    <div>
+        <h1>Deletion Records</h1>
+        <p class="muted">Every invoice that was deleted, as it was, with who deleted it, who allowed it and why. These records cannot be edited or removed.</p>
+    </div>
+</div>
+
+<section class="card">
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr><th>Deleted</th><th>Invoice</th><th>Customer</th><th class="num">Total</th><th>Deleted by</th><th>Approved by</th><th>Why it was deleted</th><th></th></tr>
+            </thead>
+            <tbody>
+            {% for r in rows %}
+                <tr id="deleted-{{ r.id }}">
+                    <td>{{ r.deleted_at }}</td>
+                    <td>{{ r.invoice_no }}<br><small class="muted">{{ 'Farm use' if r.kind == 'FARM_USE' else 'Sale' }}</small></td>
+                    <td>{{ r.customer_name or '—' }}{% if r.customer_phone %}<br><small class="muted">{{ r.customer_phone }}</small>{% endif %}</td>
+                    <td class="num">{{ r.total|money }}</td>
+                    <td>{{ r.deleted_by }}</td>
+                    <td>{% if r.approved_by == r.deleted_by %}<span class="muted">Own password</span>{% else %}{{ r.approved_by or '—' }}{% endif %}</td>
+                    <td class="wrap">{{ r.reason }}</td>
+                    <td class="num"><a href="#detail-{{ r.id }}" onclick="document.getElementById('detail-{{ r.id }}').open = true">Details</a></td>
+                </tr>
+            {% else %}
+                <tr><td colspan="8" class="muted center">No invoice has been deleted.</td></tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+
+{% for r in rows %}
+<details class="card block" id="detail-{{ r.id }}">
+    <summary><strong>{{ r.invoice_no }}</strong> &mdash; what it held</summary>
+    <p class="muted">
+        Issued {{ r.created_at }} by {{ r.created_by or '—' }}. Status was {{ r.payment_status or '—' }}:
+        {{ r.amount_paid|money }} paid of {{ r.total|money }}, balance {{ r.balance_due|money }}. {{ r.stock_note }}
+    </p>
+    <div class="table-wrap">
+        <table>
+            <thead><tr><th>Code</th><th>Item</th><th class="num">Qty</th><th class="num">Unit price</th><th class="num">Total</th></tr></thead>
+            <tbody>
+            {% for line in r.lines %}
+                <tr><td>{{ line.item_code }}</td><td>{{ line.item_name }}</td><td class="num">{{ line.qty }}</td>
+                    <td class="num">{{ line.unit_price|money }}</td><td class="num">{{ line.line_total|money }}</td></tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% if r.payments %}
+    <h3>Payment changes before it was deleted</h3>
+    <ul>
+        {% for p in r.payments %}<li>{{ p.changed_at }}: {{ p.old_paid|money }} &rarr; {{ p.new_paid|money }} by {{ p.changed_by }}{% if p.note %} &mdash; {{ p.note }}{% endif %}</li>{% endfor %}
+    </ul>
+    {% endif %}
+</details>
+{% endfor %}
+{% endblock %}

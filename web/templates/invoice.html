@@ -71,4 +71,44 @@
     {% endwith %}
 </div>
 {% endif %}
+
+<section class="card block danger-zone narrow-form no-print" id="delete-invoice">
+    <h2>Delete this invoice</h2>
+    {% if user.role == 'admin' %}
+    <p class="muted">The invoice is removed from sales and the customer's statement. A permanent copy, with your reason, is kept in <a href="{{ url_for('deleted_invoices') }}">Deletion Records</a>.</p>
+    <form method="post" action="{{ url_for('delete_invoice', invoice_id=inv.id) }}" autocomplete="off"
+          data-confirm="Delete invoice {{ inv.invoice_no }} ({{ inv.total|money }})?&#10;&#10;It will be removed from sales and kept in the deletion records.">
+        {{ csrf_field() }}
+        <label>Why is it being deleted?
+            <textarea name="reason" rows="2" maxlength="300" required placeholder="For example: entered twice by mistake"></textarea>
+        </label>
+        <label class="check"><input type="checkbox" name="return_stock" value="1" checked> Put the items back into {{ stock_to }} stock</label>
+        <label>Your password, to show it is you
+            <input name="password" type="password" required autocomplete="current-password">
+        </label>
+        <div class="toolbar"><button class="btn danger">Delete invoice</button></div>
+    </form>
+    {% elif asked and asked.status == 'approved' %}
+    <p><strong class="ok">An admin approved this.</strong> It can be used once{% if asked.until %}, until {{ asked.until }}{% endif %}.</p>
+    <p class="muted">Reason you gave: {{ asked.reason }}</p>
+    <form method="post" action="{{ url_for('delete_invoice', invoice_id=inv.id) }}"
+          data-confirm="Delete invoice {{ inv.invoice_no }} ({{ inv.total|money }})? The approval is used up once it is deleted.">
+        {{ csrf_field() }}
+        <label class="check"><input type="checkbox" name="return_stock" value="1" checked> Put the items back into {{ stock_to }} stock</label>
+        <div class="toolbar"><button class="btn danger">Delete invoice</button></div>
+    </form>
+    {% elif asked %}
+    <p><strong class="gold">Waiting for an admin.</strong> You will get a popup here when they answer.</p>
+    <p class="muted">Reason you gave: {{ asked.reason }}</p>
+    {% else %}
+    <p class="muted">Deleting an invoice needs an admin's approval, for this invoice only and for one use. Tell them why.</p>
+    <form method="post" action="{{ url_for('request_invoice_deletion', invoice_id=inv.id) }}">
+        {{ csrf_field() }}
+        <label>Why should it be deleted?
+            <textarea name="reason" rows="2" maxlength="300" required placeholder="For example: entered twice by mistake"></textarea>
+        </label>
+        <div class="toolbar"><button class="btn">Ask an admin</button></div>
+    </form>
+    {% endif %}
+</section>
 {% endblock %}
