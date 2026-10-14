@@ -217,6 +217,13 @@ small { font-size: 11px; }
 .menu-item.danger { color: var(--warn-text); }
 .menu-panel form { margin: 0; }
 
+/* A small form that opens in place inside a table cell (a menu panel would be clipped by the table's scroll area) */
+.inline-details > summary { display: inline-block; list-style: none; cursor: pointer; }
+.inline-details > summary::-webkit-details-marker { display: none; }
+.preorder-form { min-width: 220px; margin: 8px 0 0; padding: 10px; border: 1px solid var(--line); border-radius: var(--radius-small); background: rgba(var(--ink), 0.04); text-align: left; }
+.plantings { margin: 10px 0 0; padding-left: 18px; }
+#preorders td.actions form { display: block; margin-top: 6px; }
+
 /* ---------- Layout ---------- */
 .page-head { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
 .page-head h1 { margin: 0; }

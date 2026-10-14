@@ -129,6 +129,23 @@ SCHEMA = [
         seedlings INTEGER NOT NULL, cost_per_seedling DOUBLE PRECISION NOT NULL, selling_price DOUBLE PRECISION NOT NULL,
         created_by TEXT, created_at TEXT
     )""",
+    # Greenhouse planting records. seedlings is the number expected to be ready (seeds planted less the expected mortality),
+    # or the real count once the batch is marked ready. pos_code is the code the batch is sold under in the POS.
+    """CREATE TABLE IF NOT EXISTS plantings (
+        id {pk}, business_id INTEGER NOT NULL, seed_item_id INTEGER, seed_code TEXT NOT NULL, seed_name TEXT NOT NULL,
+        name TEXT NOT NULL, department TEXT DEFAULT 'General', batch_no TEXT DEFAULT '', source TEXT NOT NULL DEFAULT 'inventory',
+        seeds_planted INTEGER NOT NULL, packs_used INTEGER NOT NULL DEFAULT 0, loose_delta INTEGER NOT NULL DEFAULT 0,
+        seeds_per_pack INTEGER, mortality_pct DOUBLE PRECISION NOT NULL DEFAULT 0, seedlings INTEGER NOT NULL,
+        seed_unit_cost DOUBLE PRECISION NOT NULL DEFAULT 0, cost_per_seedling DOUBLE PRECISION NOT NULL DEFAULT 0,
+        price DOUBLE PRECISION NOT NULL DEFAULT 0, planted_on TEXT, ready_on TEXT, actual_ready_on TEXT,
+        pos_code TEXT DEFAULT '', released INTEGER NOT NULL DEFAULT 0, notes TEXT DEFAULT '', created_by TEXT, created_at TEXT
+    )""",
+    # A customer's order for seedlings from a batch. It holds the stock straight away but becomes a sale only on collection, with approval.
+    """CREATE TABLE IF NOT EXISTS preorders (
+        id {pk}, business_id INTEGER NOT NULL, planting_id INTEGER NOT NULL, customer_name TEXT NOT NULL, customer_phone TEXT DEFAULT '',
+        qty INTEGER NOT NULL, unit_price DOUBLE PRECISION NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'pending', note TEXT DEFAULT '',
+        created_by TEXT, created_at TEXT, collected_by TEXT, approved_by TEXT, collected_at TEXT, invoice_id INTEGER, cancelled_at TEXT
+    )""",
     # Pairs an admin has confirmed are different people, so they stop being suggested as duplicates
     """CREATE TABLE IF NOT EXISTS customer_distinct (
         id {pk}, business_id INTEGER NOT NULL, low_id INTEGER NOT NULL, high_id INTEGER NOT NULL,
@@ -201,6 +218,8 @@ def init_schema():
         add_column(db, "products", "seeds_per_pack", "INTEGER")
         # The packaging unit stock is counted in (bag, box, kg, litre...); seed items are always counted in packs
         add_column(db, "products", "unit", "TEXT")
+        # Seeds left over from an opened pack after a planting; the next planting uses them first
+        add_column(db, "products", "loose_seeds", "INTEGER DEFAULT 0")
         add_column(db, "businesses", "alert_phone", "TEXT")
         add_column(db, "businesses", "alert_low_stock", "INTEGER")
         add_column(db, "businesses", "alert_permission", "INTEGER")

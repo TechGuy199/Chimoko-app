@@ -544,6 +544,7 @@ def logout():
 @need(None)
 def pos():
     db, biz = get_db(), g.user["business_id"]
+    release_plantings(db, biz)
     products = db.all(
         "SELECT id, item_code, name, department, quantity, price FROM pos_products WHERE business_id=? AND quantity > 0 ORDER BY name",
         (biz,),
@@ -573,7 +574,7 @@ def pos():
     known_customers = db.all("SELECT name, phone FROM customers WHERE business_id=? ORDER BY name LIMIT 1000", (biz,))
     return render_template(
         "pos.html", products=products, stats=stats, departments=department_names(db, biz), statuses=PAYMENT_STATUSES,
-        known_customers=known_customers,
+        known_customers=known_customers, up_next=up_next_summary(db, biz),
     )
 
 
@@ -1270,8 +1271,13 @@ def item(item_id):
 
     # Greenhouse details for seed items: what the seedlings are listed as now, the cost of one seed, past sowings
     seed = is_seed_category(current["category"])
-    listing, batches, per_seed = None, [], None
+    listing, batches, per_seed, loose, plantings = None, [], None, 0, []
     if seed:
+        loose = db.one("SELECT loose_seeds FROM products WHERE id=? AND business_id=?", (item_id, biz))["loose_seeds"] or 0
+        plantings = db.all(
+            "SELECT id, name, seeds_planted, planted_on, ready_on, actual_ready_on FROM plantings WHERE business_id=? AND seed_item_id=? ORDER BY id DESC LIMIT 10",
+            (biz, item_id),
+        )
         size = current["seeds_per_pack"]
         per_seed = current["unit_cost"] / size if size else None
         listing = db.one(
@@ -1291,7 +1297,7 @@ def item(item_id):
     return render_template(
         "item.html", item=current, departments=department_names(db, biz), category_choices=category_choices, units=unit_choices(db, biz),
         access={action: item_access_state(db, item_id, action) for action, _ in ITEM_ACTIONS}, actions=ITEM_ACTIONS,
-        seed=seed, listing=listing, batches=batches, per_seed=per_seed, seedling_name=(listing or {}).get("name") or seedling_name_for(current["name"]),
+        seed=seed, listing=listing, batches=batches, per_seed=per_seed, loose=loose, plantings=plantings, seedling_name=(listing or {}).get("name") or seedling_name_for(current["name"]),
     )
 
 
@@ -1361,6 +1367,13 @@ def update_item(item_id):
         purchases = db.execute(
             "UPDATE procurements SET category=?, department=? WHERE business_id=? AND item_code=?", (category, dept, biz, current["item_code"])
         ).rowcount
+        if re_filed:
+            # Planting records made from this seed, and the batches already on the POS, follow it too
+            db.execute("UPDATE plantings SET department=? WHERE business_id=? AND seed_item_id=?", (dept, biz, item_id))
+            db.execute(
+                "UPDATE pos_products SET department=? WHERE business_id=? AND item_code IN (SELECT pos_code FROM plantings WHERE business_id=? AND seed_item_id=?)",
+                (dept, biz, biz, item_id),
+            )
         use_grant(db, grant)
         db.commit()
     except DB_ERRORS:
@@ -2087,7 +2100,8 @@ ITEM_ACTIONS = (("procure", "edit this item's details"), ("transfer", "transfer 
 GRANT_MINUTES = 60
 # An operator's request to delete one invoice travels through the same request/approve/spend-once flow as the item actions
 DELETE_INVOICE = "delete_invoice"
-REQUEST_LABELS = {**dict(ITEM_ACTIONS), DELETE_INVOICE: "delete this invoice"}
+COLLECT_PREORDER = "collect_preorder"
+REQUEST_LABELS = {**dict(ITEM_ACTIONS), DELETE_INVOICE: "delete this invoice", COLLECT_PREORDER: "collect a pre-order and record it as a sale"}
 WHATSAPP_TIMEOUT = 6
 
 
@@ -2391,7 +2405,12 @@ def decide_request(request_id):
         ("approved" if approve else "denied", g.user["username"], stamp.strftime("%Y-%m-%d %H:%M:%S"), expires, request_id),
     )
     what = REQUEST_LABELS[row["action"]]
-    target = url_for("invoice", invoice_id=row["item_id"]) if row["action"] == DELETE_INVOICE else url_for("item", item_id=row["item_id"])
+    if row["action"] == DELETE_INVOICE:
+        target = url_for("invoice", invoice_id=row["item_id"])
+    elif row["action"] == COLLECT_PREORDER:
+        target = url_for("up_next")
+    else:
+        target = url_for("item", item_id=row["item_id"])
     if approve:
         notify(
             db, "decision", "Request approved",
@@ -3875,6 +3894,740 @@ def upload_too_large(error):
     return redirect(url_for("import_data"))
 
 
+# --- PLANTING RECORDS (GREENHOUSE) ---
+# A planting is a batch of seeds put in the ground. The seedlings expected are the seeds planted less the expected mortality.
+# A batch appears on the POS RELEASE_DAYS before it is expected to be ready (at once if it is marked ready sooner), under its
+# own code so that its sales can be told apart from other batches. Pre-orders hold seedlings from a batch straight away but only
+# become a sale when the customer collects them and an admin has approved it.
+RELEASE_DAYS = 7
+PLANTING_MARK = "-SDL-P"
+PLANTING_STAGES = {"growing": "Growing", "due": "Due", "ready": "Ready"}
+
+
+def today_str():
+    return now().strftime("%Y-%m-%d")
+
+
+def add_days(day, days):
+    return (datetime.datetime.strptime(day, "%Y-%m-%d") + datetime.timedelta(days=days)).strftime("%Y-%m-%d")
+
+
+def day_or_none(raw):
+    """A date typed or pasted in any of the accepted layouts as YYYY-MM-DD, or None when it is not a date."""
+    try:
+        return parse_date(raw.strip()).strftime("%Y-%m-%d")
+    except ValueError:
+        return None
+
+
+def seedlings_from(seeds, mortality):
+    return math.floor(seeds * (100 - mortality) / 100 + 1e-9)
+
+
+def planting_label(p):
+    """What the batch is called on the POS and on invoices, so two batches of the same plant can be told apart."""
+    return f"{p['name']} ({p['batch_no'] or 'planted ' + (p['planted_on'] or '')})"
+
+
+def on_pos_now(p, today):
+    return bool(p["actual_ready_on"]) or (p["ready_on"] or today) <= add_days(today, RELEASE_DAYS)
+
+
+def can_plant():
+    return can("procure") or can("transfer")
+
+
+def with_figures(db, biz, rows):
+    """Adds to each planting what has been sold, what is held by pre-orders, what is left, and where it stands."""
+    today = today_str()
+    sold = {
+        r["code"]: r["n"]
+        for r in db.all(
+            "SELECT item_code AS code, SUM(qty) AS n FROM invoice_items WHERE business_id=? AND item_code LIKE ? GROUP BY item_code",
+            (biz, "%" + PLANTING_MARK + "%"),
+        )
+    }
+    held = {}
+    # A collected pre-order counts only while its invoice exists: deleting that invoice puts the seedlings back
+    for r in db.all(
+        """SELECT planting_id, status, SUM(qty) AS n FROM preorders po WHERE business_id=?
+           AND (status='pending' OR (status='collected' AND EXISTS (SELECT 1 FROM invoices i WHERE i.id = po.invoice_id)))
+           GROUP BY planting_id, status""",
+        (biz,),
+    ):
+        held[(r["planting_id"], r["status"])] = r["n"] or 0
+    out = []
+    for p in rows:
+        s = int(sold.get(p["pos_code"], 0) or 0)
+        pending = int(held.get((p["id"], "pending"), 0))
+        collected = int(held.get((p["id"], "collected"), 0))
+        ready_on = p["ready_on"] or today
+        stage = "ready" if p["actual_ready_on"] else ("due" if ready_on <= today else "growing")
+        days = (datetime.date.fromisoformat(ready_on) - datetime.date.fromisoformat(today)).days
+        out.append(dict(
+            p, sold=s, pending=pending, collected=collected, direct=max(0, s - collected), available=max(0, p["seedlings"] - s - pending),
+            stage=stage, stage_label=PLANTING_STAGES[stage], days=days, on_pos=on_pos_now(p, today), label=planting_label(p),
+            goes_on_pos=add_days(ready_on, -RELEASE_DAYS),
+        ))
+    return out
+
+
+def put_on_pos(db, biz, f):
+    """Makes the POS listing of a released batch match the batch: its name, price and what is left to sell."""
+    moved = db.execute(
+        "UPDATE pos_products SET name=?, department=?, batch_no=?, date_planted=?, price=?, quantity=? WHERE business_id=? AND item_code=?",
+        (f["label"], f["department"], f["batch_no"], f["planted_on"], f["price"], f["available"], biz, f["pos_code"]),
+    ).rowcount
+    if moved == 0:
+        db.execute(
+            """INSERT INTO pos_products (business_id, item_code, name, category, department, batch_no, date_planted, quantity, price)
+               VALUES (?, ?, ?, 'Seedlings', ?, ?, ?, ?, ?)""",
+            (biz, f["pos_code"], f["label"], f["department"], f["batch_no"], f["planted_on"], f["available"], f["price"]),
+        )
+
+
+def sync_planting(db, biz, planting_id):
+    p = db.one("SELECT * FROM plantings WHERE id=? AND business_id=?", (planting_id, biz))
+    if p and p["released"]:
+        put_on_pos(db, biz, with_figures(db, biz, [p])[0])
+
+
+def release_plantings(db, biz):
+    """Lists on the POS every batch that is now within a week of being ready (or already marked ready). Safe to repeat."""
+    today = today_str()
+    waiting = [p for p in db.all("SELECT * FROM plantings WHERE business_id=? AND released=0", (biz,)) if on_pos_now(p, today)]
+    if not waiting:
+        return
+    try:
+        for f in with_figures(db, biz, waiting):
+            db.execute("UPDATE plantings SET released=1 WHERE id=? AND business_id=?", (f["id"], biz))
+            put_on_pos(db, biz, f)
+        db.commit()
+    except DB_ERRORS:
+        db.rollback()
+
+
+def up_next_summary(db, biz):
+    """For the POS tile: batches still growing that are not on the POS yet, and pre-orders waiting for collection."""
+    rows = with_figures(db, biz, db.all("SELECT * FROM plantings WHERE business_id=? AND released=0 ORDER BY ready_on, id", (biz,)))
+    waiting = db.one("SELECT COUNT(*) AS n, COALESCE(SUM(qty), 0) AS qty FROM preorders WHERE business_id=? AND status='pending'", (biz,))
+    return {"batches": len(rows), "next": rows[0] if rows else None, "preorders": waiting["n"], "preorder_qty": waiting["qty"]}
+
+
+def insert_planting(db, biz, d):
+    """Saves a planting and gives it its POS code. d carries every field; the caller has already checked them."""
+    planting_id = db.insert(
+        """INSERT INTO plantings (business_id, seed_item_id, seed_code, seed_name, name, department, batch_no, source, seeds_planted, packs_used, loose_delta,
+                                  seeds_per_pack, mortality_pct, seedlings, seed_unit_cost, cost_per_seedling, price, planted_on, ready_on, actual_ready_on,
+                                  notes, created_by, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            biz, d.get("seed_item_id"), d["seed_code"], d["seed_name"], d["name"], d["department"], d["batch_no"], d["source"], d["seeds"],
+            d.get("packs", 0), d.get("loose_delta", 0), d.get("seeds_per_pack"), d["mortality"], d["seedlings"], d["seed_cost"], d["cost_per_seedling"],
+            d["price"], d["planted_on"], d["ready_on"], d.get("actual_ready_on"), d.get("notes", ""), g.user["username"], now().strftime("%Y-%m-%d %H:%M:%S"),
+        ),
+    )
+    db.execute("UPDATE plantings SET pos_code=? WHERE id=?", (f"{d['seed_code']}{PLANTING_MARK}{planting_id}", planting_id))
+    return planting_id
+
+
+def seed_code_for(name):
+    return re.sub(r"[^A-Z0-9]+", "-", name.upper()).strip("-")[:20] or "PLT"
+
+
+@app.get("/planting")
+@need(None)
+def planting_list():
+    db, biz = get_db(), g.user["business_id"]
+    release_plantings(db, biz)
+    rows = with_figures(db, biz, db.all("SELECT * FROM plantings WHERE business_id=? ORDER BY ready_on DESC, id DESC LIMIT 500", (biz,)))
+    show = request.args.get("show", "all")
+    counts = {"all": len(rows), "growing": sum(1 for r in rows if r["stage"] != "ready"), "ready": sum(1 for r in rows if r["stage"] == "ready")}
+    if show == "growing":
+        rows = [r for r in rows if r["stage"] != "ready"]
+    elif show == "ready":
+        rows = [r for r in rows if r["stage"] == "ready"]
+    else:
+        show = "all"
+    return render_template("plantings.html", rows=rows, show=show, counts=counts)
+
+
+@app.get("/planting/new")
+@need(None)
+def planting_new():
+    db, biz = get_db(), g.user["business_id"]
+    seeds, info = [], {}
+    for i in db.all(
+        "SELECT id, item_code, name, category, department, quantity, unit_cost, seeds_per_pack, loose_seeds FROM products WHERE business_id=? ORDER BY name", (biz,)
+    ):
+        if not is_seed_category(i["category"]):
+            continue
+        i["allowed"] = item_grant(db, i["id"], "transfer") is not None
+        seeds.append(i)
+        info[str(i["id"])] = {
+            "name": i["name"], "packs": i["quantity"], "loose": i["loose_seeds"] or 0, "size": i["seeds_per_pack"] or 0, "cost": i["unit_cost"],
+            "seedling": seedling_name_for(i["name"]), "department": i["department"],
+        }
+    return render_template(
+        "planting_new.html", seed_items=seeds, info=info, chosen=request.args.get("item", ""), departments=department_names(db, biz), today=today_str(),
+        release_days=RELEASE_DAYS,
+    )
+
+
+@app.post("/planting")
+@need(None)
+def planting_create():
+    db, biz = get_db(), g.user["business_id"]
+    raw_item = text("item_id")
+    back = redirect(url_for("planting_new", item=raw_item))
+    today = today_str()
+
+    item, grant = None, None
+    if raw_item:
+        try:
+            item_id = int(raw_item)
+        except ValueError:
+            abort(400)
+        item = db.one("SELECT " + ITEM_COLUMNS + ", loose_seeds FROM products WHERE id=? AND business_id=?", (item_id, biz))
+        if item is None or not is_seed_category(item["category"]):
+            flash("Choose one of your seed items, or leave the item empty to record a planting that is not from inventory.", "error")
+            return back
+        grant = item_grant(db, item_id, "transfer")
+        if grant is None:
+            return refuse_item_action(item_id)
+    elif not can_plant():
+        flash("Your account cannot record a planting that is not taken from inventory. Ask an admin.", "error")
+        return back
+
+    try:
+        seeds = number("seeds_planted", int)
+        if seeds < 1:
+            raise ValueError
+    except ValueError:
+        flash("Enter how many seeds are being planted (a whole number above zero).", "error")
+        return back
+    try:
+        mortality = number("mortality_pct")
+        if not 0 <= mortality < 100:
+            raise ValueError
+    except ValueError:
+        flash("Enter the expected mortality rate as a percentage from 0 up to (not including) 100.", "error")
+        return back
+    planted_on = day_or_none(text("planted_on")) if text("planted_on") else today
+    ready_on = day_or_none(text("ready_on"))
+    if planted_on is None or ready_on is None:
+        flash("Enter the planting date and the date the seedlings are expected to be ready.", "error")
+        return back
+    if ready_on < planted_on:
+        flash("The expected ready date cannot be before the planting date.", "error")
+        return back
+
+    size = item["seeds_per_pack"] if item else None
+    if item and not size:
+        try:
+            size = number("seeds_per_pack", int)
+            if size < 1:
+                raise ValueError
+        except ValueError:
+            flash("Say how many seeds are in one pack (a whole number above zero).", "error")
+            return back
+    try:
+        if text("seed_cost"):
+            seed_cost = number("seed_cost")
+        else:
+            seed_cost = item["unit_cost"] / size if item else 0.0
+        if seed_cost < 0:
+            raise ValueError
+    except ValueError:
+        flash("The cost of one seed must be a number, 0 or more.", "error")
+        return back
+    seedlings = seedlings_from(seeds, mortality)
+    if seedlings < 1:
+        flash("At that mortality rate these seeds would give less than one seedling.", "error")
+        return back
+    cost_per_seedling = seed_cost / (1 - mortality / 100)
+    try:
+        price = number("price") if text("price") else round_up_to_cent(cost_per_seedling)
+        if price < 0:
+            raise ValueError
+    except ValueError:
+        flash("The selling price per seedling must be a number, 0 or more.", "error")
+        return back
+
+    name = clean_name(text("name"), 100) or (seedling_name_for(item["name"]) if item else "")
+    if not name:
+        flash("Give the planting a name, for example Tomato seedlings.", "error")
+        return back
+    if item:
+        seed_code, seed_name, dept = item["item_code"], item["name"], item["department"]
+    else:
+        dept = text("department") if text("department") in department_names(db, biz) else "General"
+        seed_name = name
+        seed_code = seed_code_for(name)
+
+    packs, loose_delta, loose_left = 0, 0, 0
+    try:
+        if item:
+            # Loose seeds left from an earlier opened pack are used first; only whole packs leave inventory
+            loose = item["loose_seeds"] or 0
+            from_loose = min(loose, seeds)
+            need_seeds = seeds - from_loose
+            packs = -(-need_seeds // size)
+            if packs > item["quantity"]:
+                db.rollback()
+                available = item["quantity"] * size + loose
+                flash(f"Only {available:,} seeds are in stock ({item['quantity']} pack(s) of {size:,}" + (f" and {loose:,} loose seeds" if loose else "") + "). Nothing was planted.", "error")
+                return back
+            loose_left = loose - from_loose + (packs * size - need_seeds)
+            loose_delta = loose_left - loose
+            moved = db.execute(
+                "UPDATE products SET quantity = quantity - ?, loose_seeds=?, seeds_per_pack = COALESCE(seeds_per_pack, ?) WHERE id=? AND business_id=? AND quantity >= ?",
+                (packs, loose_left, size, item["id"], biz, packs),
+            )
+            if moved.rowcount != 1:
+                raise StockError(item["name"])
+            if packs:
+                low_stock_alert(db, item["name"], item["item_code"], item["quantity"], item["quantity"] - packs, "in inventory")
+
+        planting_id = insert_planting(db, biz, {
+            "seed_item_id": item["id"] if item else None, "seed_code": seed_code, "seed_name": seed_name, "name": name, "department": dept,
+            "batch_no": text("batch_no")[:40], "source": "inventory" if item else "manual", "seeds": seeds, "packs": packs, "loose_delta": loose_delta,
+            "seeds_per_pack": size, "mortality": mortality, "seedlings": seedlings, "seed_cost": seed_cost, "cost_per_seedling": cost_per_seedling,
+            "price": round(price, 2), "planted_on": planted_on, "ready_on": ready_on, "notes": text("notes")[:300],
+        })
+        use_grant(db, grant)
+        db.commit()
+    except StockError:
+        db.rollback()
+        flash("The stock changed while you were working. Nothing was planted; please try again.", "error")
+        return back
+    except DB_ERRORS:
+        db.rollback()
+        flash("The planting could not be saved. Please try again.", "error")
+        return back
+
+    release_plantings(db, biz)
+    made = db.one("SELECT released, ready_on FROM plantings WHERE id=?", (planting_id,))
+    where = "It is on the POS now." if made["released"] else f"It will appear on the POS on {add_days(ready_on, -RELEASE_DAYS)}, a week before it is ready."
+    used = f", using {packs} pack(s) from inventory" if item else ""
+    spare = f" {loose_left:,} loose seeds are kept for the next planting." if item and loose_left else ""
+    flash(f"Planting recorded: {seeds:,} seeds of {seed_name}{used}. About {seedlings:,} seedlings are expected by {ready_on}.{spare} {where}", "ok")
+    return redirect(url_for("planting_detail", planting_id=planting_id))
+
+
+def get_planting(db, planting_id):
+    p = db.one("SELECT * FROM plantings WHERE id=? AND business_id=?", (planting_id, g.user["business_id"]))
+    if p is None:
+        abort(404)
+    return p
+
+
+@app.get("/planting/<int:planting_id>")
+@need(None)
+def planting_detail(planting_id):
+    db, biz = get_db(), g.user["business_id"]
+    release_plantings(db, biz)
+    p = get_planting(db, planting_id)
+    f = with_figures(db, biz, [p])[0]
+    orders = db.all("SELECT * FROM preorders WHERE planting_id=? AND business_id=? ORDER BY id DESC", (planting_id, biz))
+    return render_template("planting_detail.html", p=f, orders=orders, editable=can_plant(), release_days=RELEASE_DAYS)
+
+
+@app.post("/planting/<int:planting_id>/update")
+@need(None)
+def planting_update(planting_id):
+    db, biz = get_db(), g.user["business_id"]
+    p = get_planting(db, planting_id)
+    back = redirect(url_for("planting_detail", planting_id=planting_id))
+    if not can_plant():
+        flash("Your account cannot edit planting records. Ask an admin.", "error")
+        return back
+    f = with_figures(db, biz, [p])[0]
+    name = clean_name(text("name"), 100)
+    ready_on = day_or_none(text("ready_on"))
+    try:
+        mortality = number("mortality_pct")
+        if not 0 <= mortality < 100:
+            raise ValueError
+        price = number("price")
+        if price < 0:
+            raise ValueError
+    except ValueError:
+        flash("Mortality must be from 0 up to (not including) 100, and the price must be 0 or more.", "error")
+        return back
+    if not name or ready_on is None or ready_on < (p["planted_on"] or ""):
+        flash("Give the batch a name and an expected ready date that is not before it was planted.", "error")
+        return back
+    # While the batch is only expected, the mortality rate decides how many seedlings to expect. Once it is marked ready the real count stands.
+    seedlings = p["seedlings"] if p["actual_ready_on"] else seedlings_from(p["seeds_planted"], mortality)
+    if seedlings < f["sold"] + f["pending"]:
+        flash(f"That would leave {seedlings:,} seedlings, but {f['sold'] + f['pending']:,} are already sold or pre-ordered. Nothing was changed.", "error")
+        return back
+    cost_per_seedling = p["seed_unit_cost"] / (1 - mortality / 100)
+    db.execute(
+        """UPDATE plantings SET name=?, batch_no=?, ready_on=?, mortality_pct=?, seedlings=?, cost_per_seedling=?, price=?, notes=? WHERE id=? AND business_id=?""",
+        (name, text("batch_no")[:40], ready_on, mortality, seedlings, cost_per_seedling, round(price, 2), text("notes")[:300], planting_id, biz),
+    )
+    release_plantings(db, biz)
+    sync_planting(db, biz, planting_id)
+    db.commit()
+    flash("Planting record saved.", "ok")
+    return back
+
+
+@app.post("/planting/<int:planting_id>/ready")
+@need(None)
+def planting_ready(planting_id):
+    db, biz = get_db(), g.user["business_id"]
+    p = get_planting(db, planting_id)
+    back = redirect(url_for("planting_detail", planting_id=planting_id))
+    if not can_plant():
+        flash("Your account cannot edit planting records. Ask an admin.", "error")
+        return back
+    f = with_figures(db, biz, [p])[0]
+    ready_day = day_or_none(text("actual_ready_on")) if text("actual_ready_on") else today_str()
+    if ready_day is None:
+        flash("Enter the date the seedlings were ready.", "error")
+        return back
+    count = p["seedlings"]
+    if text("ready_count"):
+        try:
+            count = number("ready_count", int)
+            if count < 0:
+                raise ValueError
+        except ValueError:
+            flash("Enter the number of seedlings that are really ready as a whole number.", "error")
+            return back
+    if count < f["sold"] + f["pending"]:
+        flash(f"{f['sold'] + f['pending']:,} seedlings are already sold or pre-ordered, so the count cannot be below that. Nothing was changed.", "error")
+        return back
+    db.execute("UPDATE plantings SET actual_ready_on=?, seedlings=? WHERE id=? AND business_id=?", (ready_day, count, planting_id, biz))
+    release_plantings(db, biz)
+    sync_planting(db, biz, planting_id)
+    db.commit()
+    flash(f"Marked ready on {ready_day} with {count:,} seedlings. It is on the POS.", "ok")
+    return back
+
+
+@app.post("/planting/<int:planting_id>/delete")
+@need("admin")
+def planting_delete(planting_id):
+    db, biz = get_db(), g.user["business_id"]
+    p = get_planting(db, planting_id)
+    f = with_figures(db, biz, [p])[0]
+    back = redirect(url_for("planting_detail", planting_id=planting_id))
+    if f["sold"] or f["pending"] or f["collected"]:
+        flash("Seedlings from this batch have been sold or pre-ordered, so the record is kept. Cancel the pre-orders first if it was a mistake.", "error")
+        return back
+    try:
+        if p["seed_item_id"] and p["packs_used"] is not None:
+            db.execute(
+                "UPDATE products SET quantity = quantity + ?, loose_seeds = COALESCE(loose_seeds, 0) - ? WHERE id=? AND business_id=?",
+                (p["packs_used"], p["loose_delta"] or 0, p["seed_item_id"], biz),
+            )
+        db.execute("DELETE FROM pos_products WHERE business_id=? AND item_code=?", (biz, p["pos_code"]))
+        db.execute("DELETE FROM preorders WHERE planting_id=? AND business_id=?", (planting_id, biz))
+        db.execute("DELETE FROM plantings WHERE id=? AND business_id=?", (planting_id, biz))
+        db.commit()
+    except DB_ERRORS:
+        db.rollback()
+        flash("The record could not be deleted. Please try again.", "error")
+        return back
+    flash("The planting record was deleted" + (f" and {p['packs_used']} pack(s) went back into inventory." if p["packs_used"] else "."), "ok")
+    return redirect(url_for("planting_list"))
+
+
+@app.get("/planting/up-next")
+@need(None)
+def up_next():
+    db, biz = get_db(), g.user["business_id"]
+    release_plantings(db, biz)
+    rows = with_figures(db, biz, db.all("SELECT * FROM plantings WHERE business_id=? ORDER BY ready_on, id", (biz,)))
+    batches = [f for f in rows if f["available"] > 0 or f["pending"] > 0]
+    orders = db.all(
+        """SELECT po.*, p.name AS planting_name, p.batch_no AS planting_batch, p.planted_on AS planting_planted
+           FROM preorders po JOIN plantings p ON p.id = po.planting_id WHERE po.business_id=?
+           ORDER BY CASE WHEN po.status='pending' THEN 0 ELSE 1 END, po.id DESC LIMIT 200""",
+        (biz,),
+    )
+    for o in orders:
+        o["label"] = planting_label({"name": o["planting_name"], "batch_no": o["planting_batch"], "planted_on": o["planting_planted"]})
+        o["total"] = round(o["qty"] * o["unit_price"], 2)
+        o["ask"] = active_request(db, o["id"], COLLECT_PREORDER) if o["status"] == "pending" and g.user["role"] != "admin" else None
+        if o["ask"] and o["ask"]["status"] == "approved":
+            o["ask"] = {**o["ask"], "until": (o["ask"]["expires_at"] or "")[11:16]}
+    return render_template("up_next.html", batches=batches, orders=orders, statuses=PAYMENT_STATUSES, release_days=RELEASE_DAYS)
+
+
+@app.post("/planting/<int:planting_id>/preorder")
+@need("sell")
+def preorder_create(planting_id):
+    db, biz = get_db(), g.user["business_id"]
+    p = get_planting(db, planting_id)
+    back = redirect(url_for("planting_detail", planting_id=planting_id) if text("back") == "detail" else url_for("up_next") + "#preorders")
+    customer = clean_name(text("customer_name"), 100)
+    if not customer:
+        flash("Enter the customer's name for the pre-order.", "error")
+        return back
+    try:
+        qty = number("qty", int)
+        if qty < 1:
+            raise ValueError
+    except ValueError:
+        flash("Enter how many seedlings the customer wants (a whole number above zero).", "error")
+        return back
+    f = with_figures(db, biz, [p])[0]
+    if qty > f["available"]:
+        flash(f"Only {f['available']:,} seedlings of this batch are still free (not sold or pre-ordered). Nothing was recorded.", "error")
+        return back
+    db.insert(
+        """INSERT INTO preorders (business_id, planting_id, customer_name, customer_phone, qty, unit_price, status, note, created_by, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)""",
+        (biz, planting_id, customer, text("customer_phone")[:40], qty, p["price"], text("note")[:200], g.user["username"], now().strftime("%Y-%m-%d %H:%M:%S")),
+    )
+    sync_planting(db, biz, planting_id)
+    db.commit()
+    flash(f"Pre-order recorded for {customer}: {qty:,} x {f['label']}. The seedlings are held. It becomes a sale when they are collected and an admin approves.", "ok")
+    return back
+
+
+def get_preorder(db, po_id):
+    po = db.one("SELECT * FROM preorders WHERE id=? AND business_id=?", (po_id, g.user["business_id"]))
+    if po is None:
+        abort(404)
+    return po
+
+
+@app.post("/preorders/<int:po_id>/cancel")
+@need("sell")
+def preorder_cancel(po_id):
+    db, biz = get_db(), g.user["business_id"]
+    po = get_preorder(db, po_id)
+    back = redirect(url_for("up_next") + "#preorders")
+    if po["status"] != "pending":
+        flash("That pre-order has already been collected or cancelled.", "error")
+        return back
+    db.execute("UPDATE preorders SET status='cancelled', cancelled_at=? WHERE id=? AND business_id=?", (now().strftime("%Y-%m-%d %H:%M:%S"), po_id, biz))
+    sync_planting(db, biz, po["planting_id"])
+    db.commit()
+    flash(f"Pre-order for {po['customer_name']} cancelled. The {po['qty']:,} seedlings are free again.", "ok")
+    return back
+
+
+@app.post("/preorders/<int:po_id>/request-approval")
+@need("sell")
+def preorder_request(po_id):
+    db, biz = get_db(), g.user["business_id"]
+    po = get_preorder(db, po_id)
+    back = redirect(url_for("up_next") + "#preorders")
+    if g.user["role"] == "admin":
+        flash("Admins approve and collect directly.", "ok")
+        return back
+    if po["status"] != "pending" or active_request(db, po_id, COLLECT_PREORDER):
+        flash("This pre-order is not waiting for collection, or you already asked.", "error")
+        return back
+    p = get_planting(db, po["planting_id"])
+    request_id = db.insert(
+        """INSERT INTO permission_requests (business_id, user_id, username, action, item_id, item_name, reason, status, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)""",
+        (biz, g.user["id"], g.user["username"], COLLECT_PREORDER, po_id, f"Pre-order #{po_id} for {po['customer_name']}", text("reason")[:200], now().strftime("%Y-%m-%d %H:%M:%S")),
+    )
+    if alert_enabled("permission"):
+        notify(
+            db, "permission", f"Permission request from {g.user['username']}",
+            f"{g.user['username']} asks to collect a pre-order: {po['customer_name']} takes {po['qty']:,} x {planting_label(p)} ({money(po['qty'] * po['unit_price'])}). Open the app to approve or deny.",
+            url_for("permission_requests") + f"#request-{request_id}", whatsapp=True,
+        )
+    db.commit()
+    flash("Your request has been sent to the admin. You will get a popup here when they answer.", "ok")
+    return back
+
+
+@app.post("/preorders/<int:po_id>/collect")
+@need("sell")
+def preorder_collect(po_id):
+    db, biz = get_db(), g.user["business_id"]
+    po = get_preorder(db, po_id)
+    back = redirect(url_for("up_next") + "#preorders")
+    if po["status"] != "pending":
+        flash("That pre-order has already been collected or cancelled.", "error")
+        return back
+
+    grant = None
+    if g.user["role"] == "admin":
+        approved_by = g.user["username"]
+    else:
+        row = active_request(db, po_id, COLLECT_PREORDER)
+        if not row or row["status"] != "approved":
+            flash("An admin has to approve this collection first. Use the request button.", "error")
+            return back
+        grant, approved_by = row, row["decided_by"] or ""
+
+    p = get_planting(db, po["planting_id"])
+    total = round(po["qty"] * po["unit_price"], 2)
+    try:
+        amount_paid = amount_for_status(text("payment_status") or "Paid", text("amount_paid"), total)
+    except ValueError as e:
+        flash(f"Payment: {e}.", "error")
+        return back
+
+    try:
+        sold_at = now().strftime("%Y-%m-%d %H:%M:%S")
+        invoice_id = db.insert(
+            """INSERT INTO invoices (business_id, invoice_no, kind, customer_name, customer_phone, payment_status, total, amount_paid, balance_due, created_by, created_at, customer_id)
+               VALUES (?, ?, 'SALE', ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                biz, next_invoice_no(db, biz), po["customer_name"], po["customer_phone"], payment_status_for(total, amount_paid), total, amount_paid,
+                round(total - amount_paid, 2), g.user["username"], sold_at, customer_for(db, biz, po["customer_name"], po["customer_phone"], sold_at),
+            ),
+        )
+        # The seedlings were taken out of stock when the pre-order was recorded, so only the sale itself is entered here
+        db.execute(
+            """INSERT INTO invoice_items (invoice_id, business_id, item_code, item_name, department, batch_no, qty, unit_price, line_total)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (invoice_id, biz, p["pos_code"], planting_label(p), p["department"], p["batch_no"], po["qty"], po["unit_price"], total),
+        )
+        db.execute(
+            "UPDATE preorders SET status='collected', collected_by=?, approved_by=?, collected_at=?, invoice_id=? WHERE id=? AND business_id=?",
+            (g.user["username"], approved_by, sold_at, invoice_id, po_id, biz),
+        )
+        use_grant(db, grant)
+        db.commit()
+    except DB_ERRORS:
+        db.rollback()
+        flash("The collection could not be saved, so nothing was changed. Please try again.", "error")
+        return back
+    flash(f"Collected by {po['customer_name']} and recorded as a sale (approved by {approved_by}).", "ok")
+    return redirect(url_for("invoice", invoice_id=invoice_id))
+
+
+PLANTING_COLUMNS = {
+    "item_code": ("item code", "code", "seed code", "sku"),
+    "name": ("name", "seedling name", "seed name", "item name", "item", "seed", "plant"),
+    "seeds": ("seeds planted", "seeds", "number of seeds", "quantity", "qty"),
+    "planted_on": ("planted on", "date planted", "planting date", "date"),
+    "ready_on": ("ready on", "expected ready", "expected ready date", "ready date", "ready", "date ready"),
+    "actual_ready_on": ("actual ready date", "actual ready", "ready on actual", "marked ready"),
+    "mortality": ("mortality", "expected mortality", "mortality rate", "expected mortality rate", "mortality %"),
+    "price": ("selling price", "price", "seedling price"),
+    "seed_cost": ("seed cost", "cost per seed", "seed unit cost", "unit cost"),
+    "department": ("department", "dept"),
+    "batch_no": ("batch no", "batch number", "batch"),
+    "notes": ("notes", "note", "comments"),
+}
+IMPORT_TEMPLATES["planting"] = (
+    ["Item Code", "Name", "Seeds Planted", "Planted On", "Ready On", "Mortality", "Seed Cost", "Selling Price", "Department", "Batch No", "Actual Ready Date", "Notes"],
+    ["TOM-001", "Tomato seedlings", 2000, "2026-10-01", "2026-11-05", 15, 0.45, 1.2, "Greenhouse", "B-22", "", "Tray block A"],
+)
+
+
+@app.post("/import/planting")
+@need("admin")
+def import_planting():
+    db, biz = get_db(), g.user["business_id"]
+    try:
+        records = read_csv_upload(PLANTING_COLUMNS, ("seeds", "ready_on", "mortality"))
+    except ImportProblem as e:
+        flash(str(e), "error")
+        return redirect(url_for("import_data"))
+
+    departments = set(department_names(db, biz))
+    fallback = "Greenhouse" if "Greenhouse" in departments else "General"
+    seen = {(norm(r["name"]), r["planted_on"], r["batch_no"] or "", r["seeds_planted"]) for r in db.all("SELECT name, planted_on, batch_no, seeds_planted FROM plantings WHERE business_id=?", (biz,))}
+    today = today_str()
+    errors, plans, new_departments = [], [], []
+
+    for rec in records:
+        problems = []
+        name = clean_name(rec["name"], 100)
+        code = clean_name(rec["item_code"], 30)
+        if not name and not code:
+            problems.append("give a Name or an Item Code")
+        seeds = 0
+        try:
+            seeds = parse_whole(rec["seeds"])
+            if seeds < 1:
+                raise ValueError
+        except ValueError:
+            problems.append(f"seeds planted '{rec['seeds']}' is not a whole number above zero")
+        mortality = 0.0
+        try:
+            mortality = parse_amount(rec["mortality"])
+            if not 0 <= mortality < 100:
+                raise ValueError
+        except ValueError:
+            problems.append(f"mortality '{rec['mortality']}' must be a percentage from 0 up to (not including) 100")
+        planted_on = day_or_none(rec["planted_on"]) if rec["planted_on"] else today
+        ready_on = day_or_none(rec["ready_on"])
+        actual = day_or_none(rec["actual_ready_on"]) if rec["actual_ready_on"] else None
+        if planted_on is None:
+            problems.append(f"planted on '{rec['planted_on']}' is not a date (use YYYY-MM-DD or DD/MM/YYYY)")
+        if ready_on is None:
+            problems.append(f"ready on '{rec['ready_on']}' is not a date (use YYYY-MM-DD or DD/MM/YYYY)")
+        elif planted_on and ready_on < planted_on:
+            problems.append("ready on is before planted on")
+        if rec["actual_ready_on"] and actual is None:
+            problems.append(f"actual ready date '{rec['actual_ready_on']}' is not a date")
+        seed_cost = price = None
+        for field, label in (("seed_cost", "seed cost"), ("price", "selling price")):
+            if rec[field]:
+                try:
+                    value = parse_amount(rec[field])
+                    if value < 0:
+                        raise ValueError
+                except ValueError:
+                    problems.append(f"{label} '{rec[field]}' is not a valid amount")
+                    continue
+                if field == "seed_cost":
+                    seed_cost = value
+                else:
+                    price = value
+        if not problems and seed_cost is None and price is None:
+            problems.append("give a Selling Price or a Seed Cost, so the seedlings can be priced")
+
+        if problems:
+            errors.append(f"Row {rec['_row']}: " + "; ".join(problems))
+            continue
+        label = name or code
+        key = (norm(label), planted_on, rec["batch_no"] or "", seeds)
+        if key in seen:
+            errors.append(f"Row {rec['_row']}: '{label}' with {seeds:,} seeds planted on {planted_on} is already recorded (was this file imported before?)")
+            continue
+        seen.add(key)
+        dept = rec["department"] or fallback
+        if dept not in departments:
+            departments.add(dept)
+            new_departments.append(dept)
+        seedlings = seedlings_from(seeds, mortality)
+        if seedlings < 1:
+            errors.append(f"Row {rec['_row']}: at that mortality rate these seeds would give less than one seedling")
+            continue
+        seed_cost = seed_cost if seed_cost is not None else 0.0
+        cost_per = seed_cost / (1 - mortality / 100)
+        plans.append({
+            "seed_code": code or seed_code_for(label), "seed_name": label, "name": label, "department": dept, "batch_no": rec["batch_no"][:40], "source": "import",
+            "seeds": seeds, "mortality": mortality, "seedlings": seedlings, "seed_cost": seed_cost, "cost_per_seedling": cost_per,
+            "price": round(price if price is not None else round_up_to_cent(cost_per), 2), "planted_on": planted_on, "ready_on": ready_on,
+            "actual_ready_on": actual, "notes": rec["notes"][:300],
+        })
+
+    if errors:
+        return import_errors("planting records", errors)
+    try:
+        for dept in new_departments:
+            db.execute("INSERT INTO departments (business_id, name) VALUES (?, ?)", (biz, dept))
+        for d in plans:
+            insert_planting(db, biz, d)
+        db.commit()
+    except DB_ERRORS:
+        db.rollback()
+        flash("The import failed while saving, so nothing was imported. Please try again.", "error")
+        return redirect(url_for("import_data"))
+    release_plantings(db, biz)
+    flash(f"Imported {len(plans)} planting record(s). Inventory was not changed. Batches within a week of being ready are already on the POS.", "ok")
+    return redirect(url_for("planting_list"))
+
+
 # --- RESET THE APP (ADMIN) ---
 # A reset wipes the records the app has logged for this business. It keeps what makes the app usable
 # and was set up rather than logged: user accounts (with their permissions and appearance), the business
@@ -3891,6 +4644,8 @@ RESET_GROUPS = (
     ("Employees", ("employees",)),
     ("Payslips", ("payroll",)),
     ("Sowing batches", ("seedling_batches",)),
+    ("Planting records", ("plantings",)),
+    ("Pre-orders", ("preorders",)),
     ("Alerts", ("notifications",)),
     ("Permission requests", ("permission_requests",)),
 )
@@ -4027,7 +4782,7 @@ def merge_departments():
         return back
 
     # Items, purchases, POS listings and past sales all carry the department by name, so all of them move
-    tables = ("products", "pos_products", "procurements", "invoice_items")
+    tables = ("products", "pos_products", "procurements", "invoice_items", "plantings")
     try:
         for r in others:
             for table in tables:

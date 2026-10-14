@@ -38,6 +38,7 @@
     {% if item.seeds_per_pack %}
     of {{ '{:,}'.format(item.seeds_per_pack) }} seeds = <strong>{{ '{:,}'.format(item.seeds_per_pack * item.quantity) }}</strong> seeds
     {% if per_seed is not none %}<span class="muted">&middot; {{ per_seed|money4 }} per seed</span>{% endif %}
+    {% if loose %}<span class="muted">&middot; plus {{ '{:,}'.format(loose) }} loose seeds from an opened pack</span>{% endif %}
     {% else %}
     <span class="muted">&middot; seeds per pack not recorded yet</span>
     {% endif %}
@@ -155,6 +156,22 @@
             {{ ask_admin('transfer') }}
             {% endif %}
         </section>
+
+        {% if seed %}
+        <section class="card">
+            <h2>Plant in greenhouse</h2>
+            <p class="muted">Push seeds into a planting record. Enter how many seeds are planted and the packs they use are taken out of stock here.</p>
+            <a class="btn success wide" href="{{ url_for('planting_new', item=item.id) }}">Record a planting</a>
+            {% if plantings %}
+            <ul class="plantings">
+                {% for pl in plantings %}
+                <li><a href="{{ url_for('planting_detail', planting_id=pl.id) }}">{{ pl.name }}</a>
+                    <small class="muted">{{ '{:,}'.format(pl.seeds_planted) }} seeds, ready {{ pl.actual_ready_on or pl.ready_on }}</small></li>
+                {% endfor %}
+            </ul>
+            {% endif %}
+        </section>
+        {% endif %}
 
         <section class="card">
             <h2>Delete</h2>

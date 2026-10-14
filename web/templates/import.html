@@ -62,6 +62,25 @@
     </section>
 
     <section class="card grow">
+        <h2>Planting Records</h2>
+        <p>Each row is one batch of seeds planted. Imported batches appear under Planting Records and go on the POS a week before they are ready, exactly like a planting entered by hand.</p>
+        <ul class="muted">
+            <li><strong>Required:</strong> Seeds Planted, Ready On (the expected date), Mortality (the expected percentage), and a Name or an Item Code. Give a Selling Price or a Seed Cost so the seedlings can be priced.</li>
+            <li><strong>Optional:</strong> Planted On (blank means today), Department, Batch No, Actual Ready Date, Notes.</li>
+            <li>Seedlings expected = Seeds Planted less the Mortality. A blank Selling Price is worked out from the Seed Cost and the mortality, rounded up.</li>
+            <li>A row with an Actual Ready Date is already ready and goes straight onto the POS.</li>
+            <li><strong>Inventory is not changed</strong> by an import: use it for plantings whose seed was already taken out of stock.</li>
+            <li>A row identical to a batch that is already recorded (name, planting date, batch and seeds) is rejected, which protects against importing a file twice.</li>
+        </ul>
+        <p><a href="{{ url_for('import_template', kind='planting') }}">Download the planting records template</a></p>
+        <form method="post" action="{{ url_for('import_planting') }}" enctype="multipart/form-data">
+            {{ csrf_field() }}
+            <label>CSV file <input type="file" name="file" accept=".csv,text/csv" required></label>
+            <button class="btn success">Import Planting Records</button>
+        </form>
+    </section>
+
+    <section class="card grow">
         <h2>Salaries &amp; Wages</h2>
         <p>Each row is one payslip for one employee for one month. Imported payslips appear under HR &amp; Payroll, in the monthly summary, and can be printed.</p>
         <ul class="muted">

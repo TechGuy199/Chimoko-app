@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block title %}Planting Records — {% endblock %}
+{% block content %}
+<div class="page-head">
+    <div>
+        <h1>Planting Records</h1>
+        <p class="muted">Every batch of seeds planted in the greenhouse. A batch goes on the POS a week before it is expected to be ready.</p>
+    </div>
+    <div class="head-actions">
+        <a class="btn primary" href="{{ url_for('planting_new') }}">Record a planting</a>
+        <a class="btn" href="{{ url_for('up_next') }}">Up next &amp; pre-orders</a>
+        {% if user.role == 'admin' %}<a class="btn" href="{{ url_for('import_data') }}#planting">Import</a>{% endif %}
+    </div>
+</div>
+
+<div class="toolbar">
+    <a class="chip {{ 'active' if show == 'all' }}" href="{{ url_for('planting_list') }}">All <small>{{ counts.all }}</small></a>
+    <a class="chip {{ 'active' if show == 'growing' }}" href="{{ url_for('planting_list', show='growing') }}">Growing <small>{{ counts.growing }}</small></a>
+    <a class="chip {{ 'active' if show == 'ready' }}" href="{{ url_for('planting_list', show='ready') }}">Ready <small>{{ counts.ready }}</small></a>
+</div>
+
+<section class="card">
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Batch</th><th>Planted</th><th class="num">Seeds</th><th class="num">Expected mortality</th><th class="num">Seedlings</th>
+                    <th>Expected ready</th><th>Status</th><th class="num">Pre-ordered</th><th class="num">Sold</th><th class="num">Available</th>
+                </tr>
+            </thead>
+            <tbody>
+            {% for r in rows %}
+                <tr>
+                    <td><a href="{{ url_for('planting_detail', planting_id=r.id) }}">{{ r.label }}</a>
+                        <br><small class="muted">{{ r.department }}{% if r.source == 'import' %} &middot; imported{% elif r.source == 'manual' %} &middot; not from inventory{% endif %}</small></td>
+                    <td>{{ r.planted_on }}</td>
+                    <td class="num">{{ '{:,}'.format(r.seeds_planted) }}{% if r.packs_used %}<br><small class="muted">{{ r.packs_used }} pack{{ 's' if r.packs_used != 1 }}</small>{% endif %}</td>
+                    <td class="num">{{ '%g'|format(r.mortality_pct) }}%</td>
+                    <td class="num">{{ '{:,}'.format(r.seedlings) }}{% if r.actual_ready_on %}<br><small class="muted">counted</small>{% else %}<br><small class="muted">expected</small>{% endif %}</td>
+                    <td>{{ r.actual_ready_on or r.ready_on }}
+                        {% if r.stage == 'growing' %}<br><small class="muted">in {{ r.days }} day{{ 's' if r.days != 1 }}</small>{% endif %}</td>
+                    <td>
+                        {% if r.stage == 'ready' %}<span class="ok">Ready</span>
+                        {% elif r.stage == 'due' %}<strong class="gold">Due</strong>
+                        {% else %}Growing{% endif %}
+                        <br><small class="muted">{{ 'On the POS' if r.released else 'POS from ' ~ r.goes_on_pos }}</small>
+                    </td>
+                    <td class="num">{{ r.pending }}</td>
+                    <td class="num">{{ r.sold }}</td>
+                    <td class="num"><strong>{{ r.available }}</strong></td>
+                </tr>
+            {% else %}
+                <tr><td colspan="10" class="muted center">No plantings yet. Record one, or push seeds from an inventory item.</td></tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    <p class="muted">Pre-ordered seedlings are held for the customer but not yet sold. They become a sale when collected and approved by an admin.</p>
+</section>
+{% endblock %}

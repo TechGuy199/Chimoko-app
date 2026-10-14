@@ -1,0 +1,117 @@
+{% extends "base.html" %}
+{% block title %}{{ p.label }} — {% endblock %}
+{% block content %}
+<div class="page-head">
+    <div>
+        <a class="back" href="{{ url_for('planting_list') }}">&larr; Planting records</a>
+        <h1>{{ p.label }}</h1>
+        <p class="muted">
+            {{ p.department }} &middot;
+            {% if p.source == 'inventory' %}from inventory: {{ p.seed_name }} ({{ p.seed_code }}){% elif p.source == 'import' %}imported{% else %}not taken from inventory{% endif %}
+            &middot; recorded by {{ p.created_by }}
+        </p>
+    </div>
+    <div class="head-actions">
+        <a class="btn" href="{{ url_for('up_next') }}">Up next &amp; pre-orders</a>
+    </div>
+</div>
+
+<div class="stats">
+    <div class="stat"><span>Seeds planted</span><strong>{{ '{:,}'.format(p.seeds_planted) }}</strong>
+        <small>{% if p.packs_used %}{{ p.packs_used }} pack{{ 's' if p.packs_used != 1 }} used{% else %}no inventory used{% endif %}</small></div>
+    <div class="stat"><span>Seedlings {{ 'counted' if p.actual_ready_on else 'expected' }}</span><strong class="accent">{{ '{:,}'.format(p.seedlings) }}</strong>
+        <small>{{ '%g'|format(p.mortality_pct) }}% expected mortality</small></div>
+    <div class="stat"><span>Ready</span><strong class="{{ 'ok' if p.stage == 'ready' else 'gold' if p.stage == 'due' }}">{{ p.actual_ready_on or p.ready_on }}</strong>
+        <small>{{ p.stage_label }}{% if p.stage == 'growing' %}, in {{ p.days }} day{{ 's' if p.days != 1 }}{% endif %}</small></div>
+    <div class="stat"><span>Pre-ordered</span><strong class="gold">{{ p.pending }}</strong><small>held, not yet collected</small></div>
+    <div class="stat"><span>Sold</span><strong class="ok">{{ p.sold }}</strong><small>{{ p.collected }} of them collected pre-orders</small></div>
+    <div class="stat"><span>Available</span><strong>{{ p.available }}</strong><small>free to sell or pre-order</small></div>
+</div>
+<p class="muted">
+    {% if p.released %}This batch is on the POS as &ldquo;{{ p.label }}&rdquo; at {{ p.price|money }} each.
+    {% else %}This batch goes on the POS on {{ p.goes_on_pos }}, {{ release_days }} days before it is expected to be ready. Until then it can only be pre-ordered.{% endif %}
+    Cost to raise one seedling: {{ p.cost_per_seedling|money4 }} (seed {{ p.seed_unit_cost|money4 }}).
+</p>
+
+<div class="split">
+    <section class="card grow">
+        <h2>Details</h2>
+        <form method="post" action="{{ url_for('planting_update', planting_id=p.id) }}">
+            {{ csrf_field() }}
+            <fieldset {{ 'disabled' if not editable }}>
+                <label>Name <input name="name" value="{{ p.name }}" maxlength="100" required></label>
+                <div class="grid">
+                    <label>Expected ready on <input name="ready_on" type="date" value="{{ p.ready_on }}" required></label>
+                    <label>Expected mortality (%) <input name="mortality_pct" type="number" min="0" max="99.99" step="any" value="{{ '%g'|format(p.mortality_pct) }}" required></label>
+                    <label>Selling price per seedling <input name="price" type="number" min="0" step="0.01" value="{{ '%.2f'|format(p.price) }}" required></label>
+                    <label>Batch number <input name="batch_no" value="{{ p.batch_no }}" maxlength="40"></label>
+                </div>
+                <label>Notes <input name="notes" value="{{ p.notes }}" maxlength="300"></label>
+                <button class="btn primary">Save</button>
+            </fieldset>
+        </form>
+        <p class="muted">The seeds planted ({{ '{:,}'.format(p.seeds_planted) }}) and the planting date ({{ p.planted_on }}) cannot be edited here.
+            {% if not p.actual_ready_on %}Changing the mortality changes the seedlings expected.{% endif %}</p>
+    </section>
+
+    <div class="side">
+        <section class="card">
+            <h2>{{ 'Ready' if p.actual_ready_on else 'Mark as ready' }}</h2>
+            <form method="post" action="{{ url_for('planting_ready', planting_id=p.id) }}">
+                {{ csrf_field() }}
+                <fieldset {{ 'disabled' if not editable }}>
+                    <label>Date they were ready <input name="actual_ready_on" type="date" value="{{ p.actual_ready_on or '' }}"></label>
+                    <label>Seedlings really ready (blank keeps {{ '{:,}'.format(p.seedlings) }})
+                        <input name="ready_count" type="number" min="0" step="1" inputmode="numeric"></label>
+                    <button class="btn success wide">{{ 'Update' if p.actual_ready_on else 'Mark ready now' }}</button>
+                </fieldset>
+            </form>
+        </section>
+        {% if user.role == 'admin' %}
+        <section class="card">
+            <h2>Delete</h2>
+            <form method="post" action="{{ url_for('planting_delete', planting_id=p.id) }}"
+                  data-confirm="Delete this planting record?{% if p.packs_used %}&#10;&#10;{{ p.packs_used }} pack(s) go back into inventory.{% endif %}">
+                {{ csrf_field() }}
+                <button class="btn danger wide">Delete record</button>
+            </form>
+            <p class="muted">Only possible while nothing from the batch has been sold or pre-ordered.</p>
+        </section>
+        {% endif %}
+    </div>
+</div>
+
+<section class="card block">
+    <h2>Pre-orders for this batch</h2>
+    {% if p.available > 0 %}
+    <form method="post" action="{{ url_for('preorder_create', planting_id=p.id) }}" class="toolbar">
+        {{ csrf_field() }}
+        <input type="hidden" name="back" value="detail">
+        <input name="customer_name" placeholder="Customer name" required maxlength="100">
+        <input name="customer_phone" placeholder="Phone" maxlength="40">
+        <input name="qty" type="number" min="1" max="{{ p.available }}" value="1" required aria-label="Quantity">
+        <button class="btn" {{ 'disabled' if not can('sell') }}>Pre-order</button>
+    </form>
+    {% endif %}
+    <div class="table-wrap">
+        <table>
+            <thead><tr><th>Customer</th><th>Phone</th><th class="num">Qty</th><th class="num">Price</th><th>Placed</th><th>Status</th></tr></thead>
+            <tbody>
+            {% for o in orders %}
+                <tr>
+                    <td>{{ o.customer_name }}</td><td>{{ o.customer_phone or '—' }}</td><td class="num">{{ o.qty }}</td><td class="num">{{ o.unit_price|money }}</td>
+                    <td>{{ o.created_at }} <small class="muted">by {{ o.created_by }}</small></td>
+                    <td>
+                        {% if o.status == 'pending' %}<strong class="gold">Waiting for collection</strong>
+                        {% elif o.status == 'collected' %}<span class="ok">Collected</span> <small class="muted">approved by {{ o.approved_by }}</small>{% if o.invoice_id %} <a href="{{ url_for('invoice', invoice_id=o.invoice_id) }}">invoice</a>{% endif %}
+                        {% else %}<span class="muted">Cancelled</span>{% endif %}
+                    </td>
+                </tr>
+            {% else %}
+                <tr><td colspan="6" class="muted center">No pre-orders for this batch.</td></tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endblock %}

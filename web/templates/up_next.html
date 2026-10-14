@@ -1,0 +1,118 @@
+{% extends "base.html" %}
+{% block title %}Up Next — {% endblock %}
+{% block content %}
+<div class="page-head">
+    <div>
+        <a class="back" href="{{ url_for('pos') }}">&larr; Sales &amp; POS</a>
+        <h1>Up next</h1>
+        <p class="muted">
+            Batches growing in the greenhouse. A batch goes on the POS {{ release_days }} days before it is ready; until then customers can pre-order from it.
+            A pre-order holds the seedlings straight away but becomes a sale only when the customer collects them and an admin approves.
+        </p>
+    </div>
+    <div class="head-actions"><a class="btn" href="{{ url_for('planting_list') }}">Planting records</a></div>
+</div>
+
+<section class="card">
+    <h2>Batches</h2>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr><th>Batch</th><th>Ready</th><th>On the POS</th><th class="num">Seedlings</th><th class="num">Pre-ordered</th><th class="num">Sold</th><th class="num">Available</th><th class="num">Price</th><th>Pre-order</th></tr>
+            </thead>
+            <tbody>
+            {% for b in batches %}
+                <tr id="batch-{{ b.id }}">
+                    <td><a href="{{ url_for('planting_detail', planting_id=b.id) }}">{{ b.label }}</a></td>
+                    <td>{{ b.actual_ready_on or b.ready_on }}<br>
+                        <small class="muted">{% if b.stage == 'ready' %}ready{% elif b.stage == 'due' %}due now{% else %}in {{ b.days }} day{{ 's' if b.days != 1 }}{% endif %}</small></td>
+                    <td>{% if b.released %}<span class="ok">Yes</span>{% else %}from {{ b.goes_on_pos }}{% endif %}</td>
+                    <td class="num">{{ '{:,}'.format(b.seedlings) }}</td>
+                    <td class="num">{{ b.pending }}</td>
+                    <td class="num">{{ b.sold }}</td>
+                    <td class="num"><strong>{{ b.available }}</strong></td>
+                    <td class="num">{{ b.price|money }}</td>
+                    <td>
+                        {% if b.available > 0 and can('sell') %}
+                        <details class="inline-details">
+                            <summary class="btn small">Pre-order</summary>
+                            <form method="post" action="{{ url_for('preorder_create', planting_id=b.id) }}" class="preorder-form">
+                                {{ csrf_field() }}
+                                <label>Customer name <input name="customer_name" required maxlength="100"></label>
+                                <label>Phone <input name="customer_phone" maxlength="40"></label>
+                                <label>Quantity (up to {{ b.available }}) <input name="qty" type="number" min="1" max="{{ b.available }}" value="1" required></label>
+                                <button class="btn success wide">Record pre-order</button>
+                            </form>
+                        </details>
+                        {% endif %}
+                    </td>
+                </tr>
+            {% else %}
+                <tr><td colspan="9" class="muted center">Nothing is growing with seedlings still free. <a href="{{ url_for('planting_new') }}">Record a planting</a>.</td></tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+
+<section class="card block" id="preorders">
+    <h2>Pre-orders</h2>
+    <div class="table-wrap">
+        <table>
+            <thead><tr><th>Customer</th><th>Batch</th><th class="num">Qty</th><th class="num">Total</th><th>Placed</th><th>Status</th><th></th></tr></thead>
+            <tbody>
+            {% for o in orders %}
+                <tr id="preorder-{{ o.id }}">
+                    <td>{{ o.customer_name }}{% if o.customer_phone %}<br><small class="muted">{{ o.customer_phone }}</small>{% endif %}</td>
+                    <td><a href="{{ url_for('planting_detail', planting_id=o.planting_id) }}">{{ o.label }}</a></td>
+                    <td class="num">{{ o.qty }}</td>
+                    <td class="num">{{ o.total|money }}</td>
+                    <td>{{ o.created_at }}<br><small class="muted">by {{ o.created_by }}</small></td>
+                    <td>
+                        {% if o.status == 'pending' %}<strong class="gold">Waiting for collection</strong>
+                        {% elif o.status == 'collected' %}<span class="ok">Collected</span><br><small class="muted">approved by {{ o.approved_by }}</small>{% if o.invoice_id %} <a href="{{ url_for('invoice', invoice_id=o.invoice_id) }}">invoice</a>{% endif %}
+                        {% else %}<span class="muted">Cancelled</span>{% endif %}
+                    </td>
+                    <td class="num actions">
+                        {% if o.status == 'pending' and can('sell') %}
+                            {% if user.role == 'admin' or (o.ask and o.ask.status == 'approved') %}
+                            <details class="inline-details">
+                                <summary class="btn success small">{{ 'Approve & collect' if user.role == 'admin' else 'Collect' }}</summary>
+                                <form method="post" action="{{ url_for('preorder_collect', po_id=o.id) }}" class="preorder-form"
+                                      data-confirm="Record this pre-order as a sale of {{ o.total|money }}?{% if user.role == 'admin' %}&#10;&#10;This is your approval of the collection.{% endif %}">
+                                    {{ csrf_field() }}
+                                    {% if o.ask %}<p class="muted">Approved by an admin, for one use{% if o.ask.until %} until {{ o.ask.until }}{% endif %}.</p>{% endif %}
+                                    <label>Payment
+                                        <select name="payment_status">{% for s in statuses %}<option>{{ s }}</option>{% endfor %}</select>
+                                    </label>
+                                    <label>Amount paid (for a partial payment) <input name="amount_paid" inputmode="decimal"></label>
+                                    <button class="btn success wide">Record as a sale</button>
+                                </form>
+                            </details>
+                            {% elif o.ask %}
+                            <span class="gold">Waiting for an admin</span>
+                            {% else %}
+                            <details class="inline-details">
+                                <summary class="btn small">Ask an admin</summary>
+                                <form method="post" action="{{ url_for('preorder_request', po_id=o.id) }}" class="preorder-form">
+                                    {{ csrf_field() }}
+                                    <label>Note (optional) <input name="reason" maxlength="200"></label>
+                                    <button class="btn wide">Request approval to collect</button>
+                                </form>
+                            </details>
+                            {% endif %}
+                            <form method="post" action="{{ url_for('preorder_cancel', po_id=o.id) }}" data-confirm="Cancel this pre-order? The seedlings become free again.">
+                                {{ csrf_field() }}
+                                <button class="btn danger small">Cancel</button>
+                            </form>
+                        {% endif %}
+                    </td>
+                </tr>
+            {% else %}
+                <tr><td colspan="7" class="muted center">No pre-orders yet.</td></tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endblock %}

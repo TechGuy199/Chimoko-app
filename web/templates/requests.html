@@ -22,6 +22,7 @@
                         {% if r.action == delete_invoice %}
                             {% if r.status == 'used' %}<a href="{{ url_for('deleted_invoices') }}">Invoice {{ r.item_name }}</a>
                             {% else %}<a href="{{ url_for('invoice', invoice_id=r.item_id) }}">Invoice {{ r.item_name }}</a>{% endif %}
+                        {% elif r.action == 'collect_preorder' %}<a href="{{ url_for('up_next') }}#preorders">{{ r.item_name }}</a>
                         {% else %}<a href="{{ url_for('item', item_id=r.item_id) }}">{{ r.item_name }}</a>{% endif %}
                     </td>
                     <td class="wrap">{{ r.reason or '—' }}</td>

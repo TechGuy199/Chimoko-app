@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block title %}Record a Planting — {% endblock %}
+{% block content %}
+<div class="page-head">
+    <div>
+        <a class="back" href="{{ url_for('planting_list') }}">&larr; Planting records</a>
+        <h1>Record a Planting</h1>
+    </div>
+</div>
+
+<section class="card block narrow-form">
+    <form method="post" action="{{ url_for('planting_create') }}" id="planting-form" data-currency="{{ user.currency }}" data-release="{{ release_days }}"
+          data-items="{{ info|tojson|forceescape }}">
+        {{ csrf_field() }}
+        <label>Seed from inventory
+            <select name="item_id" id="planting-item">
+                <option value="">Not from inventory (record only)</option>
+                {% for i in seed_items %}
+                <option value="{{ i.id }}" {{ 'selected' if chosen == i.id|string }} {{ 'disabled' if not i.allowed }}>
+                    {{ i.name }} ({{ i.item_code }}) &mdash; {{ i.quantity }} pack{{ 's' if i.quantity != 1 }}{% if not i.allowed %} &middot; needs admin approval{% endif %}
+                </option>
+                {% endfor %}
+            </select>
+        </label>
+        <p class="muted" id="stock-note"></p>
+
+        <label>Seeds being planted
+            <input name="seeds_planted" id="planting-seeds" type="number" min="1" step="1" inputmode="numeric" required>
+        </label>
+        <p class="seedling-summary" id="packs-note" aria-live="polite"></p>
+
+        <label id="size-row" hidden>Seeds per pack (not recorded yet)
+            <input name="seeds_per_pack" id="planting-size" type="number" min="1" step="1" inputmode="numeric">
+        </label>
+
+        <label>Name for the seedlings <input name="name" id="planting-name" maxlength="100" placeholder="e.g. Tomato seedlings"></label>
+        <div id="manual-row">
+            <label>Department
+                <select name="department">
+                    {% for d in departments %}<option {{ 'selected' if d == 'Greenhouse' }}>{{ d }}</option>{% endfor %}
+                </select>
+            </label>
+        </div>
+
+        <div class="grid">
+            <label>Planted on <input name="planted_on" id="planting-planted" type="date" value="{{ today }}"></label>
+            <label>Expected ready on <input name="ready_on" id="planting-ready" type="date" required></label>
+            <label>Expected mortality (%) <input name="mortality_pct" id="planting-mortality" type="number" min="0" max="99.99" step="any" inputmode="decimal" required placeholder="e.g. 15"></label>
+            <label>Cost of one seed ({{ user.currency|trim }}) <input name="seed_cost" id="planting-cost" type="number" min="0" step="any" inputmode="decimal"></label>
+            <label>Selling price per seedling <input name="price" id="planting-price" type="number" min="0" step="0.01" inputmode="decimal" placeholder="blank = cost to raise, rounded up"></label>
+            <label>Batch number <input name="batch_no" maxlength="40"></label>
+        </div>
+        <label>Notes <input name="notes" maxlength="300"></label>
+        <p class="seedling-summary" id="planting-summary" aria-live="polite"></p>
+        <div class="toolbar"><button class="btn success">Record planting</button><a class="btn" href="{{ url_for('planting_list') }}">Cancel</a></div>
+    </form>
+</section>
+{% endblock %}
+{% block scripts %}<script src="{{ asset('planting.js') }}"></script>{% endblock %}

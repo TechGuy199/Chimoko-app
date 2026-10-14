@@ -9,14 +9,29 @@
     <div class="stat"><span>Expenditure (paid for purchases)</span><strong class="warn">{{ stats.expenditure|money }}</strong><small>Owed to suppliers: {{ stats.payable|money }}</small></div>
 </div>
 
-{% if user.role == 'admin' %}
 <div class="dept-tiles home-tiles">
+    <a class="dept-tile" href="{{ url_for('up_next') }}" id="up-next-tile">
+        <strong>Up next</strong>
+        <small>
+            {% if up_next.batches %}
+            {{ up_next.batches }} batch{{ 'es' if up_next.batches != 1 }} growing, the next ready {{ up_next.next.ready_on }}
+            {% else %}
+            No batch is growing beyond the week ahead
+            {% endif %}
+            {% if up_next.preorders %}&middot; {{ up_next.preorders }} pre-order{{ 's' if up_next.preorders != 1 }} waiting{% endif %}
+        </small>
+    </a>
+    <a class="dept-tile" href="{{ url_for('planting_list') }}">
+        <strong>Planting Records</strong>
+        <small>Seeds planted, ready dates and mortality</small>
+    </a>
+    {% if user.role == 'admin' %}
     <a class="dept-tile" href="{{ url_for('customers') }}">
         <strong>Customer Statements</strong>
         <small>Look up a customer by name or phone number</small>
     </a>
+    {% endif %}
 </div>
-{% endif %}
 
 <div class="split">
     <section class="card grow">
