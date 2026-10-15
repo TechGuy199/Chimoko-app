@@ -596,7 +596,7 @@ def pos():
     db, biz = get_db(), g.user["business_id"]
     release_plantings(db, biz)
     products = db.all(
-        "SELECT id, item_code, name, department, quantity, price FROM pos_products WHERE business_id=? AND quantity > 0 ORDER BY name",
+        "SELECT id, item_code, name, department, date_planted, quantity, price FROM pos_products WHERE business_id=? AND quantity > 0 ORDER BY name",
         (biz,),
     )
     units = db.one(

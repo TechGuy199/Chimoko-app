@@ -49,12 +49,14 @@
         </div>
         <div class="table-wrap">
             <table id="products">
-                <thead><tr><th>Code</th><th>Name</th><th>Dept</th><th class="num">Stock</th><th class="num">Price</th><th></th></tr></thead>
+                {# Planted is for whoever is at the till only (which batch is older); it is not printed on the invoice #}
+                <thead><tr><th>Code</th><th>Name</th><th>Planted</th><th>Dept</th><th class="num">Stock</th><th class="num">Price</th><th></th></tr></thead>
                 <tbody>
                 {% for p in products %}
                     <tr data-id="{{ p.id }}" data-code="{{ p.item_code }}" data-name="{{ p.name }}" data-dept="{{ p.department }}" data-stock="{{ p.quantity }}" data-price="{{ p.price }}">
                         <td>{{ p.item_code }}</td>
                         <td>{{ p.name }}</td>
+                        <td class="nowrap">{{ p.date_planted or '—' }}</td>
                         <td>{{ p.department }}</td>
                         <td class="num">{{ p.quantity }}</td>
                         <td class="num">{{ p.price|money }}</td>
@@ -81,7 +83,7 @@
                         </td>
                     </tr>
                 {% else %}
-                    <tr><td colspan="6" class="muted center">Nothing is listed for sale yet. Transfer stock to "Stock Listing" from the Inventory page.</td></tr>
+                    <tr><td colspan="7" class="muted center">Nothing is listed for sale yet. Transfer stock to "Stock Listing" from the Inventory page.</td></tr>
                 {% endfor %}
                 </tbody>
             </table>
