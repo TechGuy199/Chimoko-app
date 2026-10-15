@@ -119,8 +119,11 @@
         <p class="invoice-head">
             <strong><a href="{{ url_for('invoice', invoice_id=inv.id) }}">{{ inv.invoice_no }}</a></strong>
             <span class="muted">{{ inv.created_at }} &middot; served by {{ inv.created_by }}</span>
-            <span class="status">{{ inv.payment_status }}</span>
+            <span class="status {{ 'muted' if inv.payment_status == 'Cancelled' }}">{{ inv.payment_status }}</span>
         </p>
+        {% if inv.payment_status == 'Cancelled' %}
+        <p class="muted no-print">Cancelled by {{ inv.cancelled_by }} on {{ inv.cancelled_at }}. Reason: {{ inv.cancel_reason }}</p>
+        {% endif %}
         <div class="table-wrap">
             <table>
                 <thead><tr><th>Code</th><th>Item</th><th class="num">Qty</th><th class="num">Unit price</th><th class="num">Total</th></tr></thead>
@@ -134,6 +137,21 @@
                 </tbody>
             </table>
         </div>
+        {% if inv.payment_status != 'Cancelled' %}
+        <details class="inline-details no-print">
+            <summary class="btn danger small">Cancel this invoice</summary>
+            <form method="post" action="{{ url_for('cancel_invoice', invoice_id=inv.id) }}" class="preorder-form" autocomplete="off"
+                  data-confirm="Cancel invoice {{ inv.invoice_no }} ({{ inv.total|money }})?&#10;&#10;It stays on record but will owe nothing and no longer count toward sales.">
+                {{ csrf_field() }}
+                <input type="hidden" name="back" value="statement">
+                <label>Why is it being cancelled?
+                    <textarea name="reason" rows="2" maxlength="300" required placeholder="For example: customer changed their mind before collecting"></textarea>
+                </label>
+                <label class="check"><input type="checkbox" name="return_stock" value="1" checked> Put the items back into the POS stock</label>
+                <button class="btn danger wide">Cancel invoice</button>
+            </form>
+        </details>
+        {% endif %}
     </section>
     {% endfor %}
 </article>

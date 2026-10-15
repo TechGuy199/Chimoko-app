@@ -601,11 +601,11 @@ def pos():
     )
     units = db.one(
         """SELECT COALESCE(SUM(ii.qty), 0) AS n FROM invoice_items ii
-           JOIN invoices i ON i.id = ii.invoice_id WHERE i.business_id=? AND i.kind='SALE'""",
+           JOIN invoices i ON i.id = ii.invoice_id WHERE i.business_id=? AND i.kind='SALE' AND i.payment_status <> 'Cancelled'""",
         (biz,),
     )["n"]
     sales = db.one(
-        "SELECT COALESCE(SUM(amount_paid), 0) AS received, COALESCE(SUM(balance_due), 0) AS owed FROM invoices WHERE business_id=? AND kind='SALE'",
+        "SELECT COALESCE(SUM(amount_paid), 0) AS received, COALESCE(SUM(balance_due), 0) AS owed FROM invoices WHERE business_id=? AND kind='SALE' AND payment_status <> 'Cancelled'",
         (biz,),
     )
     spend = db.one(
@@ -1821,7 +1821,8 @@ def history_csv():
 def invoice(invoice_id):
     db, biz = get_db(), g.user["business_id"]
     inv = db.one(
-        """SELECT id, invoice_no, kind, customer_name, customer_phone, payment_status, total, amount_paid, balance_due, created_by, created_at, customer_id
+        """SELECT id, invoice_no, kind, customer_name, customer_phone, payment_status, total, amount_paid, balance_due, created_by, created_at, customer_id,
+                  cancelled_at, cancelled_by, cancel_reason
            FROM invoices WHERE id=? AND business_id=?""",
         (invoice_id, biz),
     )
@@ -1969,6 +1970,59 @@ def delete_invoice(invoice_id):
     return redirect(url_for("history"))
 
 
+@app.post("/invoices/<int:invoice_id>/cancel")
+@need("admin")
+def cancel_invoice(invoice_id):
+    """Cancels a sale without erasing it: it stays visible, with its original amounts, but owes nothing and is left
+    out of revenue, receivables and reports from here on. Admin only, always - no operator request/approval path.
+    """
+    db, biz = get_db(), g.user["business_id"]
+    inv = db.one(
+        "SELECT id, invoice_no, kind, customer_id, customer_name, payment_status, total, amount_paid FROM invoices WHERE id=? AND business_id=? AND kind='SALE'",
+        (invoice_id, biz),
+    )
+    if inv is None:
+        abort(404)
+    back = redirect(url_for("customer_statement", customer_id=inv["customer_id"]) if text("back") == "statement" and inv["customer_id"] else url_for("invoice", invoice_id=invoice_id))
+    if inv["payment_status"] == "Cancelled":
+        flash("That invoice has already been cancelled.", "ok")
+        return back
+
+    reason = " ".join(text("reason").split())[:300]
+    if len(reason) < 5:
+        flash("Say why the invoice is being cancelled (at least a few words). Nothing was changed.", "error")
+        return back
+
+    lines = db.all("SELECT item_code, qty FROM invoice_items WHERE invoice_id=? AND business_id=?", (invoice_id, biz))
+    try:
+        stock_note = ""
+        if request.form.get("return_stock"):
+            table = invoice_stock_table(inv["kind"])
+            missing = []
+            for line in lines:
+                back_in = db.execute(f"UPDATE {table} SET quantity = quantity + ? WHERE business_id=? AND item_code=?", (line["qty"], biz, line["item_code"])).rowcount
+                if back_in != 1:
+                    missing.append(line["item_code"])
+            stock_note = "Items returned to the POS." if not missing else f"Items returned to the POS, except {', '.join(missing)} (no longer listed)."
+        db.execute(
+            "UPDATE invoices SET payment_status='Cancelled', balance_due=0, cancelled_at=?, cancelled_by=?, cancel_reason=? WHERE id=? AND business_id=?",
+            (now().strftime("%Y-%m-%d %H:%M:%S"), g.user["username"], reason, invoice_id, biz),
+        )
+        notify(
+            db, "cancellation", f"Invoice {inv['invoice_no']} was cancelled",
+            f"{g.user['username']} cancelled invoice {inv['invoice_no']} ({inv['customer_name']}, {money(inv['total'])}). Reason: {reason}.",
+            url_for("invoice", invoice_id=invoice_id),
+        )
+        db.commit()
+    except DB_ERRORS:
+        db.rollback()
+        flash("The invoice could not be cancelled. Please try again.", "error")
+        return back
+
+    flash(f"Invoice {inv['invoice_no']} was cancelled. It stays on record but owes nothing and no longer counts toward sales. {stock_note}".strip(), "ok")
+    return back
+
+
 @app.get("/records/deleted-invoices")
 @need("admin")
 def deleted_invoices():
@@ -1988,9 +2042,12 @@ def deleted_invoices():
 @need("admin")
 def invoice_payment(invoice_id):
     db, biz = get_db(), g.user["business_id"]
-    inv = db.one("SELECT total, amount_paid FROM invoices WHERE id=? AND business_id=? AND kind='SALE'", (invoice_id, biz))
+    inv = db.one("SELECT total, amount_paid, payment_status FROM invoices WHERE id=? AND business_id=? AND kind='SALE'", (invoice_id, biz))
     if inv is None:
         abort(404)
+    if inv["payment_status"] == "Cancelled":
+        flash("This invoice is cancelled, so its payment cannot be changed.", "error")
+        return redirect(url_for("invoice", invoice_id=invoice_id))
     try:
         new_paid = update_payment(db, "sale", invoice_id, inv["total"], inv["amount_paid"])
     except ValueError:
@@ -2803,7 +2860,7 @@ def customers():
     db, biz = get_db(), g.user["business_id"]
     q = request.args.get("q", "").strip()
     sql = """SELECT c.id, c.name, c.phone, COUNT(i.id) AS invoices, COALESCE(SUM(i.total), 0) AS total, COALESCE(SUM(i.balance_due), 0) AS owed
-             FROM customers c LEFT JOIN invoices i ON i.customer_id = c.id AND i.kind='SALE'
+             FROM customers c LEFT JOIN invoices i ON i.customer_id = c.id AND i.kind='SALE' AND i.payment_status <> 'Cancelled'
              WHERE c.business_id=?"""
     params = [biz]
     if q:
@@ -2828,7 +2885,7 @@ def statement_data(db, customer_id):
     """Everything a customer statement shows, shared by the page and the PDF."""
     biz = g.user["business_id"]
     invoices = db.all(
-        """SELECT id, invoice_no, created_at, created_by, payment_status, total, amount_paid, balance_due
+        """SELECT id, invoice_no, created_at, created_by, payment_status, total, amount_paid, balance_due, cancelled_at, cancelled_by, cancel_reason
            FROM invoices WHERE customer_id=? AND business_id=? AND kind='SALE' ORDER BY created_at, id""",
         (customer_id, biz),
     )
@@ -2849,6 +2906,8 @@ def statement_data(db, customer_id):
     for inv in invoices:
         inv["lines"] = [line for line in lines if line["invoice_id"] == inv["id"]]
         inv["changes"] = [change for change in changes if change["ref_id"] == inv["id"]]
+        if inv["payment_status"] == "Cancelled":
+            continue  # kept on the statement for the record, but not counted as something they bought
         for line in inv["lines"]:
             p = products.setdefault((line["item_code"], line["item_name"]), {"code": line["item_code"], "name": line["item_name"], "qty": 0, "value": 0.0, "last": ""})
             p["qty"] += line["qty"]
@@ -2856,11 +2915,16 @@ def statement_data(db, customer_id):
             p["last"] = max(p["last"], inv["created_at"][:10])
 
     # The statement: every invoice as a charge and every payment as a credit, in date order with a running balance.
-    # Whatever was paid before the first logged change was paid at the time of sale.
+    # Whatever was paid before the first logged change was paid at the time of sale. A cancelled invoice still shows
+    # as a line, clearly marked, but charges and pays nothing - it no longer affects the running balance.
     entries = []
     for inv in invoices:
+        cancelled = inv["payment_status"] == "Cancelled"
         items = ", ".join(f"{line['qty']} x {line['item_name']}" for line in inv["lines"])
-        entries.append({"at": inv["created_at"], "order": 0, "what": f"Invoice {inv['invoice_no']}", "detail": items, "charge": inv["total"], "paid": 0.0, "invoice_id": inv["id"]})
+        what = f"Invoice {inv['invoice_no']} (cancelled)" if cancelled else f"Invoice {inv['invoice_no']}"
+        entries.append({"at": inv["created_at"], "order": 0, "what": what, "detail": items, "charge": 0.0 if cancelled else inv["total"], "paid": 0.0, "invoice_id": inv["id"]})
+        if cancelled:
+            continue
         at_sale = inv["changes"][0]["old_paid"] if inv["changes"] else inv["amount_paid"]
         if at_sale > 0:
             entries.append({"at": inv["created_at"], "order": 1, "what": "Payment at time of sale", "detail": inv["invoice_no"], "charge": 0.0, "paid": at_sale, "invoice_id": inv["id"]})
@@ -2878,9 +2942,10 @@ def statement_data(db, customer_id):
         balance = round(balance + entry["charge"] - entry["paid"], 2)
         entry["balance"] = balance
 
+    active = [inv for inv in invoices if inv["payment_status"] != "Cancelled"]
     summary = {
-        "invoices": len(invoices), "total": sum(inv["total"] for inv in invoices),
-        "paid": sum(inv["amount_paid"] for inv in invoices), "owed": sum(inv["balance_due"] for inv in invoices),
+        "invoices": len(active), "total": sum(inv["total"] for inv in active),
+        "paid": sum(inv["amount_paid"] for inv in active), "owed": sum(inv["balance_due"] for inv in active),
     }
     return {
         "invoices": invoices, "entries": entries, "summary": summary,
@@ -3118,7 +3183,7 @@ def find_duplicates(db, biz):
     people = db.all(
         """SELECT c.id, c.name, c.phone, c.name_key, c.phone_key, c.created_at,
                   COUNT(i.id) AS invoices, COALESCE(SUM(i.total), 0) AS total, COALESCE(SUM(i.balance_due), 0) AS owed
-           FROM customers c LEFT JOIN invoices i ON i.customer_id = c.id AND i.kind='SALE'
+           FROM customers c LEFT JOIN invoices i ON i.customer_id = c.id AND i.kind='SALE' AND i.payment_status <> 'Cancelled'
            WHERE c.business_id=? GROUP BY c.id, c.name, c.phone, c.name_key, c.phone_key, c.created_at ORDER BY c.id LIMIT ?""",
         (biz, DUPLICATE_SCAN_LIMIT),
     )
@@ -3889,7 +3954,7 @@ def gather_report(db, biz, start, end, dept=None):
     sale_sql = """SELECT ii.department, ii.item_code, ii.item_name, ii.qty, ii.unit_price, ii.line_total,
                          i.id AS invoice_id, i.invoice_no, i.kind, i.customer_name, i.created_at, i.total, i.amount_paid
                   FROM invoice_items ii JOIN invoices i ON i.id = ii.invoice_id
-                  WHERE ii.business_id=? AND i.created_at >= ? AND i.created_at < ?"""
+                  WHERE ii.business_id=? AND i.payment_status <> 'Cancelled' AND i.created_at >= ? AND i.created_at < ?"""
     buy_sql = """SELECT id, department, item_code, name, supplier_name, purchase_date, quantity, total_cost, amount_paid
                  FROM procurements WHERE business_id=? AND purchase_date >= ? AND purchase_date < ?"""
     params = [biz, low, high]
@@ -4803,15 +4868,17 @@ def with_figures(db, biz, rows):
     sold = {
         r["code"]: r["n"]
         for r in db.all(
-            "SELECT item_code AS code, SUM(qty) AS n FROM invoice_items WHERE business_id=? AND item_code LIKE ? GROUP BY item_code",
+            """SELECT ii.item_code AS code, SUM(ii.qty) AS n FROM invoice_items ii JOIN invoices i ON i.id = ii.invoice_id
+               WHERE ii.business_id=? AND ii.item_code LIKE ? AND i.payment_status <> 'Cancelled' GROUP BY ii.item_code""",
             (biz, "%" + PLANTING_MARK + "%"),
         )
     }
     held = {}
-    # A collected pre-order counts only while its invoice exists: deleting that invoice puts the seedlings back
+    # A collected pre-order counts only while its invoice exists and is not cancelled: deleting or cancelling that
+    # invoice puts the seedlings back
     for r in db.all(
         """SELECT planting_id, status, SUM(qty) AS n FROM preorders po WHERE business_id=?
-           AND (status='pending' OR (status='collected' AND EXISTS (SELECT 1 FROM invoices i WHERE i.id = po.invoice_id)))
+           AND (status='pending' OR (status='collected' AND EXISTS (SELECT 1 FROM invoices i WHERE i.id = po.invoice_id AND i.payment_status <> 'Cancelled')))
            GROUP BY planting_id, status""",
         (biz,),
     ):

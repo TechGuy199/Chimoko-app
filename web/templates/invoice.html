@@ -54,6 +54,9 @@
         </tbody>
     </table>
 
+    {% if inv.payment_status == 'Cancelled' %}
+    <p class="flash notice">This invoice was cancelled by {{ inv.cancelled_by }} on {{ inv.cancelled_at }}. Reason: {{ inv.cancel_reason }}</p>
+    {% endif %}
     <dl class="totals">
         <dt>Payment status</dt><dd>{{ inv.payment_status }}</dd>
         <dt>Grand total</dt><dd>{{ inv.total|money }}</dd>
@@ -70,6 +73,26 @@
     {% include "_payment.html" %}
     {% endwith %}
 </div>
+{% endif %}
+
+{% if user.role == 'admin' and inv.kind == 'SALE' %}
+<section class="card block narrow-form no-print" id="cancel-invoice">
+    <h2>Cancel this invoice</h2>
+    {% if inv.payment_status == 'Cancelled' %}
+    <p class="muted">Cancelled by {{ inv.cancelled_by }} on {{ inv.cancelled_at }}. Reason: {{ inv.cancel_reason }}</p>
+    {% else %}
+    <p class="muted">The invoice stays here and on the customer's statement, clearly marked, but owes nothing and no longer counts toward sales. Unlike deleting, nothing is erased.</p>
+    <form method="post" action="{{ url_for('cancel_invoice', invoice_id=inv.id) }}" autocomplete="off"
+          data-confirm="Cancel invoice {{ inv.invoice_no }} ({{ inv.total|money }})?&#10;&#10;It stays on record but will owe nothing and no longer count toward sales.">
+        {{ csrf_field() }}
+        <label>Why is it being cancelled?
+            <textarea name="reason" rows="2" maxlength="300" required placeholder="For example: customer changed their mind before collecting"></textarea>
+        </label>
+        <label class="check"><input type="checkbox" name="return_stock" value="1" checked> Put the items back into {{ stock_to }} stock</label>
+        <div class="toolbar"><button class="btn danger">Cancel invoice</button></div>
+    </form>
+    {% endif %}
+</section>
 {% endif %}
 
 <section class="card block danger-zone narrow-form no-print" id="delete-invoice">
