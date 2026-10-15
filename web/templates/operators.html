@@ -1,5 +1,46 @@
 {% extends "base.html" %}
 {% block title %}Operators &amp; Admins — {% endblock %}
+{# The same account form is used on the side of the page and in the Edit overlay (dialog.js). In an overlay the
+   Cancel button closes it; on the side it is a link back to the list. #}
+{% macro admin_form(acct, in_dialog) %}
+<form method="post" action="{{ url_for('save_admin') }}">
+    {{ csrf_field() }}
+    {% if acct %}<input type="hidden" name="id" value="{{ acct.id }}">{% endif %}
+    <label>Username <input name="username" value="{{ acct.username if acct }}" required></label>
+    <label>{{ 'Reset password (blank = keep current)' if acct else 'Password (8 characters or more)' }}
+        <input name="password" type="password" minlength="8" autocomplete="new-password" {{ 'required' if not acct }}>
+    </label>
+    {% if acct %}<p class="muted hint">Use this if {{ acct.username }} forgot their password. They are not told the old one; give them the new one directly.</p>
+    {% else %}<p class="muted hint">A new admin has every permission: sales, purchases, transfers, deleting items, and everything under Settings.</p>{% endif %}
+    <button class="btn success wide">{{ 'Save Changes' if acct else 'Create Admin' }}</button>
+    {% if acct %}
+        {% if in_dialog %}<p class="center"><button type="button" class="btn ghost" data-modal-close>Cancel</button></p>
+        {% else %}<p class="center"><a href="{{ url_for('operators') }}">Cancel</a></p>{% endif %}
+    {% endif %}
+</form>
+{% endmacro %}
+
+{% macro operator_form(op, in_dialog) %}
+<form method="post" action="{{ url_for('save_operator') }}">
+    {{ csrf_field() }}
+    {% if op %}<input type="hidden" name="id" value="{{ op.id }}">{% endif %}
+    <label>Username <input name="username" value="{{ op.username if op }}" required></label>
+    <label>{{ 'Reset password (blank = keep current)' if op else 'Password (8 characters or more)' }}
+        <input name="password" type="password" minlength="8" autocomplete="new-password" {{ 'required' if not op }}>
+    </label>
+    {% if op %}<p class="muted hint">Use this if {{ op.username }} forgot their password. They are not told the old one; give them the new one directly.</p>{% endif %}
+    <label class="check"><input type="checkbox" name="can_sell" {{ 'checked' if not op or op.can_sell }}> Can process sales (POS)</label>
+    <label class="check"><input type="checkbox" name="can_procure" {{ 'checked' if not op or op.can_procure }}> Can log purchases / edit inventory</label>
+    <label class="check"><input type="checkbox" name="can_transfer" {{ 'checked' if not op or op.can_transfer }}> Can transfer stock &amp; farm use</label>
+    <label class="check"><input type="checkbox" name="can_delete" {{ 'checked' if op and op.can_delete }}> Can delete inventory items</label>
+    <button class="btn success wide">{{ 'Save Changes' if op else 'Create Operator' }}</button>
+    {% if op %}
+        {% if in_dialog %}<p class="center"><button type="button" class="btn ghost" data-modal-close>Cancel</button></p>
+        {% else %}<p class="center"><a href="{{ url_for('operators') }}">Cancel</a></p>{% endif %}
+    {% endif %}
+</form>
+{% endmacro %}
+
 {% block content %}
 <div class="split">
     <section class="card grow">
@@ -13,7 +54,7 @@
                     <tr>
                         <td>{{ a.username }}{% if a.id == user.id %} <small class="muted">(you)</small>{% endif %}</td>
                         <td class="num actions">
-                            <a class="btn small" href="{{ url_for('operators', edit_admin=a.id) }}">Edit</a>
+                            <a class="btn small" href="{{ url_for('operators', edit_admin=a.id) }}" data-modal-open="admin-edit-{{ a.id }}">Edit</a>
                             {% if a.id != user.id and admin_count > 1 %}
                             <form method="post" action="{{ url_for('delete_admin', admin_id=a.id) }}" onsubmit="return confirm('Permanently delete this admin account?');">
                                 {{ csrf_field() }}
@@ -33,18 +74,7 @@
 
     <section class="card side">
         <h2>{{ 'Edit ' ~ editing_admin.username if editing_admin else 'Create New Admin' }}</h2>
-        <form method="post" action="{{ url_for('save_admin') }}">
-            {{ csrf_field() }}
-            {% if editing_admin %}<input type="hidden" name="id" value="{{ editing_admin.id }}">{% endif %}
-            <label>Username <input name="username" value="{{ editing_admin.username if editing_admin }}" required></label>
-            <label>{{ 'Reset password (blank = keep current)' if editing_admin else 'Password (8 characters or more)' }}
-                <input name="password" type="password" minlength="8" autocomplete="new-password" {{ 'required' if not editing_admin }}>
-            </label>
-            {% if editing_admin %}<p class="muted hint">Use this if {{ editing_admin.username }} forgot their password. They are not told the old one; give them the new one directly.</p>
-            {% else %}<p class="muted hint">A new admin has every permission: sales, purchases, transfers, deleting items, and everything under Settings.</p>{% endif %}
-            <button class="btn success wide">{{ 'Save Changes' if editing_admin else 'Create Admin' }}</button>
-            {% if editing_admin %}<p class="center"><a href="{{ url_for('operators') }}">Cancel</a></p>{% endif %}
-        </form>
+        {{ admin_form(editing_admin, false) }}
     </section>
 </div>
 
@@ -63,7 +93,7 @@
                         <td>{{ 'Yes' if op.can_transfer else 'No' }}</td>
                         <td>{{ 'Yes' if op.can_delete else 'No' }}</td>
                         <td class="num actions">
-                            <a class="btn small" href="{{ url_for('operators', edit=op.id) }}">Edit</a>
+                            <a class="btn small" href="{{ url_for('operators', edit=op.id) }}" data-modal-open="op-edit-{{ op.id }}">Edit</a>
                             <form method="post" action="{{ url_for('delete_operator', op_id=op.id) }}" onsubmit="return confirm('Permanently delete this operator account?');">
                                 {{ csrf_field() }}
                                 <button class="btn danger small">Delete</button>
@@ -80,21 +110,25 @@
 
     <section class="card side">
         <h2>{{ 'Edit ' ~ editing.username if editing else 'Create New Operator' }}</h2>
-        <form method="post" action="{{ url_for('save_operator') }}">
-            {{ csrf_field() }}
-            {% if editing %}<input type="hidden" name="id" value="{{ editing.id }}">{% endif %}
-            <label>Username <input name="username" value="{{ editing.username if editing }}" required></label>
-            <label>{{ 'Reset password (blank = keep current)' if editing else 'Password (8 characters or more)' }}
-                <input name="password" type="password" minlength="8" autocomplete="new-password" {{ 'required' if not editing }}>
-            </label>
-            {% if editing %}<p class="muted hint">Use this if {{ editing.username }} forgot their password. They are not told the old one; give them the new one directly.</p>{% endif %}
-            <label class="check"><input type="checkbox" name="can_sell" {{ 'checked' if not editing or editing.can_sell }}> Can process sales (POS)</label>
-            <label class="check"><input type="checkbox" name="can_procure" {{ 'checked' if not editing or editing.can_procure }}> Can log purchases / edit inventory</label>
-            <label class="check"><input type="checkbox" name="can_transfer" {{ 'checked' if not editing or editing.can_transfer }}> Can transfer stock &amp; farm use</label>
-            <label class="check"><input type="checkbox" name="can_delete" {{ 'checked' if editing and editing.can_delete }}> Can delete inventory items</label>
-            <button class="btn success wide">{{ 'Save Changes' if editing else 'Create Operator' }}</button>
-            {% if editing %}<p class="center"><a href="{{ url_for('operators') }}">Cancel</a></p>{% endif %}
-        </form>
+        {{ operator_form(editing, false) }}
     </section>
 </div>
+
+{# The Edit overlays sit here, outside the tables, so they are not squeezed or styled by a table cell #}
+{% for a in admins %}
+<dialog class="modal" id="admin-edit-{{ a.id }}" aria-label="Edit {{ a.username }}">
+    <div class="modal-body">
+        <h2>Edit {{ a.username }}</h2>
+        {{ admin_form(a, true) }}
+    </div>
+</dialog>
+{% endfor %}
+{% for op in operators %}
+<dialog class="modal" id="op-edit-{{ op.id }}" aria-label="Edit {{ op.username }}">
+    <div class="modal-body">
+        <h2>Edit {{ op.username }}</h2>
+        {{ operator_form(op, true) }}
+    </div>
+</dialog>
+{% endfor %}
 {% endblock %}

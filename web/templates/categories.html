@@ -55,22 +55,26 @@
         </a>
         <p class="tile-links"><a href="{{ url_for('inventory_analysis', category=t.name) }}">Analysis</a></p>
         {% if user.role == 'admin' and t.name != 'General' %}
-        <details class="edit-tile">
-            <summary>Rename or delete</summary>
-            <form method="post" action="{{ url_for('rename_category', category_id=t.id) }}">
-                {{ csrf_field() }}
-                <input name="category_name" value="{{ t.name }}" maxlength="60" aria-label="New name for {{ t.name }}" required>
-                <button class="btn small primary">Rename</button>
-            </form>
-            {% if not t['items'] %}
-            <form method="post" action="{{ url_for('delete_category', category_id=t.id) }}" data-confirm="Delete the category {{ t.name }}?">
-                {{ csrf_field() }}
-                <button class="btn small danger">Delete</button>
-            </form>
-            {% else %}
-            <small class="muted">To delete it, first move its {{ t['items'] }} item(s) to another category.</small>
-            {% endif %}
-        </details>
+        <p class="tile-actions"><button type="button" class="btn small" data-modal-open="cat-edit-{{ t.id }}">Rename or delete</button></p>
+        <dialog class="modal" id="cat-edit-{{ t.id }}" aria-labelledby="cat-edit-title-{{ t.id }}">
+            <div class="modal-body">
+                <h2 id="cat-edit-title-{{ t.id }}">Edit {{ t.name }}</h2>
+                <form method="post" action="{{ url_for('rename_category', category_id=t.id) }}" class="toolbar">
+                    {{ csrf_field() }}
+                    <input name="category_name" value="{{ t.name }}" maxlength="60" aria-label="New name for {{ t.name }}" required>
+                    <button class="btn primary">Rename</button>
+                </form>
+                {% if not t['items'] %}
+                <form method="post" action="{{ url_for('delete_category', category_id=t.id) }}" data-confirm="Delete the category {{ t.name }}?">
+                    {{ csrf_field() }}
+                    <button class="btn danger">Delete category</button>
+                </form>
+                {% else %}
+                <p class="muted">To delete it, first move its {{ t['items'] }} item(s) to another category.</p>
+                {% endif %}
+                <p class="center"><button type="button" class="btn ghost" data-modal-close>Cancel</button></p>
+            </div>
+        </dialog>
         {% endif %}
     </div>
     {% endfor %}

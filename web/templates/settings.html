@@ -30,6 +30,7 @@
                     <td>{{ d.name }}</td>
                     <td class="num">
                         {% if d.name != 'General' %}
+                        <button type="button" class="btn small" data-modal-open="dept-edit-{{ d.id }}">Rename</button>
                         <form method="post" action="{{ url_for('delete_department', dept_id=d.id) }}" onsubmit="return confirm('Delete this department? Its items move to General.');">
                             {{ csrf_field() }}
                             <button class="btn danger small">Delete</button>
@@ -40,6 +41,20 @@
             {% endfor %}
             </tbody>
         </table>
+        {% for d in departments if d.name != 'General' %}
+        <dialog class="modal" id="dept-edit-{{ d.id }}" aria-labelledby="dept-edit-title-{{ d.id }}">
+            <div class="modal-body">
+                <h2 id="dept-edit-title-{{ d.id }}">Rename {{ d.name }}</h2>
+                <form method="post" action="{{ url_for('rename_department', dept_id=d.id) }}" class="toolbar">
+                    {{ csrf_field() }}
+                    <input name="name" value="{{ d.name }}" maxlength="60" aria-label="New name for {{ d.name }}" required>
+                    <button class="btn primary">Save name</button>
+                </form>
+                <p class="muted">Its items, purchases, listings and past sales are renamed with it.</p>
+                <p class="center"><button type="button" class="btn ghost" data-modal-close>Cancel</button></p>
+            </div>
+        </dialog>
+        {% endfor %}
 
         <form id="merge-departments-form" method="post" action="{{ url_for('merge_departments') }}" class="merge-form" data-merge data-noun="department" data-plural="departments">
             {{ csrf_field() }}

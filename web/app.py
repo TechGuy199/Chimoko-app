@@ -5887,6 +5887,36 @@ def delete_department(dept_id):
     return redirect(url_for("settings"))
 
 
+@app.post("/settings/departments/<int:dept_id>/rename")
+@need("admin")
+def rename_department(dept_id):
+    db, biz = get_db(), g.user["business_id"]
+    row = db.one("SELECT id, name FROM departments WHERE id=? AND business_id=?", (dept_id, biz))
+    if row is None:
+        abort(404)
+    new = clean_name(text("name"))
+    clash = next((n for n in department_names(db, biz) if norm(n) == norm(new) and n != row["name"]), None)
+    if not new:
+        flash("Type the new name.", "error")
+    elif row["name"] == "General":
+        flash("The General department cannot be renamed.", "error")
+    elif clash:
+        flash(f"There is already a department called '{clash}'.", "error")
+    else:
+        # Items, purchases, POS listings, past sales and plantings all carry the department by name, so all of them follow
+        try:
+            db.execute("UPDATE departments SET name=? WHERE id=? AND business_id=?", (new, dept_id, biz))
+            for table in ("products", "pos_products", "procurements", "invoice_items", "plantings"):
+                retag(db, table, biz, row["name"], new, column="department")
+            db.commit()
+        except DB_ERRORS:
+            db.rollback()
+            flash("The department could not be renamed. Please try again.", "error")
+        else:
+            flash(f"'{row['name']}' is now '{new}'. Its items and past records moved with it.", "ok")
+    return redirect(url_for("settings"))
+
+
 @app.post("/settings/departments/merge")
 @need("admin")
 def merge_departments():

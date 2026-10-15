@@ -547,10 +547,18 @@ table.rules input { margin-top: 0; max-width: 140px; }
 .filing input[readonly] { opacity: 0.7; cursor: not-allowed; }
 .cat-manage .tile-link { display: block; color: inherit; }
 .cat-manage .tile-links { margin: 8px 0 0; font-size: 12px; }
-.edit-tile { margin-top: 8px; font-size: 12px; }
-.edit-tile summary { cursor: pointer; color: var(--text-muted); }
-.edit-tile form { margin-top: 8px; display: flex; gap: 6px; }
-.edit-tile input { margin-top: 0; }
+.tile-actions { margin: 8px 0 0; }
+
+/* Overlay editing (dialog.js): a small edit opens on top of the current page instead of a new one */
+dialog.modal { width: min(460px, calc(100vw - 32px)); max-height: calc(100vh - 32px); padding: 0; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); background: var(--panel-bg); color: var(--text); box-shadow: 0 18px 50px var(--shadow); }
+dialog.modal::backdrop { background: rgba(0, 0, 0, 0.45); }
+.modal-body { padding: 20px 22px; overflow-x: hidden; overflow-y: auto; max-height: calc(100vh - 32px); }
+.modal-body .toolbar { flex-wrap: wrap; }
+.modal-body .toolbar input, .modal-body .toolbar select { flex: 1 1 180px; min-width: 0; width: 100%; }
+.modal-body .toolbar .btn { flex: 0 0 auto; }
+.modal-body h2 { margin: 0 0 12px; }
+.modal-body form + form { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); }
+.modal-body .hint { font-size: 12px; }
 .cat-manage { position: relative; }
 .merge-tick { position: absolute; top: 10px; right: 10px; display: block; margin: 0; cursor: pointer; }
 .merge-tick input { width: 18px; height: 18px; }

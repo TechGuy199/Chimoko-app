@@ -133,6 +133,7 @@
 {# In-place navigation (nav.js) swaps this page for the next one without a full reload; it re-runs only the
    scripts inside #page-scripts on every page change, so it is loaded once, here, outside that container. #}
 <script src="{{ asset('nav.js') }}"></script>
+<script src="{{ asset('dialog.js') }}"></script>
 <div id="page-scripts">{% block scripts %}{% endblock %}</div>
 <script>
     // Lets the browser install this as an app (Windows, Android, desktop Chrome/Edge). Safe to skip silently
