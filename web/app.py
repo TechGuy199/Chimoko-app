@@ -266,6 +266,14 @@ def text(key):
     return request.form.get(key, "").strip()
 
 
+def checked(key, default=True):
+    """Reads a checkbox sent as a hidden '0' followed by the box itself sending '1' when ticked, so the box's own
+    value always wins over the hidden one, and a field missing entirely (an older client, or a GET) keeps default.
+    """
+    ticks = request.form.getlist(key)
+    return ticks[-1] != "0" if ticks else default
+
+
 def number(key, kind=float, default=None):
     """Reads a numeric form field. Raises ValueError when it is missing (and no default is given) or not a number."""
     raw = text(key).replace(",", "")
@@ -4632,7 +4640,7 @@ def upload_too_large(error):
 # become a sale when the customer collects them and an admin has approved it.
 RELEASE_DAYS = 7
 PLANTING_MARK = "-SDL-P"
-PLANTING_STAGES = {"growing": "Growing", "due": "Due", "ready": "Ready"}
+PLANTING_STAGES = {"growing": "Growing", "due": "Due", "ready": "Ready", "record": "Historical record"}
 
 
 def today_str():
@@ -4661,6 +4669,9 @@ def planting_label(p):
 
 
 def on_pos_now(p, today):
+    # A historical record is never listed, however old or "ready" its dates say it is - it is not really there
+    if not p["still_in_greenhouse"]:
+        return False
     return bool(p["actual_ready_on"]) or (p["ready_on"] or today) <= add_days(today, RELEASE_DAYS)
 
 
@@ -4693,10 +4704,15 @@ def with_figures(db, biz, rows):
         pending = int(held.get((p["id"], "pending"), 0))
         collected = int(held.get((p["id"], "collected"), 0))
         ready_on = p["ready_on"] or today
-        stage = "ready" if p["actual_ready_on"] else ("due" if ready_on <= today else "growing")
+        if not p["still_in_greenhouse"]:
+            stage = "record"
+        else:
+            stage = "ready" if p["actual_ready_on"] else ("due" if ready_on <= today else "growing")
         days = (datetime.date.fromisoformat(ready_on) - datetime.date.fromisoformat(today)).days
+        # A historical record cannot be sold or pre-ordered, whatever its seedling count says
+        available = max(0, p["seedlings"] - s - pending) if p["still_in_greenhouse"] else 0
         out.append(dict(
-            p, sold=s, pending=pending, collected=collected, direct=max(0, s - collected), available=max(0, p["seedlings"] - s - pending),
+            p, sold=s, pending=pending, collected=collected, direct=max(0, s - collected), available=available,
             stage=stage, stage_label=PLANTING_STAGES[stage], days=days, on_pos=on_pos_now(p, today), label=planting_label(p),
             goes_on_pos=add_days(ready_on, -RELEASE_DAYS),
         ))
@@ -4740,7 +4756,7 @@ def release_plantings(db, biz):
 
 def up_next_summary(db, biz):
     """For the POS tile: batches still growing that are not on the POS yet, and pre-orders waiting for collection."""
-    rows = with_figures(db, biz, db.all("SELECT * FROM plantings WHERE business_id=? AND released=0 ORDER BY ready_on, id", (biz,)))
+    rows = with_figures(db, biz, db.all("SELECT * FROM plantings WHERE business_id=? AND released=0 AND still_in_greenhouse=1 ORDER BY ready_on, id", (biz,)))
     waiting = db.one("SELECT COUNT(*) AS n, COALESCE(SUM(qty), 0) AS qty FROM preorders WHERE business_id=? AND status='pending'", (biz,))
     return {"batches": len(rows), "next": rows[0] if rows else None, "preorders": waiting["n"], "preorder_qty": waiting["qty"]}
 
@@ -4750,12 +4766,13 @@ def insert_planting(db, biz, d):
     planting_id = db.insert(
         """INSERT INTO plantings (business_id, seed_item_id, seed_code, seed_name, name, department, batch_no, source, seeds_planted, packs_used, loose_delta,
                                   seeds_per_pack, mortality_pct, seedlings, seed_unit_cost, cost_per_seedling, price, planted_on, ready_on, actual_ready_on,
-                                  notes, created_by, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                  still_in_greenhouse, notes, created_by, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             biz, d.get("seed_item_id"), d["seed_code"], d["seed_name"], d["name"], d["department"], d["batch_no"], d["source"], d["seeds"],
             d.get("packs", 0), d.get("loose_delta", 0), d.get("seeds_per_pack"), d["mortality"], d["seedlings"], d["seed_cost"], d["cost_per_seedling"],
-            d["price"], d["planted_on"], d["ready_on"], d.get("actual_ready_on"), d.get("notes", ""), g.user["username"], now().strftime("%Y-%m-%d %H:%M:%S"),
+            d["price"], d["planted_on"], d["ready_on"], d.get("actual_ready_on"), 1 if d.get("still_in_greenhouse", True) else 0,
+            d.get("notes", ""), g.user["username"], now().strftime("%Y-%m-%d %H:%M:%S"),
         ),
     )
     db.execute("UPDATE plantings SET pos_code=? WHERE id=?", (f"{d['seed_code']}{PLANTING_MARK}{planting_id}", planting_id))
@@ -4773,11 +4790,16 @@ def planting_list():
     release_plantings(db, biz)
     rows = with_figures(db, biz, db.all("SELECT * FROM plantings WHERE business_id=? ORDER BY ready_on DESC, id DESC LIMIT 500", (biz,)))
     show = request.args.get("show", "all")
-    counts = {"all": len(rows), "growing": sum(1 for r in rows if r["stage"] != "ready"), "ready": sum(1 for r in rows if r["stage"] == "ready")}
+    counts = {
+        "all": len(rows), "growing": sum(1 for r in rows if r["stage"] in ("growing", "due")), "ready": sum(1 for r in rows if r["stage"] == "ready"),
+        "records": sum(1 for r in rows if r["stage"] == "record"),
+    }
     if show == "growing":
-        rows = [r for r in rows if r["stage"] != "ready"]
+        rows = [r for r in rows if r["stage"] in ("growing", "due")]
     elif show == "ready":
         rows = [r for r in rows if r["stage"] == "ready"]
+    elif show == "records":
+        rows = [r for r in rows if r["stage"] == "record"]
     else:
         show = "all"
     return render_template("plantings.html", rows=rows, show=show, counts=counts)
@@ -4925,6 +4947,7 @@ def planting_create():
             "batch_no": text("batch_no")[:40], "source": "inventory" if item else "manual", "seeds": seeds, "packs": packs, "loose_delta": loose_delta,
             "seeds_per_pack": size, "mortality": mortality, "seedlings": seedlings, "seed_cost": seed_cost, "cost_per_seedling": cost_per_seedling,
             "price": round(price, 2), "planted_on": planted_on, "ready_on": ready_on, "notes": text("notes")[:300],
+            "still_in_greenhouse": checked("still_in_greenhouse"),
         })
         use_grant(db, grant)
         db.commit()
@@ -4938,8 +4961,13 @@ def planting_create():
         return back
 
     release_plantings(db, biz)
-    made = db.one("SELECT released, ready_on FROM plantings WHERE id=?", (planting_id,))
-    where = "It is on the POS now." if made["released"] else f"It will appear on the POS on {add_days(ready_on, -RELEASE_DAYS)}, a week before it is ready."
+    made = db.one("SELECT released, still_in_greenhouse, ready_on FROM plantings WHERE id=?", (planting_id,))
+    if not made["still_in_greenhouse"]:
+        where = "It is kept as a historical record only: not listed on the POS and not available to pre-order."
+    elif made["released"]:
+        where = "It is on the POS now."
+    else:
+        where = f"It will appear on the POS on {add_days(ready_on, -RELEASE_DAYS)}, a week before it is ready."
     used = f", using {packs} pack(s) from inventory" if item else ""
     spare = f" {loose_left:,} loose seeds are kept for the next planting." if item and loose_left else ""
     flash(f"Planting recorded: {seeds:,} seeds of {seed_name}{used}. About {seedlings:,} seedlings are expected by {ready_on}.{spare} {where}", "ok")
@@ -4989,6 +5017,10 @@ def planting_update(planting_id):
     if not name or ready_on is None or ready_on < (p["planted_on"] or ""):
         flash("Give the batch a name and an expected ready date that is not before it was planted.", "error")
         return back
+    still = checked("still_in_greenhouse")
+    if not still and (f["sold"] + f["pending"]) > 0:
+        flash(f"{f['sold'] + f['pending']:,} seedlings from this batch are already sold or pre-ordered, so it cannot be marked as a historical record. Nothing was changed.", "error")
+        return back
     # While the batch is only expected, the mortality rate decides how many seedlings to expect. Once it is marked ready the real count stands.
     seedlings = p["seedlings"] if p["actual_ready_on"] else seedlings_from(p["seeds_planted"], mortality)
     if seedlings < f["sold"] + f["pending"]:
@@ -4996,13 +5028,17 @@ def planting_update(planting_id):
         return back
     cost_per_seedling = p["seed_unit_cost"] / (1 - mortality / 100)
     db.execute(
-        """UPDATE plantings SET name=?, batch_no=?, ready_on=?, mortality_pct=?, seedlings=?, cost_per_seedling=?, price=?, notes=? WHERE id=? AND business_id=?""",
-        (name, text("batch_no")[:40], ready_on, mortality, seedlings, cost_per_seedling, round(price, 2), text("notes")[:300], planting_id, biz),
+        """UPDATE plantings SET name=?, batch_no=?, ready_on=?, mortality_pct=?, seedlings=?, cost_per_seedling=?, price=?, still_in_greenhouse=?, notes=?
+           WHERE id=? AND business_id=?""",
+        (name, text("batch_no")[:40], ready_on, mortality, seedlings, cost_per_seedling, round(price, 2), 1 if still else 0, text("notes")[:300], planting_id, biz),
     )
+    if not still and p["released"]:
+        # It was listed for sale; now it is only a record, so it comes off the POS (the listing itself is kept, at zero, for its sales history)
+        db.execute("UPDATE pos_products SET quantity=0 WHERE business_id=? AND item_code=?", (biz, p["pos_code"]))
     release_plantings(db, biz)
     sync_planting(db, biz, planting_id)
     db.commit()
-    flash("Planting record saved.", "ok")
+    flash("Planting record saved." if still else "Planting record saved, marked as a historical record. It is off the POS and cannot be pre-ordered.", "ok")
     return back
 
 
@@ -5014,6 +5050,9 @@ def planting_ready(planting_id):
     back = redirect(url_for("planting_detail", planting_id=planting_id))
     if not can_plant():
         flash("Your account cannot edit planting records. Ask an admin.", "error")
+        return back
+    if not p["still_in_greenhouse"]:
+        flash("This is a historical record, not currently in the greenhouse, so it cannot be marked ready for sale.", "error")
         return back
     f = with_figures(db, biz, [p])[0]
     ready_day = day_or_none(text("actual_ready_on")) if text("actual_ready_on") else today_str()
@@ -5096,6 +5135,9 @@ def preorder_create(planting_id):
     db, biz = get_db(), g.user["business_id"]
     p = get_planting(db, planting_id)
     back = redirect(url_for("planting_detail", planting_id=planting_id) if text("back") == "detail" else url_for("up_next") + "#preorders")
+    if not p["still_in_greenhouse"]:
+        flash("This is a historical record, not currently in the greenhouse, so it cannot be pre-ordered.", "error")
+        return back
     customer = clean_name(text("customer_name"), 100)
     if not customer:
         flash("Enter the customer's name for the pre-order.", "error")
@@ -5244,12 +5286,24 @@ PLANTING_COLUMNS = {
     "seed_cost": ("seed cost", "cost per seed", "seed unit cost", "unit cost"),
     "department": ("department", "dept"),
     "batch_no": ("batch no", "batch number", "batch"),
+    "still_in_greenhouse": ("still in greenhouse", "in greenhouse", "still present", "currently in greenhouse", "in the greenhouse"),
     "notes": ("notes", "note", "comments"),
 }
 IMPORT_TEMPLATES["planting"] = (
-    ["Item Code", "Name", "Seeds Planted", "Planted On", "Ready On", "Mortality", "Seed Cost", "Selling Price", "Department", "Batch No", "Actual Ready Date", "Notes"],
-    ["TOM-001", "Tomato seedlings", 2000, "2026-10-01", "2026-11-05", 15, 0.45, 1.2, "Greenhouse", "B-22", "", "Tray block A"],
+    ["Item Code", "Name", "Seeds Planted", "Planted On", "Ready On", "Mortality", "Seed Cost", "Selling Price", "Department", "Batch No", "Actual Ready Date", "Still In Greenhouse", "Notes"],
+    ["TOM-001", "Tomato seedlings", 2000, "2026-10-01", "2026-11-05", 15, 0.45, 1.2, "Greenhouse", "B-22", "", "Yes", "Tray block A"],
 )
+
+
+def in_record_only_window(day, start, end):
+    """True when day falls inside an admin-set 'treat as a record only' date range (either end may be blank)."""
+    if not start and not end:
+        return False
+    if start and day < start:
+        return False
+    if end and day > end:
+        return False
+    return True
 
 
 @app.post("/import/planting")
@@ -5261,6 +5315,22 @@ def import_planting():
     except ImportProblem as e:
         flash(str(e), "error")
         return redirect(url_for("import_data"))
+
+    # A row whose Still In Greenhouse column is blank falls back to this date filter: inside it, it is saved as a
+    # historical record only; outside it (or with no filter set), it is treated as still growing, as before.
+    record_from = record_to = ""
+    if text("record_only_from"):
+        record_from = day_or_none(text("record_only_from"))
+        if record_from is None:
+            flash("The 'treat as a record only from' date is not a date.", "error")
+            return redirect(url_for("import_data"))
+    if text("record_only_to"):
+        record_to = day_or_none(text("record_only_to"))
+        if record_to is None:
+            flash("The 'treat as a record only to' date is not a date.", "error")
+            return redirect(url_for("import_data"))
+    if record_from and record_to and record_from > record_to:
+        record_from, record_to = record_to, record_from
 
     departments = set(department_names(db, biz))
     fallback = "Greenhouse" if "Greenhouse" in departments else "General"
@@ -5316,9 +5386,23 @@ def import_planting():
         if not problems and seed_cost is None and price is None:
             problems.append("give a Selling Price or a Seed Cost, so the seedlings can be priced")
 
+        # Whether this batch is really still in the greenhouse, or just a historical record. An explicit Yes/No
+        # in the file always wins; a blank cell falls back to the record-only date filter set on the Import page.
+        still = None
+        word = rec["still_in_greenhouse"].strip().lower()
+        if word:
+            if word in YES_WORDS:
+                still = True
+            elif word in NO_WORDS:
+                still = False
+            else:
+                problems.append(f"'Still In Greenhouse' value '{rec['still_in_greenhouse']}' must be Yes or No")
+
         if problems:
             errors.append(f"Row {rec['_row']}: " + "; ".join(problems))
             continue
+        if still is None:
+            still = not in_record_only_window(planted_on, record_from, record_to)
         label = name or code
         key = (norm(label), planted_on, rec["batch_no"] or "", seeds)
         if key in seen:
@@ -5339,7 +5423,7 @@ def import_planting():
             "seed_code": code or seed_code_for(label), "seed_name": label, "name": label, "department": dept, "batch_no": rec["batch_no"][:40], "source": "import",
             "seeds": seeds, "mortality": mortality, "seedlings": seedlings, "seed_cost": seed_cost, "cost_per_seedling": cost_per,
             "price": round(price if price is not None else round_up_to_cent(cost_per), 2), "planted_on": planted_on, "ready_on": ready_on,
-            "actual_ready_on": actual, "notes": rec["notes"][:300],
+            "actual_ready_on": actual, "still_in_greenhouse": still, "notes": rec["notes"][:300],
         })
 
     if errors:
@@ -5355,7 +5439,10 @@ def import_planting():
         flash("The import failed while saving, so nothing was imported. Please try again.", "error")
         return redirect(url_for("import_data"))
     release_plantings(db, biz)
-    flash(f"Imported {len(plans)} planting record(s). Inventory was not changed. Batches within a week of being ready are already on the POS.", "ok")
+    record_only = sum(1 for d in plans if not d["still_in_greenhouse"])
+    still_growing = len(plans) - record_only
+    note = f": {still_growing} still in the greenhouse, {record_only} as a historical record only" if record_only else ""
+    flash(f"Imported {len(plans)} planting record(s){note}. Inventory was not changed. Batches within a week of being ready are already on the POS.", "ok")
     return redirect(url_for("planting_list"))
 
 

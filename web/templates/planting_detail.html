@@ -27,8 +27,14 @@
     <div class="stat"><span>Sold</span><strong class="ok">{{ p.sold }}</strong><small>{{ p.collected }} of them collected pre-orders</small></div>
     <div class="stat"><span>Available</span><strong>{{ p.available }}</strong><small>free to sell or pre-order</small></div>
 </div>
+{% if not p.still_in_greenhouse %}
+<div class="flash notice">
+    This is a historical record only — it is not physically in the greenhouse. It will not be listed on the POS and cannot be pre-ordered.
+</div>
+{% endif %}
 <p class="muted">
-    {% if p.released %}This batch is on the POS as &ldquo;{{ p.label }}&rdquo; at {{ p.price|money }} each.
+    {% if not p.still_in_greenhouse %}{% if p.released %}It was on the POS, as &ldquo;{{ p.label }}&rdquo;, before it was marked as a record.{% endif %}
+    {% elif p.released %}This batch is on the POS as &ldquo;{{ p.label }}&rdquo; at {{ p.price|money }} each.
     {% else %}This batch goes on the POS on {{ p.goes_on_pos }}, {{ release_days }} days before it is expected to be ready. Until then it can only be pre-ordered.{% endif %}
     Cost to raise one seedling: {{ p.cost_per_seedling|money4 }} (seed {{ p.seed_unit_cost|money4 }}).
 </p>
@@ -47,6 +53,9 @@
                     <label>Batch number <input name="batch_no" value="{{ p.batch_no }}" maxlength="40"></label>
                 </div>
                 <label>Notes <input name="notes" value="{{ p.notes }}" maxlength="300"></label>
+                <input type="hidden" name="still_in_greenhouse" value="0">
+                <label class="check"><input type="checkbox" name="still_in_greenhouse" value="1" {{ 'checked' if p.still_in_greenhouse }}> Still physically in the greenhouse</label>
+                <p class="muted hint">Untick for a historical record only: it comes off the POS and cannot be pre-ordered. Only possible while nothing from it has been sold or pre-ordered.</p>
                 <button class="btn primary">Save</button>
             </fieldset>
         </form>
@@ -55,6 +64,7 @@
     </section>
 
     <div class="side">
+        {% if p.still_in_greenhouse %}
         <section class="card">
             <h2>{{ 'Ready' if p.actual_ready_on else 'Mark as ready' }}</h2>
             <form method="post" action="{{ url_for('planting_ready', planting_id=p.id) }}">
@@ -67,6 +77,7 @@
                 </fieldset>
             </form>
         </section>
+        {% endif %}
         {% if user.role == 'admin' %}
         <section class="card">
             <h2>Delete</h2>
@@ -83,7 +94,9 @@
 
 <section class="card block">
     <h2>Pre-orders for this batch</h2>
-    {% if p.available > 0 %}
+    {% if not p.still_in_greenhouse %}
+    <p class="muted">This is a historical record only, so it cannot be pre-ordered.</p>
+    {% elif p.available > 0 %}
     <form method="post" action="{{ url_for('preorder_create', planting_id=p.id) }}" class="toolbar">
         {{ csrf_field() }}
         <input type="hidden" name="back" value="detail">

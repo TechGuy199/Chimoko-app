@@ -17,6 +17,7 @@
     <a class="chip {{ 'active' if show == 'all' }}" href="{{ url_for('planting_list') }}">All <small>{{ counts.all }}</small></a>
     <a class="chip {{ 'active' if show == 'growing' }}" href="{{ url_for('planting_list', show='growing') }}">Growing <small>{{ counts.growing }}</small></a>
     <a class="chip {{ 'active' if show == 'ready' }}" href="{{ url_for('planting_list', show='ready') }}">Ready <small>{{ counts.ready }}</small></a>
+    <a class="chip {{ 'active' if show == 'records' }}" href="{{ url_for('planting_list', show='records') }}">Records only <small>{{ counts.records }}</small></a>
 </div>
 
 <section class="card">
@@ -40,10 +41,11 @@
                     <td>{{ r.actual_ready_on or r.ready_on }}
                         {% if r.stage == 'growing' %}<br><small class="muted">in {{ r.days }} day{{ 's' if r.days != 1 }}</small>{% endif %}</td>
                     <td>
-                        {% if r.stage == 'ready' %}<span class="ok">Ready</span>
+                        {% if r.stage == 'record' %}<span class="muted">Record only</span>
+                        {% elif r.stage == 'ready' %}<span class="ok">Ready</span>
                         {% elif r.stage == 'due' %}<strong class="gold">Due</strong>
                         {% else %}Growing{% endif %}
-                        <br><small class="muted">{{ 'On the POS' if r.released else 'POS from ' ~ r.goes_on_pos }}</small>
+                        <br><small class="muted">{% if r.stage == 'record' %}Not in the greenhouse{% else %}{{ 'On the POS' if r.released else 'POS from ' ~ r.goes_on_pos }}{% endif %}</small>
                     </td>
                     <td class="num">{{ r.pending }}</td>
                     <td class="num">{{ r.sold }}</td>

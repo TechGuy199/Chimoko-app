@@ -249,6 +249,9 @@ def init_schema():
         add_column(db, "products", "unit", "TEXT")
         # Seeds left over from an opened pack after a planting; the next planting uses them first
         add_column(db, "products", "loose_seeds", "INTEGER DEFAULT 0")
+        # Whether a planting is really still out there (goes on the POS, can be pre-ordered) or is a historical
+        # record only - for example backfilled greenhouse history that no longer physically exists.
+        add_column(db, "plantings", "still_in_greenhouse", "INTEGER NOT NULL DEFAULT 1")
         add_column(db, "businesses", "alert_phone", "TEXT")
         add_column(db, "businesses", "alert_low_stock", "INTEGER")
         add_column(db, "businesses", "alert_permission", "INTEGER")

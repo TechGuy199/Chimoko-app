@@ -72,12 +72,24 @@
             <li>Seedlings expected = Seeds Planted less the Mortality. A blank Selling Price is worked out from the Seed Cost and the mortality, rounded up.</li>
             <li>A row with an Actual Ready Date is already ready and goes straight onto the POS.</li>
             <li><strong>Inventory is not changed</strong> by an import: use it for plantings whose seed was already taken out of stock.</li>
+            <li>
+                <strong>Still In Greenhouse</strong> (optional): Yes or No. A <strong>No</strong> row is kept only as a historical record — it never
+                appears on the POS and cannot be pre-ordered, however old or "ready" its dates are. Leave it blank to decide from the date filter below.
+            </li>
             <li>A row identical to a batch that is already recorded (name, planting date, batch and seeds) is rejected, which protects against importing a file twice.</li>
         </ul>
         <p><a href="{{ url_for('import_template', kind='planting') }}">Download the planting records template</a></p>
         <form method="post" action="{{ url_for('import_planting') }}" enctype="multipart/form-data">
             {{ csrf_field() }}
             <label>CSV file <input type="file" name="file" accept=".csv,text/csv" required></label>
+            <div class="grid">
+                <label>Treat as a record only, planted from <input name="record_only_from" type="date"></label>
+                <label>...to <input name="record_only_to" type="date"></label>
+            </div>
+            <p class="muted">
+                Rows with no Still In Greenhouse answer whose Planted On date falls in this range are saved as historical records only, not currently
+                in the greenhouse. Useful for backfilling old plantings in one go. Leave both blank to treat every such row as still growing, as before.
+            </p>
             <button class="btn success">Import Planting Records</button>
         </form>
     </section>
