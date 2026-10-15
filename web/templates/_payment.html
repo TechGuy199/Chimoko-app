@@ -1,30 +1,9 @@
-{# Admin-only payment form and change history. Expects: action, total, paid, payments. #}
+{# Admin-only payment summary, the change history, and the update form in an overlay (dialog.js).
+   Expects: action, total, paid, payments, methods. #}
 <section class="card block no-print payment-box">
-    <h2>Update Payment</h2>
-    <form method="post" action="{{ action }}">
-        {{ csrf_field() }}
-        <div class="grid">
-            <label>Total amount paid so far (0 to {{ total|money }})
-                <input name="amount_paid" type="number" min="0" max="{{ total }}" step="0.01" value="{{ '%.2f'|format(paid) }}" required>
-            </label>
-            <label>Note (optional, e.g. "Mobile money, ref 1234") <input name="note" maxlength="200"></label>
-        </div>
-        {% if methods %}
-        {# A purchase from a supplier on file: raising the amount is a payment to that supplier, so it needs its method and reference #}
-        <div class="grid">
-            <label>How it was paid
-                <select name="payment_method" data-method-select>
-                    <option value="">Choose a method</option>
-                    {% for method, label in methods %}<option value="{{ method }}" data-reference-label="{{ label }}">{{ method }}</option>{% endfor %}
-                </select>
-            </label>
-            <label><span data-reference-text>Reference number</span> <input name="payment_reference" maxlength="60" data-reference autocomplete="off"></label>
-        </div>
-        <p class="muted">Needed when the amount paid goes up. Every method needs its reference number; for cash the receipt number is enough.</p>
-        {% endif %}
-        <button class="btn primary">Save Payment</button>
-        <button class="btn success" name="mark_paid" value="1" formnovalidate>Mark as Fully Paid</button>
-    </form>
+    <h2>Payment</h2>
+    <p>Paid so far: <strong>{{ paid|money }}</strong> of {{ total|money }}</p>
+    <p><button type="button" class="btn primary" data-modal-open="payment-update">Update Payment</button></p>
 
     {% if payments %}
     <h2 class="spaced">Payment Changes</h2>
@@ -46,3 +25,34 @@
     </div>
     {% endif %}
 </section>
+
+<dialog class="modal no-print" id="payment-update" aria-labelledby="payment-update-title">
+    <div class="modal-body">
+        <h2 id="payment-update-title">Update Payment</h2>
+        <form method="post" action="{{ action }}">
+            {{ csrf_field() }}
+            <div class="grid">
+                <label>Total amount paid so far (0 to {{ total|money }})
+                    <input name="amount_paid" type="number" min="0" max="{{ total }}" step="0.01" value="{{ '%.2f'|format(paid) }}" required>
+                </label>
+                <label>Note (optional, e.g. "Mobile money, ref 1234") <input name="note" maxlength="200"></label>
+            </div>
+            {% if methods %}
+            {# A purchase from a supplier on file: raising the amount is a payment to that supplier, so it needs its method and reference #}
+            <div class="grid">
+                <label>How it was paid
+                    <select name="payment_method" data-method-select>
+                        <option value="">Choose a method</option>
+                        {% for method, label in methods %}<option value="{{ method }}" data-reference-label="{{ label }}">{{ method }}</option>{% endfor %}
+                    </select>
+                </label>
+                <label><span data-reference-text>Reference number</span> <input name="payment_reference" maxlength="60" data-reference autocomplete="off"></label>
+            </div>
+            <p class="muted">Needed when the amount paid goes up. Every method needs its reference number; for cash the receipt number is enough.</p>
+            {% endif %}
+            <button class="btn primary">Save Payment</button>
+            <button class="btn success" name="mark_paid" value="1" formnovalidate>Mark as Fully Paid</button>
+            <p class="center"><button type="button" class="btn ghost" data-modal-close>Cancel</button></p>
+        </form>
+    </div>
+</dialog>
