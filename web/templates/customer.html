@@ -157,13 +157,22 @@
 </article>
 
 <section class="card block no-print narrow-form">
-    <h2>Edit Customer Details</h2>
-    <form method="post" action="{{ url_for('update_customer', customer_id=customer.id) }}">
-        {{ csrf_field() }}
-        <label>Name <input name="name" value="{{ customer.name }}" required></label>
-        <label>Phone number <input name="phone" value="{{ customer.phone }}"></label>
-        <button class="btn primary">Save</button>
-    </form>
+    <h2>Customer Details</h2>
+    <p>{{ customer.name }}{% if customer.phone %} &middot; {{ customer.phone }}{% endif %}</p>
+    <p><button type="button" class="btn" data-modal-open="customer-edit">Edit Customer Details</button></p>
     <p class="muted">To correct a payment on one invoice, open that invoice and use "Update Payment". The change then appears on this statement with its date.</p>
 </section>
+
+<dialog class="modal no-print" id="customer-edit" aria-labelledby="customer-edit-title">
+    <div class="modal-body">
+        <h2 id="customer-edit-title">Edit Customer Details</h2>
+        <form method="post" action="{{ url_for('update_customer', customer_id=customer.id) }}">
+            {{ csrf_field() }}
+            <label>Name <input name="name" value="{{ customer.name }}" required></label>
+            <label>Phone number <input name="phone" value="{{ customer.phone }}"></label>
+            <button class="btn primary wide">Save</button>
+            <p class="center"><button type="button" class="btn ghost" data-modal-close>Cancel</button></p>
+        </form>
+    </div>
+</dialog>
 {% endblock %}

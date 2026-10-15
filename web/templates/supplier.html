@@ -192,14 +192,23 @@
 </article>
 
 <section class="card block no-print narrow-form">
-    <h2>Edit Supplier Details</h2>
-    <form method="post" action="{{ url_for('update_supplier', supplier_id=supplier.id) }}">
-        {{ csrf_field() }}
-        <label>Name <input name="name" value="{{ supplier.name }}" required></label>
-        <label>Phone number <input name="phone" value="{{ supplier.phone }}"></label>
-        <button class="btn primary">Save</button>
-    </form>
+    <h2>Supplier Details</h2>
+    <p>{{ supplier.name }}{% if supplier.phone %} &middot; {{ supplier.phone }}{% endif %}</p>
+    <p><button type="button" class="btn" data-modal-open="supplier-edit">Edit Supplier Details</button></p>
     <p class="muted">To correct a payment on one purchase, open it from Procurements or use "payments" in the table above.</p>
 </section>
+
+<dialog class="modal no-print" id="supplier-edit" aria-labelledby="supplier-edit-title">
+    <div class="modal-body">
+        <h2 id="supplier-edit-title">Edit Supplier Details</h2>
+        <form method="post" action="{{ url_for('update_supplier', supplier_id=supplier.id) }}">
+            {{ csrf_field() }}
+            <label>Name <input name="name" value="{{ supplier.name }}" required></label>
+            <label>Phone number <input name="phone" value="{{ supplier.phone }}"></label>
+            <button class="btn primary wide">Save</button>
+            <p class="center"><button type="button" class="btn ghost" data-modal-close>Cancel</button></p>
+        </form>
+    </div>
+</dialog>
 {% endblock %}
 {% block scripts %}<script src="{{ asset('payment_method.js') }}"></script>{% endblock %}
