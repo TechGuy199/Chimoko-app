@@ -551,6 +551,8 @@ table.rules input { margin-top: 0; max-width: 140px; }
 
 /* Overlay editing (dialog.js): a small edit opens on top of the current page instead of a new one */
 dialog.modal { width: min(460px, calc(100vw - 32px)); max-height: calc(100vh - 32px); padding: 0; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); background: var(--panel-bg); color: var(--text); box-shadow: 0 18px 50px var(--shadow); }
+dialog.modal.modal-wide { width: min(780px, calc(100vw - 32px)); }
+.detail-table th { width: 32%; padding-top: 9px; border-bottom-color: var(--line); }
 dialog.modal::backdrop { background: rgba(0, 0, 0, 0.45); }
 .modal-body { padding: 20px 22px; overflow-x: hidden; overflow-y: auto; max-height: calc(100vh - 32px); }
 .modal-body .toolbar { flex-wrap: wrap; }

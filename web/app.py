@@ -1557,7 +1557,7 @@ def update_item(item_id):
 
     moved = f" It is now filed under {category} / {dept}, with its {purchases} purchase record(s) and any listings." if re_filed else ""
     flash(f"Details saved for '{name}'.{moved}", "ok")
-    return redirect(url_for("inventory"))
+    return redirect(url_for("item", item_id=item_id))   # stay on the item that was just edited
 
 
 @app.post("/inventory/<int:item_id>/adjust-quantity")

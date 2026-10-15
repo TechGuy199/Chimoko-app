@@ -16,6 +16,7 @@
 </form>
 {% endif %}
 {% endmacro %}
+{% set can_edit = access.procure.state in ('own', 'approved') %}
 
 <div class="page-head">
     <div>
@@ -56,55 +57,25 @@
         {% if access.procure.state == 'approved' %}
         <p class="flash ok">An admin approved one edit of this item. Save your changes before {{ access.procure.until }}.</p>
         {% endif %}
-        <form method="post" action="{{ url_for('update_item', item_id=item.id) }}">
-            {{ csrf_field() }}
-            <fieldset {{ 'disabled' if access.procure.state not in ('own', 'approved') }}>
-                <label>Item name <input name="name" value="{{ item.name }}" required></label>
-
-                <div class="filing">
-                    <h3>Filing &amp; packaging</h3>
-                    <div class="grid">
-                        <label>Category
-                            <select name="category" id="detail-category">
-                                {% for c in category_choices %}<option {{ 'selected' if c == item.category }}>{{ c }}</option>{% endfor %}
-                            </select>
-                        </label>
-                        <label>Department
-                            <select name="department" id="detail-department">
-                                {% for d in departments %}<option {{ 'selected' if d == item.department }}>{{ d }}</option>{% endfor %}
-                            </select>
-                        </label>
-                        <label>Packaging unit
-                            <input name="unit" id="detail-unit" list="unit-choices" maxlength="30" autocomplete="off" placeholder="e.g. bag, box, kg, litre"
-                                   value="{{ item.unit or '' }}" {{ 'readonly' if seed }}>
-                            <small class="muted" id="detail-unit-note">{{ 'Seed items are always counted in packs.' if seed else 'What the quantity is counted in.' }}</small>
-                        </label>
-                        <label id="detail-seeds-row" {{ 'hidden' if not seed }}>Seeds per pack
-                            <input name="seeds_per_pack" id="detail-seeds" type="number" min="1" step="1" inputmode="numeric" value="{{ item.seeds_per_pack or '' }}">
-                        </label>
-                    </div>
-                    <datalist id="unit-choices">
-                        {% for u in units %}<option value="{{ u }}">{% endfor %}
-                    </datalist>
-                    <p class="muted">
-                        Changing the category or department re-files this item with its POS listing and its purchase history; past sales stay in the
-                        department they were made in. Changing the unit does not convert the quantity in stock.
-                    </p>
-                </div>
-
-                <div class="grid">
-                    <label>Unit cost <input name="unit_cost" type="number" min="0" step="0.01" value="{{ item.unit_cost }}" required></label>
-                    <label>Selling price <input name="price" type="number" min="0" step="0.01" value="{{ item.price }}"></label>
-                    <label>Supplier name <input name="supplier_name" value="{{ item.supplier_name }}"></label>
-                    <label>Supplier invoice number <input name="invoice_no" value="{{ item.invoice_no }}"></label>
-                    <label>Purchase date <input name="purchase_date" type="date" value="{{ item.purchase_date }}"></label>
-                    <label>Batch number <input name="batch_no" value="{{ item.batch_no }}"></label>
-                    <label>Date planted <input name="date_planted" type="date" value="{{ item.date_planted }}"></label>
-                    <label>Expiry date <input name="expiry_date" type="date" value="{{ item.expiry_date }}"></label>
-                </div>
-                <button class="btn primary">Save Details</button>
-            </fieldset>
-        </form>
+        <div class="table-wrap">
+            <table class="detail-table">
+                <tbody>
+                    <tr><th>Category</th><td>{{ item.category }}</td></tr>
+                    <tr><th>Department</th><td>{{ item.department }}</td></tr>
+                    <tr><th>Packaging unit</th><td>{{ item.unit or '—' }}{% if seed %} &middot; {{ '{:,}'.format(item.seeds_per_pack) ~ ' seeds per pack' if item.seeds_per_pack else 'seeds per pack not recorded' }}{% endif %}</td></tr>
+                    <tr><th>Unit cost</th><td>{{ item.unit_cost|money }}</td></tr>
+                    <tr><th>Selling price</th><td>{{ item.price|money if item.price is not none else '—' }}</td></tr>
+                    <tr><th>Supplier</th><td>{{ item.supplier_name or '—' }}{% if item.invoice_no %} &middot; invoice {{ item.invoice_no }}{% endif %}</td></tr>
+                    <tr><th>Purchase date</th><td>{{ item.purchase_date or '—' }}</td></tr>
+                    <tr><th>Batch number</th><td>{{ item.batch_no or '—' }}</td></tr>
+                    <tr><th>Date planted</th><td>{{ item.date_planted or '—' }}</td></tr>
+                    <tr><th>Expiry date</th><td>{{ item.expiry_date or '—' }}</td></tr>
+                </tbody>
+            </table>
+        </div>
+        {% if can_edit %}
+        <p class="spaced"><button type="button" class="btn primary" data-modal-open="item-edit">Edit Details</button></p>
+        {% endif %}
         <p class="muted">The item code cannot be edited here. Stock changes through purchases, transfers and sales, or use "Correct the Quantity" for a one-off adjustment.</p>
         {{ ask_admin('procure') }}
     </section>
@@ -112,17 +83,10 @@
     <div class="side">
         <section class="card">
             <h2>Correct the Quantity</h2>
-            {% if access.procure.state in ('own', 'approved') %}
+            {% if can_edit %}
             {% if access.procure.state == 'approved' %}<p class="flash ok">An admin approved one edit of this item. Save before {{ access.procure.until }}.</p>{% endif %}
             <p class="muted">For a stock count, a loss, or anything a purchase or transfer did not capture. A note is always required.</p>
-            <form method="post" action="{{ url_for('adjust_quantity', item_id=item.id) }}" id="quantity-form" data-current="{{ item.quantity }}">
-                {{ csrf_field() }}
-                <label>New quantity {% if seed %}(packs){% endif %} <input name="quantity" id="quantity-new" type="number" min="0" step="1" value="{{ item.quantity }}" required></label>
-                <label><span id="quantity-note-label">Note</span>
-                    <input name="note" id="quantity-note" maxlength="300" required placeholder="Say what happened">
-                </label>
-                <button class="btn primary wide">Save New Quantity</button>
-            </form>
+            <button type="button" class="btn primary wide" data-modal-open="quantity-edit">Correct the Quantity</button>
             {% else %}
             <p class="muted">Your account cannot correct quantities. Use the request button under Details to ask an admin.</p>
             {% endif %}
@@ -235,6 +199,79 @@
     </div>
     <p class="muted">The seedling count is an estimate (seeds sown &times; germination rate, rounded down). It is what goes on sale.</p>
 </section>
+{% endif %}
+
+{# The two edit overlays (dialog.js). item.js finds their fields by id, wherever they sit on the page. #}
+{% if can_edit %}
+<dialog class="modal modal-wide" id="item-edit" aria-labelledby="item-edit-title">
+    <div class="modal-body">
+        <h2 id="item-edit-title">Edit {{ item.name }}</h2>
+        <form method="post" action="{{ url_for('update_item', item_id=item.id) }}">
+            {{ csrf_field() }}
+            <label>Item name <input name="name" value="{{ item.name }}" required></label>
+
+            <div class="filing">
+                <h3>Filing &amp; packaging</h3>
+                <div class="grid">
+                    <label>Category
+                        <select name="category" id="detail-category">
+                            {% for c in category_choices %}<option {{ 'selected' if c == item.category }}>{{ c }}</option>{% endfor %}
+                        </select>
+                    </label>
+                    <label>Department
+                        <select name="department" id="detail-department">
+                            {% for d in departments %}<option {{ 'selected' if d == item.department }}>{{ d }}</option>{% endfor %}
+                        </select>
+                    </label>
+                    <label>Packaging unit
+                        <input name="unit" id="detail-unit" list="unit-choices" maxlength="30" autocomplete="off" placeholder="e.g. bag, box, kg, litre"
+                               value="{{ item.unit or '' }}" {{ 'readonly' if seed }}>
+                        <small class="muted" id="detail-unit-note">{{ 'Seed items are always counted in packs.' if seed else 'What the quantity is counted in.' }}</small>
+                    </label>
+                    <label id="detail-seeds-row" {{ 'hidden' if not seed }}>Seeds per pack
+                        <input name="seeds_per_pack" id="detail-seeds" type="number" min="1" step="1" inputmode="numeric" value="{{ item.seeds_per_pack or '' }}">
+                    </label>
+                </div>
+                <datalist id="unit-choices">
+                    {% for u in units %}<option value="{{ u }}">{% endfor %}
+                </datalist>
+                <p class="muted">
+                    Changing the category or department re-files this item with its POS listing and its purchase history; past sales stay in the
+                    department they were made in. Changing the unit does not convert the quantity in stock.
+                </p>
+            </div>
+
+            <div class="grid">
+                <label>Unit cost <input name="unit_cost" type="number" min="0" step="0.01" value="{{ item.unit_cost }}" required></label>
+                <label>Selling price <input name="price" type="number" min="0" step="0.01" value="{{ item.price }}"></label>
+                <label>Supplier name <input name="supplier_name" value="{{ item.supplier_name }}"></label>
+                <label>Supplier invoice number <input name="invoice_no" value="{{ item.invoice_no }}"></label>
+                <label>Purchase date <input name="purchase_date" type="date" value="{{ item.purchase_date }}"></label>
+                <label>Batch number <input name="batch_no" value="{{ item.batch_no }}"></label>
+                <label>Date planted <input name="date_planted" type="date" value="{{ item.date_planted }}"></label>
+                <label>Expiry date <input name="expiry_date" type="date" value="{{ item.expiry_date }}"></label>
+            </div>
+            <button class="btn primary wide">Save Details</button>
+            <p class="center"><button type="button" class="btn ghost" data-modal-close>Cancel</button></p>
+        </form>
+    </div>
+</dialog>
+
+<dialog class="modal" id="quantity-edit" aria-labelledby="quantity-edit-title">
+    <div class="modal-body">
+        <h2 id="quantity-edit-title">Correct the Quantity</h2>
+        <p class="muted">In stock now: <strong>{{ item.quantity }}</strong>{% if seed %} pack(s){% elif item.unit %} {{ item.unit }}{% endif %}. A note is always required.</p>
+        <form method="post" action="{{ url_for('adjust_quantity', item_id=item.id) }}" id="quantity-form" data-current="{{ item.quantity }}">
+            {{ csrf_field() }}
+            <label>New quantity {% if seed %}(packs){% endif %} <input name="quantity" id="quantity-new" type="number" min="0" step="1" value="{{ item.quantity }}" required></label>
+            <label><span id="quantity-note-label">Note</span>
+                <input name="note" id="quantity-note" maxlength="300" required placeholder="Say what happened">
+            </label>
+            <button class="btn primary wide">Save New Quantity</button>
+            <p class="center"><button type="button" class="btn ghost" data-modal-close>Cancel</button></p>
+        </form>
+    </div>
+</dialog>
 {% endif %}
 {% endblock %}
 {% block scripts %}<script src="{{ asset('item.js') }}"></script>{% endblock %}
