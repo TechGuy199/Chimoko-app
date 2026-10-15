@@ -1,7 +1,54 @@
 {% extends "base.html" %}
-{% block title %}Operators — {% endblock %}
+{% block title %}Operators &amp; Admins — {% endblock %}
 {% block content %}
 <div class="split">
+    <section class="card grow">
+        <h2>Admin Accounts</h2>
+        <p class="muted">Any admin can see every admin and operator here, create new admins, reset passwords, and delete other admins.</p>
+        <div class="table-wrap">
+            <table>
+                <thead><tr><th>Username</th><th></th></tr></thead>
+                <tbody>
+                {% for a in admins %}
+                    <tr>
+                        <td>{{ a.username }}{% if a.id == user.id %} <small class="muted">(you)</small>{% endif %}</td>
+                        <td class="num actions">
+                            <a class="btn small" href="{{ url_for('operators', edit_admin=a.id) }}">Edit</a>
+                            {% if a.id != user.id and admin_count > 1 %}
+                            <form method="post" action="{{ url_for('delete_admin', admin_id=a.id) }}" onsubmit="return confirm('Permanently delete this admin account?');">
+                                {{ csrf_field() }}
+                                <button class="btn danger small">Delete</button>
+                            </form>
+                            {% endif %}
+                        </td>
+                    </tr>
+                {% else %}
+                    <tr><td colspan="2" class="muted center">No admins yet.</td></tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        <p class="muted">{% if admin_count <= 1 %}The only admin account cannot be deleted; create another admin first if you need to remove this one.{% else %}An admin cannot delete their own account while signed in as them.{% endif %}</p>
+    </section>
+
+    <section class="card side">
+        <h2>{{ 'Edit ' ~ editing_admin.username if editing_admin else 'Create New Admin' }}</h2>
+        <form method="post" action="{{ url_for('save_admin') }}">
+            {{ csrf_field() }}
+            {% if editing_admin %}<input type="hidden" name="id" value="{{ editing_admin.id }}">{% endif %}
+            <label>Username <input name="username" value="{{ editing_admin.username if editing_admin }}" required></label>
+            <label>{{ 'Reset password (blank = keep current)' if editing_admin else 'Password (8 characters or more)' }}
+                <input name="password" type="password" minlength="8" autocomplete="new-password" {{ 'required' if not editing_admin }}>
+            </label>
+            {% if editing_admin %}<p class="muted hint">Use this if {{ editing_admin.username }} forgot their password. They are not told the old one; give them the new one directly.</p>
+            {% else %}<p class="muted hint">A new admin has every permission: sales, purchases, transfers, deleting items, and everything under Settings.</p>{% endif %}
+            <button class="btn success wide">{{ 'Save Changes' if editing_admin else 'Create Admin' }}</button>
+            {% if editing_admin %}<p class="center"><a href="{{ url_for('operators') }}">Cancel</a></p>{% endif %}
+        </form>
+    </section>
+</div>
+
+<div class="split spaced">
     <section class="card grow">
         <h2>Operator Accounts</h2>
         <div class="table-wrap">

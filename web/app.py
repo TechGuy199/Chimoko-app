@@ -5689,7 +5689,7 @@ def merge_departments():
     return back
 
 
-# --- OPERATORS (ADMIN) ---
+# --- OPERATORS & ADMINS (ADMIN) ---
 @app.get("/operators")
 @need("admin")
 def operators():
@@ -5702,7 +5702,15 @@ def operators():
     edit_id = request.args.get("edit", type=int)
     if edit_id:
         editing = next((row for row in rows if row["id"] == edit_id), None)
-    return render_template("operators.html", operators=rows, editing=editing)
+
+    admins = db.all("SELECT id, username FROM users WHERE business_id=? AND role='admin' ORDER BY username", (biz,))
+    editing_admin = None
+    edit_admin_id = request.args.get("edit_admin", type=int)
+    if edit_admin_id:
+        editing_admin = next((row for row in admins if row["id"] == edit_admin_id), None)
+    return render_template(
+        "operators.html", operators=rows, editing=editing, admins=admins, editing_admin=editing_admin, admin_count=len(admins),
+    )
 
 
 @app.post("/operators/save")
@@ -5762,6 +5770,72 @@ def delete_operator(op_id):
     db.execute("DELETE FROM users WHERE id=? AND business_id=? AND role='operator'", (op_id, g.user["business_id"]))
     db.commit()
     flash("Operator account deleted.", "ok")
+    return redirect(url_for("operators"))
+
+
+@app.post("/admins/save")
+@need("admin")
+def save_admin():
+    """Any admin can create another admin, or rename one / reset their password. Admins have every permission, so there are no flags to set."""
+    db, biz = get_db(), g.user["business_id"]
+    admin_id = request.form.get("id", type=int)
+    username, password = text("username"), request.form.get("password", "")
+    back = redirect(url_for("operators", edit_admin=admin_id) if admin_id else url_for("operators"))
+
+    if not username:
+        flash("Username is required.", "error")
+        return back
+    if password and len(password) < 8:
+        flash("Choose a password of at least 8 characters.", "error")
+        return back
+    if not admin_id and not password:
+        flash("A new admin needs a password.", "error")
+        return back
+    taken = db.one("SELECT id FROM users WHERE username=?", (username,))
+    if taken and taken["id"] != admin_id:
+        flash("That username is already taken.", "error")
+        return back
+
+    try:
+        if admin_id:
+            db.execute("UPDATE users SET username=? WHERE id=? AND business_id=? AND role='admin'", (username, admin_id, biz))
+            if password:
+                db.execute("UPDATE users SET password_hash=? WHERE id=? AND business_id=? AND role='admin'", (generate_password_hash(password), admin_id, biz))
+        else:
+            db.execute(
+                """INSERT INTO users (business_id, username, password_hash, role, can_sell, can_procure, can_transfer, can_delete)
+                   VALUES (?, ?, ?, 'admin', 1, 1, 1, 1)""",
+                (biz, username, generate_password_hash(password)),
+            )
+        db.commit()
+    except DB_ERRORS:
+        db.rollback()
+        flash("The admin account could not be saved. Please try again.", "error")
+        return back
+
+    flash(f"Admin '{username}' saved. They can see and manage every operator and admin for {g.user['business_name']}." if not admin_id else f"Admin '{username}' saved.", "ok")
+    return redirect(url_for("operators"))
+
+
+@app.post("/admins/<int:admin_id>/delete")
+@need("admin")
+def delete_admin(admin_id):
+    db, biz = get_db(), g.user["business_id"]
+    back = redirect(url_for("operators"))
+    if admin_id == g.user["id"]:
+        flash("You cannot delete your own admin account while signed in as them. Ask another admin, or create one first.", "error")
+        return back
+    target = db.one("SELECT username FROM users WHERE id=? AND business_id=? AND role='admin'", (admin_id, biz))
+    if target is None:
+        flash("That admin account could not be found.", "error")
+        return back
+    admin_count = db.one("SELECT COUNT(*) AS n FROM users WHERE business_id=? AND role='admin'", (biz,))["n"]
+    if admin_count <= 1:
+        flash("This is the only admin account, so it cannot be deleted. Create another admin first.", "error")
+        return back
+    db.execute("DELETE FROM users WHERE id=? AND business_id=? AND role='admin'", (admin_id, biz))
+    db.commit()
+    flash(f"Admin '{target['username']}' deleted.", "ok")
     return redirect(url_for("operators"))
 
 
