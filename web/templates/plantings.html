@@ -26,7 +26,7 @@
             <thead>
                 <tr>
                     <th>Batch</th><th>Planted</th><th class="num">Seeds</th><th class="num">Expected mortality</th><th class="num">Seedlings</th>
-                    <th>Expected ready</th><th>Status</th><th class="num">Pre-ordered</th><th class="num">Sold</th><th class="num">Available</th>
+                    <th>Expected ready</th><th>Status</th><th class="num">Pre-ordered</th><th class="num">Sold</th><th class="num">Available</th><th></th>
                 </tr>
             </thead>
             <tbody>
@@ -50,9 +50,24 @@
                     <td class="num">{{ r.pending }}</td>
                     <td class="num">{{ r.sold }}</td>
                     <td class="num"><strong>{{ r.available }}</strong></td>
+                    <td class="num">
+                        {% if editable %}
+                        <form method="post" action="{{ url_for('planting_toggle_record', planting_id=r.id) }}"
+                              data-confirm="{{ ('Mark \'' ~ r.name ~ '\' as a historical record? It will come off the POS and cannot be pre-ordered.') if r.stage != 'record' else ('Mark \'' ~ r.name ~ '\' as still growing again?') }}">
+                            {{ csrf_field() }}
+                            {% if r.stage == 'record' %}
+                            <input type="hidden" name="to" value="growing">
+                            <button class="btn small">Mark as growing</button>
+                            {% else %}
+                            <input type="hidden" name="to" value="record">
+                            <button class="btn danger small">Mark as record</button>
+                            {% endif %}
+                        </form>
+                        {% endif %}
+                    </td>
                 </tr>
             {% else %}
-                <tr><td colspan="10" class="muted center">No plantings yet. Record one, or push seeds from an inventory item.</td></tr>
+                <tr><td colspan="11" class="muted center">No plantings yet. Record one, or push seeds from an inventory item.</td></tr>
             {% endfor %}
             </tbody>
         </table>

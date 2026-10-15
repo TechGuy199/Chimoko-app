@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}Stock Adjustments — {% endblock %}
+{% block content %}
+<div class="page-head">
+    <div>
+        <h1>Stock Adjustments</h1>
+        <p class="muted">Every item removed from the POS, and every inventory quantity corrected by hand, with who did it and why. These records cannot be edited or removed.</p>
+    </div>
+</div>
+
+<div class="toolbar">
+    <a class="chip {{ 'active' if not kind }}" href="{{ url_for('stock_adjustments') }}">All</a>
+    <a class="chip {{ 'active' if kind == 'pos_removal' }}" href="{{ url_for('stock_adjustments', kind='pos_removal') }}">Removed from POS</a>
+    <a class="chip {{ 'active' if kind == 'inventory_edit' }}" href="{{ url_for('stock_adjustments', kind='inventory_edit') }}">Inventory corrections</a>
+</div>
+
+<section class="card">
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr><th>When</th><th>Kind</th><th>Item</th><th class="num">Before</th><th class="num">After</th><th class="num">Change</th><th>Reason</th><th>Note</th><th>By</th></tr>
+            </thead>
+            <tbody>
+            {% for r in rows %}
+                <tr>
+                    <td>{{ r.created_at }}</td>
+                    <td>{{ 'Removed from POS' if r.kind == 'pos_removal' else 'Inventory correction' }}</td>
+                    <td>{{ r.item_name }}<br><small class="muted">{{ r.item_code }}{% if r.department %} &middot; {{ r.department }}{% endif %}</small></td>
+                    <td class="num">{{ '{:,}'.format(r.quantity_before) }}</td>
+                    <td class="num">{{ '{:,}'.format(r.quantity_after) }}</td>
+                    <td class="num {{ 'warn' if r.delta < 0 else 'ok' }}">{{ '{:+,}'.format(r.delta) }}</td>
+                    <td>{{ r.reason or '—' }}</td>
+                    <td class="wrap">{{ r.note or '—' }}</td>
+                    <td>{{ r.created_by }}</td>
+                </tr>
+            {% else %}
+                <tr><td colspan="9" class="muted center">Nothing has been removed from the POS or corrected in inventory yet.</td></tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endblock %}

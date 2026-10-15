@@ -58,7 +58,27 @@
                         <td>{{ p.department }}</td>
                         <td class="num">{{ p.quantity }}</td>
                         <td class="num">{{ p.price|money }}</td>
-                        <td class="num"><button type="button" class="btn primary small">Add</button></td>
+                        <td class="num actions">
+                            <button type="button" class="btn primary small">Add</button>
+                            {% if can('transfer') %}
+                            <details class="inline-details">
+                                <summary class="btn danger small">Remove</summary>
+                                <form method="post" action="{{ url_for('remove_from_pos', pos_id=p.id) }}" class="preorder-form"
+                                      data-confirm="Remove stock of &quot;{{ p.name }}&quot; from the POS? This cannot be undone.">
+                                    {{ csrf_field() }}
+                                    <label>Quantity (up to {{ p.quantity }}) <input name="quantity" type="number" min="1" max="{{ p.quantity }}" value="1" required></label>
+                                    <label>Reason
+                                        <select name="reason" required>
+                                            <option value="">Choose a reason</option>
+                                            {% for key, label in removal_reasons %}<option value="{{ key }}">{{ label }}</option>{% endfor %}
+                                        </select>
+                                    </label>
+                                    <label>Note <input name="note" maxlength="300" placeholder="Required if Other"></label>
+                                    <button class="btn danger wide">Remove from POS</button>
+                                </form>
+                            </details>
+                            {% endif %}
+                        </td>
                     </tr>
                 {% else %}
                     <tr><td colspan="6" class="muted center">Nothing is listed for sale yet. Transfer stock to "Stock Listing" from the Inventory page.</td></tr>

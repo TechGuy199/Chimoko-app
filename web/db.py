@@ -129,6 +129,13 @@ SCHEMA = [
         seedlings INTEGER NOT NULL, cost_per_seedling DOUBLE PRECISION NOT NULL, selling_price DOUBLE PRECISION NOT NULL,
         created_by TEXT, created_at TEXT
     )""",
+    # Every manual stock correction: an item removed from the POS (disease, damage, mortality...) or an inventory
+    # quantity corrected by hand. kind is 'pos_removal' or 'inventory_edit'. delta is negative for a decrease.
+    """CREATE TABLE IF NOT EXISTS stock_adjustments (
+        id {pk}, business_id INTEGER NOT NULL, kind TEXT NOT NULL, item_code TEXT NOT NULL, item_name TEXT NOT NULL, department TEXT DEFAULT '',
+        quantity_before INTEGER NOT NULL, quantity_after INTEGER NOT NULL, delta INTEGER NOT NULL, reason TEXT DEFAULT '', note TEXT DEFAULT '',
+        pos_product_id INTEGER, product_id INTEGER, created_by TEXT, created_at TEXT
+    )""",
     # Supplier accounts, opened from the supplier named on a purchase. They work like customer accounts: aliases remember the spellings
     # of accounts that were merged away, and distinct pairs are ones an admin said are different suppliers.
     """CREATE TABLE IF NOT EXISTS suppliers (

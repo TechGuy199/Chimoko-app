@@ -105,11 +105,29 @@
                 <button class="btn primary">Save Details</button>
             </fieldset>
         </form>
-        <p class="muted">The item code and quantity cannot be edited here. Stock changes through purchases, transfers and sales.</p>
+        <p class="muted">The item code cannot be edited here. Stock changes through purchases, transfers and sales, or use "Correct the Quantity" for a one-off adjustment.</p>
         {{ ask_admin('procure') }}
     </section>
 
     <div class="side">
+        <section class="card">
+            <h2>Correct the Quantity</h2>
+            {% if access.procure.state in ('own', 'approved') %}
+            {% if access.procure.state == 'approved' %}<p class="flash ok">An admin approved one edit of this item. Save before {{ access.procure.until }}.</p>{% endif %}
+            <p class="muted">For a stock count, a loss, or anything a purchase or transfer did not capture. A note is always required.</p>
+            <form method="post" action="{{ url_for('adjust_quantity', item_id=item.id) }}" id="quantity-form" data-current="{{ item.quantity }}">
+                {{ csrf_field() }}
+                <label>New quantity {% if seed %}(packs){% endif %} <input name="quantity" id="quantity-new" type="number" min="0" step="1" value="{{ item.quantity }}" required></label>
+                <label><span id="quantity-note-label">Note</span>
+                    <input name="note" id="quantity-note" maxlength="300" required placeholder="Say what happened">
+                </label>
+                <button class="btn primary wide">Save New Quantity</button>
+            </form>
+            {% else %}
+            <p class="muted">Your account cannot correct quantities. Use the request button under Details to ask an admin.</p>
+            {% endif %}
+        </section>
+
         <section class="card">
             <h2>Transfer / Use</h2>
             {% if access.transfer.state in ('own', 'approved') %}

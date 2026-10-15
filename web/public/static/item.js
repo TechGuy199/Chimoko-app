@@ -1,6 +1,7 @@
-// Item page. Two jobs, both for seed items:
-//  1. Edit form: the "seeds per pack" box shows when the category is (or becomes) a seed category.
-//  2. Transfer form: moving seed packs to the POS asks the greenhouse questions and shows what they work out to.
+// Item page. Three jobs:
+//  1. Edit form: the "seeds per pack" box shows when the category is (or becomes) a seed category (seed items only).
+//  2. Correct the Quantity: the note label says where the difference went or came from, depending on which way it moves.
+//  3. Transfer form: moving seed packs to the POS asks the greenhouse questions and shows what they work out to (seed items only).
 (function () {
     // Same rule as the server: the word "seed" or "seeds" in the category ("Seedlings" does not count)
     const SEED_WORD = /\bseeds?\b/i;
@@ -34,6 +35,30 @@
         category.addEventListener("input", showPackSize);
         category.addEventListener("change", showPackSize);
         showPackSize();
+    }
+
+    // Correct the Quantity: the note label says where the difference went or came from, depending on which way it moves
+    const qtyForm = document.getElementById("quantity-form");
+    if (qtyForm) {
+        const current = parseInt(qtyForm.dataset.current, 10) || 0;
+        const qtyNew = document.getElementById("quantity-new");
+        const qtyLabel = document.getElementById("quantity-note-label");
+        const qtyNote = document.getElementById("quantity-note");
+        const updateQtyLabel = function () {
+            const typed = parseInt(qtyNew.value, 10);
+            if (!isFinite(typed) || typed === current) {
+                qtyLabel.textContent = "Note";
+                qtyNote.placeholder = "Say what happened";
+            } else if (typed < current) {
+                qtyLabel.textContent = "Where did the difference go?";
+                qtyNote.placeholder = "e.g. spoilage, damaged, given away, counted wrong before";
+            } else {
+                qtyLabel.textContent = "Where is the extra stock coming from?";
+                qtyNote.placeholder = "e.g. found additional stock, an earlier undercount";
+            }
+        };
+        qtyNew.addEventListener("input", updateQtyLabel);
+        updateQtyLabel();
     }
 
     const form = document.getElementById("transfer-form");

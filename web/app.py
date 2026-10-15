@@ -624,8 +624,77 @@ def pos():
     known_customers = db.all("SELECT name, phone FROM customers WHERE business_id=? ORDER BY name LIMIT 1000", (biz,))
     return render_template(
         "pos.html", products=products, stats=stats, departments=department_names(db, biz), statuses=PAYMENT_STATUSES,
-        known_customers=known_customers, up_next=up_next_summary(db, biz),
+        known_customers=known_customers, up_next=up_next_summary(db, biz), removal_reasons=POS_REMOVAL_REASONS,
     )
+
+
+POS_REMOVAL_REASONS = (("disease", "Disease"), ("damaged", "Damaged / spoiled"), ("mortality", "Mortality"), ("other", "Other"))
+
+
+def record_stock_adjustment(db, biz, kind, item_code, item_name, department, before, after, reason, note, pos_product_id=None, product_id=None):
+    """Logs a manual stock change (a POS removal or an inventory quantity correction) so it stays reviewable."""
+    db.execute(
+        """INSERT INTO stock_adjustments (business_id, kind, item_code, item_name, department, quantity_before, quantity_after, delta, reason, note,
+                                          pos_product_id, product_id, created_by, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            biz, kind, item_code, item_name, department, before, after, after - before, reason, note,
+            pos_product_id, product_id, g.user["username"], now().strftime("%Y-%m-%d %H:%M:%S"),
+        ),
+    )
+
+
+@app.post("/pos/<int:pos_id>/remove")
+@need("transfer")
+def remove_from_pos(pos_id):
+    """Takes stock listed in the POS off sale - disease, damage, mortality or anything else - with a reason kept on record."""
+    db, biz = get_db(), g.user["business_id"]
+    back = redirect(url_for("pos"))
+    p = db.one("SELECT id, item_code, name, department, quantity FROM pos_products WHERE id=? AND business_id=?", (pos_id, biz))
+    if p is None:
+        abort(404)
+
+    reason_key = text("reason")
+    reason_labels = dict(POS_REMOVAL_REASONS)
+    if reason_key not in reason_labels:
+        flash("Choose why this stock is being removed.", "error")
+        return back
+    try:
+        qty = number("quantity", int)
+        if qty < 1:
+            raise ValueError
+    except ValueError:
+        flash("Enter how many to remove (a whole number above zero).", "error")
+        return back
+    if qty > p["quantity"]:
+        flash(f"Only {p['quantity']:,} of '{p['name']}' are listed. Nothing was removed.", "error")
+        return back
+    note = text("note")[:300]
+    if reason_key == "other" and not note:
+        flash("Say what happened, since the reason is 'Other'.", "error")
+        return back
+
+    new_qty = p["quantity"] - qty
+    try:
+        db.execute("UPDATE pos_products SET quantity=? WHERE id=? AND business_id=?", (new_qty, pos_id, biz))
+        record_stock_adjustment(
+            db, biz, "pos_removal", p["item_code"], p["name"], p["department"], p["quantity"], new_qty,
+            reason_labels[reason_key], note, pos_product_id=pos_id,
+        )
+        notify(
+            db, "stock_removal", f"Stock removed from the POS: {p['name']}",
+            f"{g.user['username']} removed {qty:,} of '{p['name']}' (code {p['item_code']}) from the POS. Reason: {reason_labels[reason_key]}."
+            + (f" {note}" if note else ""),
+            url_for("stock_adjustments"),
+        )
+        db.commit()
+    except DB_ERRORS:
+        db.rollback()
+        flash("The removal could not be saved. Please try again.", "error")
+        return back
+
+    flash(f"Removed {qty:,} of '{p['name']}' from the POS ({reason_labels[reason_key]}). {new_qty:,} remain listed.", "ok")
+    return back
 
 
 @app.post("/checkout")
@@ -1489,6 +1558,55 @@ def update_item(item_id):
     moved = f" It is now filed under {category} / {dept}, with its {purchases} purchase record(s) and any listings." if re_filed else ""
     flash(f"Details saved for '{name}'.{moved}", "ok")
     return redirect(url_for("inventory"))
+
+
+@app.post("/inventory/<int:item_id>/adjust-quantity")
+@need(None)
+def adjust_quantity(item_id):
+    """Corrects how much of an item is in stock by hand - a stock count, a loss, anything a purchase or transfer didn't capture.
+
+    Always needs a note saying where the difference went (reduced) or came from (increased); kept on record either way.
+    """
+    db, biz = get_db(), g.user["business_id"]
+    current = get_item(db, item_id)
+    grant = item_grant(db, item_id, "procure")
+    if grant is None:
+        return refuse_item_action(item_id)
+    back = redirect(url_for("item", item_id=item_id))
+
+    try:
+        new_qty = number("quantity", int)
+        if new_qty < 0:
+            raise ValueError
+    except ValueError:
+        flash("Enter the new quantity as a whole number, 0 or more.", "error")
+        return back
+    note = " ".join(text("note").split())[:300]
+    old_qty = current["quantity"]
+    if new_qty == old_qty:
+        flash("That is already the quantity on record. Nothing was changed.", "ok")
+        return back
+    if len(note) < 5:
+        flash("Say, in a few words, where the difference went (if reducing) or came from (if increasing). Nothing was changed.", "error")
+        return back
+
+    try:
+        db.execute("UPDATE products SET quantity=? WHERE id=? AND business_id=?", (new_qty, item_id, biz))
+        record_stock_adjustment(
+            db, biz, "inventory_edit", current["item_code"], current["name"], current["department"], old_qty, new_qty,
+            "Increase" if new_qty > old_qty else "Decrease", note, product_id=item_id,
+        )
+        low_stock_alert(db, current["name"], current["item_code"], old_qty, new_qty, "in inventory")
+        use_grant(db, grant)
+        db.commit()
+    except DB_ERRORS:
+        db.rollback()
+        flash("The quantity could not be saved. Please try again.", "error")
+        return back
+
+    change = f"increased by {new_qty - old_qty:,}" if new_qty > old_qty else f"reduced by {old_qty - new_qty:,}"
+    flash(f"Quantity {change}, from {old_qty:,} to {new_qty:,}. Noted: {note}", "ok")
+    return back
 
 
 @app.post("/inventory/<int:item_id>/transfer")
@@ -4802,7 +4920,7 @@ def planting_list():
         rows = [r for r in rows if r["stage"] == "record"]
     else:
         show = "all"
-    return render_template("plantings.html", rows=rows, show=show, counts=counts)
+    return render_template("plantings.html", rows=rows, show=show, counts=counts, editable=can_plant())
 
 
 @app.get("/planting/new")
@@ -5076,6 +5194,38 @@ def planting_ready(planting_id):
     sync_planting(db, biz, planting_id)
     db.commit()
     flash(f"Marked ready on {ready_day} with {count:,} seedlings. It is on the POS.", "ok")
+    return back
+
+
+@app.post("/planting/<int:planting_id>/toggle-record")
+@need(None)
+def planting_toggle_record(planting_id):
+    """Quick action from the Planting Records list: mark a batch as a historical record, or growing again - without
+    opening its own edit form. Marking it a record takes it off the POS at once, the same as the edit form does.
+    """
+    db, biz = get_db(), g.user["business_id"]
+    p = get_planting(db, planting_id)
+    back = redirect(url_for("planting_detail", planting_id=planting_id) if text("back") == "detail" else url_for("planting_list"))
+    if not can_plant():
+        flash("Your account cannot edit planting records. Ask an admin.", "error")
+        return back
+
+    still = text("to") != "record"
+    if still == bool(p["still_in_greenhouse"]):
+        return back
+    if not still:
+        f = with_figures(db, biz, [p])[0]
+        if (f["sold"] + f["pending"]) > 0:
+            flash(f"{f['sold'] + f['pending']:,} seedlings from this batch are already sold or pre-ordered, so it cannot be marked as a historical record.", "error")
+            return back
+
+    db.execute("UPDATE plantings SET still_in_greenhouse=? WHERE id=? AND business_id=?", (1 if still else 0, planting_id, biz))
+    if not still and p["released"]:
+        db.execute("UPDATE pos_products SET quantity=0 WHERE business_id=? AND item_code=?", (biz, p["pos_code"]))
+    release_plantings(db, biz)
+    sync_planting(db, biz, planting_id)
+    db.commit()
+    flash(f"'{p['name']}' marked as still growing." if still else f"'{p['name']}' marked as a historical record. It is off the POS and cannot be pre-ordered.", "ok")
     return back
 
 
@@ -5444,6 +5594,22 @@ def import_planting():
     return redirect(url_for("planting_list"))
 
 
+# --- STOCK ADJUSTMENTS (write-offs from the POS, inventory quantity corrections) ---
+@app.get("/stock-adjustments")
+@need("admin")
+def stock_adjustments():
+    db, biz = get_db(), g.user["business_id"]
+    kind = request.args.get("kind", "") if request.args.get("kind") in ("pos_removal", "inventory_edit") else ""
+    sql = """SELECT id, kind, item_code, item_name, department, quantity_before, quantity_after, delta, reason, note, created_by, created_at
+             FROM stock_adjustments WHERE business_id=?"""
+    params = [biz]
+    if kind:
+        sql += " AND kind=?"
+        params.append(kind)
+    rows = db.all(sql + " ORDER BY id DESC LIMIT 500", params)
+    return render_template("stock_adjustments.html", rows=rows, kind=kind)
+
+
 # --- RESET THE APP (ADMIN) ---
 # A reset wipes the records the app has logged for this business. It keeps what makes the app usable
 # and was set up rather than logged: user accounts (with their permissions and appearance), the business
@@ -5464,6 +5630,7 @@ RESET_GROUPS = (
     ("Sowing batches", ("seedling_batches",)),
     ("Planting records", ("plantings",)),
     ("Pre-orders", ("preorders",)),
+    ("Stock adjustments and removals", ("stock_adjustments",)),
     ("Alerts", ("notifications",)),
     ("Permission requests", ("permission_requests",)),
 )
@@ -5484,6 +5651,7 @@ CLEAR_INVENTORY_GROUPS = (
     ("Sowing batches", ("seedling_batches",)),
     ("Planting records", ("plantings",)),
     ("Pre-orders", ("preorders",)),
+    ("Stock adjustments and removals", ("stock_adjustments",)),
 )
 CLEAR_INVENTORY_KEPT = (
     "Procurements (purchase history) and supplier statements.",
