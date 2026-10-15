@@ -67,9 +67,12 @@
         <h2>Planting Records</h2>
         <p>Each row is one batch of seeds planted. Imported batches appear under Planting Records and go on the POS a week before they are ready, exactly like a planting entered by hand.</p>
         <ul class="muted">
-            <li><strong>Required:</strong> Seeds Planted, Ready On (the expected date), Mortality (the expected percentage), and a Name or an Item Code. Give a Selling Price or a Seed Cost so the seedlings can be priced.</li>
-            <li><strong>Optional:</strong> Planted On (blank means today), Department, Batch No, Actual Ready Date, Notes.</li>
-            <li>Seedlings expected = Seeds Planted less the Mortality. A blank Selling Price is worked out from the Seed Cost and the mortality, rounded up.</li>
+            <li><strong>Required:</strong> Seeds Planted, Ready On (the expected date), Mortality (the expected percentage), and a Name or an Item Code.</li>
+            <li><strong>Optional:</strong> Planted On (blank means today), Selling Price, Seed Cost, Department, Batch No, Actual Ready Date, Notes.</li>
+            <li>
+                Seedlings expected = Seeds Planted less the Mortality. <strong>Selling Price and Seed Cost are both optional</strong> — leave them
+                blank for old records from before seeds were priced; the batch is saved with a cost and price of 0, which you can fill in later if you need to.
+            </li>
             <li>A row with an Actual Ready Date is already ready and goes straight onto the POS.</li>
             <li><strong>Inventory is not changed</strong> by an import: use it for plantings whose seed was already taken out of stock.</li>
             <li>

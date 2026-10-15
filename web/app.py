@@ -5291,7 +5291,7 @@ PLANTING_COLUMNS = {
 }
 IMPORT_TEMPLATES["planting"] = (
     ["Item Code", "Name", "Seeds Planted", "Planted On", "Ready On", "Mortality", "Seed Cost", "Selling Price", "Department", "Batch No", "Actual Ready Date", "Still In Greenhouse", "Notes"],
-    ["TOM-001", "Tomato seedlings", 2000, "2026-10-01", "2026-11-05", 15, 0.45, 1.2, "Greenhouse", "B-22", "", "Yes", "Tray block A"],
+    ["TOM-001", "Tomato seedlings", 2000, "2026-10-01", "2026-11-05", 15, "", "", "Greenhouse", "B-22", "", "Yes", "Tray block A"],
 )
 
 
@@ -5383,8 +5383,6 @@ def import_planting():
                     seed_cost = value
                 else:
                     price = value
-        if not problems and seed_cost is None and price is None:
-            problems.append("give a Selling Price or a Seed Cost, so the seedlings can be priced")
 
         # Whether this batch is really still in the greenhouse, or just a historical record. An explicit Yes/No
         # in the file always wins; a blank cell falls back to the record-only date filter set on the Import page.
