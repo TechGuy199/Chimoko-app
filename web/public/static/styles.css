@@ -139,7 +139,7 @@ a { color: var(--accent); text-decoration: none; transition: color 0.18s var(--e
 a:hover { color: var(--text-bright); }
 h1 { margin: 0 0 14px; font-size: 22px; font-weight: 650; letter-spacing: -0.01em; color: var(--text-bright); }
 h2 { margin: 0 0 12px; font-size: 12px; font-weight: 650; letter-spacing: 0.07em; text-transform: uppercase; color: var(--text-muted); }
-main { max-width: 1320px; margin: 0 auto; padding: 24px 20px 48px; animation: page-in 0.32s var(--ease) both; }
+main { max-width: 1680px; margin: 0 auto; padding: 24px 20px 48px; animation: page-in 0.32s var(--ease) both; }
 small { font-size: 11px; }
 
 /* ---------- Top bar and dropdown menus ---------- */
@@ -356,10 +356,14 @@ fieldset:disabled { opacity: 0.6; }
 .segmented label:has(input:focus-visible) { outline: 2px solid var(--primary); outline-offset: 2px; }
 
 /* ---------- Tables ---------- */
+/* overflow-x stays as a safety net for a pathologically dense table on a narrow window, but the column widths and
+   type scale below are tuned so a normal table fits a desktop width on its own, without needing it. Cells wrap by
+   default (most columns hold short values anyway); .num stays on one line since wrapped numbers read badly. */
 .table-wrap { overflow-x: auto; }
-table { width: 100%; border-collapse: collapse; }
-th, td { padding: 11px 12px; text-align: left; border-bottom: 1px solid var(--line); white-space: nowrap; }
-th { padding-top: 6px; padding-bottom: 9px; border-bottom-color: var(--line-strong); color: var(--text-muted); font-size: 11px; font-weight: 650; letter-spacing: 0.06em; text-transform: uppercase; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { padding: 9px 10px; text-align: left; border-bottom: 1px solid var(--line); word-break: break-word; }
+td.num, th.num { white-space: nowrap; }
+th { padding-top: 6px; padding-bottom: 9px; border-bottom-color: var(--line-strong); color: var(--text-muted); font-size: 10.5px; font-weight: 650; letter-spacing: 0.05em; text-transform: uppercase; white-space: nowrap; }
 tbody tr { transition: background 0.16s var(--ease); }
 tbody tr:hover { background: rgba(var(--ink), 0.03); }
 tbody tr:last-child td { border-bottom: 0; }
@@ -666,4 +670,11 @@ tr.unread td:first-child { box-shadow: inset 3px 0 0 var(--primary); }
     th { border-bottom-color: #888888; }
     .payslip { border-bottom: 1px dashed #999999; border-radius: 0; margin-bottom: 18px; padding-bottom: 18px; }
     .chart .bar, .rank-track i { animation: none; }
+}
+
+/* A wide table sharing a row with a side card (Procurements, Reports, ...) gets the full row below this width,
+   rather than being squeezed into whatever the side card leaves over - the side card moves underneath instead. */
+@media (max-width: 1500px) {
+    .split { flex-direction: column; }
+    .split > .grow, .split > .side { flex-basis: auto; width: 100%; }
 }
