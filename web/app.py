@@ -1780,31 +1780,120 @@ def delete_item(item_id):
 
 
 # --- SALES & INVOICES HISTORY ---
-def history_rows(db, biz, q, limit):
-    sql = """SELECT id, invoice_no, kind, customer_name, customer_phone, payment_status, total, amount_paid, balance_due, created_at
-             FROM invoices WHERE business_id=?"""
-    params = [biz]
+INVOICE_PERIODS = (
+    ("all", "All dates"), ("today", "Today"), ("yesterday", "Yesterday"), ("last_7", "Last 7 days"),
+    ("this_week", "This week"), ("last_week", "Last week"), ("this_month", "This month"), ("last_month", "Last month"),
+    ("this_year", "This year"), ("last_year", "Last year"), ("custom", "Custom range"),
+)
+HISTORY_PARAMS = ("q", "period", "from", "to")
+
+
+def parse_day(value):
+    try:
+        return datetime.date.fromisoformat((value or "").strip())
+    except ValueError:
+        return None
+
+
+def invoice_period():
+    """The date filter on Sales & Invoices: (choice, first day, last day) from the query string.
+
+    Either day can be None, meaning no limit on that side (both None for all dates). Weeks run Monday to Sunday.
+    """
+    today = now().date()
+    day = datetime.timedelta(days=1)
+    choice = request.args.get("period", "all")
+    start = end = None
+    if choice == "today":
+        start = end = today
+    elif choice == "yesterday":
+        start = end = today - day
+    elif choice == "last_7":
+        start, end = today - 6 * day, today
+    elif choice == "this_week":
+        start = today - today.weekday() * day
+        end = start + 6 * day
+    elif choice == "last_week":
+        end = today - (today.weekday() + 1) * day
+        start = end - 6 * day
+    elif choice == "this_month":
+        start = today.replace(day=1)
+        end = today.replace(day=calendar.monthrange(today.year, today.month)[1])
+    elif choice == "last_month":
+        end = today.replace(day=1) - day
+        start = end.replace(day=1)
+    elif choice == "this_year":
+        start, end = today.replace(month=1, day=1), today.replace(month=12, day=31)
+    elif choice == "last_year":
+        start, end = datetime.date(today.year - 1, 1, 1), datetime.date(today.year - 1, 12, 31)
+    elif choice == "custom":
+        # One date alone is an open-ended range: everything from that day, or everything up to it
+        start, end = parse_day(request.args.get("from")), parse_day(request.args.get("to"))
+        if start and end and end < start:
+            start, end = end, start
+    else:
+        choice = "all"
+    return choice, start, end
+
+
+def history_filter(biz, q, start, end):
+    """The WHERE clause shared by the invoice list, its totals and its CSV export, so all three always agree."""
+    where, params = "business_id=?", [biz]
     if q:
         like = f"%{q.lower()}%"
-        sql += """ AND (LOWER(invoice_no) LIKE ? OR LOWER(customer_name) LIKE ? OR LOWER(customer_phone) LIKE ?
-                   OR EXISTS (SELECT 1 FROM invoice_items ii WHERE ii.invoice_id = invoices.id AND LOWER(ii.item_name) LIKE ?))"""
+        where += """ AND (LOWER(invoice_no) LIKE ? OR LOWER(customer_name) LIKE ? OR LOWER(customer_phone) LIKE ?
+                     OR EXISTS (SELECT 1 FROM invoice_items ii WHERE ii.invoice_id = invoices.id AND LOWER(ii.item_name) LIKE ?))"""
         params += [like, like, like, like]
-    sql += " ORDER BY id DESC LIMIT ?"
+    # created_at is stored as 'YYYY-MM-DD HH:MM:SS' text, so whole days compare as text, the same way the reports do
+    if start:
+        where += " AND created_at >= ?"
+        params.append(start.isoformat())
+    if end:
+        where += " AND created_at < ?"
+        params.append((end + datetime.timedelta(days=1)).isoformat())
+    return where, params
+
+
+def history_rows(db, where, params, limit):
+    sql = f"""SELECT id, invoice_no, kind, customer_name, customer_phone, payment_status, total, amount_paid, balance_due, created_at
+              FROM invoices WHERE {where} ORDER BY id DESC LIMIT ?"""
     return db.all(sql, params + [limit])
+
+
+def history_totals(db, where, params):
+    """How many invoices match, and the money on them. Cancelled invoices and farm use are not sales, so their
+    amounts are left out of the money (the same rule as the reports), though they are still counted and listed."""
+    counted = "COALESCE(payment_status, '') <> 'Cancelled' AND COALESCE(kind, 'SALE') <> 'FARM_USE'"
+    return db.one(
+        f"""SELECT COUNT(*) AS n,
+                   COALESCE(SUM(CASE WHEN {counted} THEN total ELSE 0 END), 0) AS total,
+                   COALESCE(SUM(CASE WHEN {counted} THEN amount_paid ELSE 0 END), 0) AS paid,
+                   COALESCE(SUM(CASE WHEN {counted} THEN balance_due ELSE 0 END), 0) AS owed
+            FROM invoices WHERE {where}""",
+        params,
+    )
 
 
 @app.get("/history")
 @need(None)
 def history():
+    db = get_db()
     q = request.args.get("q", "").strip()
-    return render_template("history.html", invoices=history_rows(get_db(), g.user["business_id"], q, 500), q=q)
+    period, start, end = invoice_period()
+    where, params = history_filter(g.user["business_id"], q, start, end)
+    csv_args = {key: request.args.get(key) for key in HISTORY_PARAMS if request.args.get(key)}
+    return render_template(
+        "history.html", invoices=history_rows(db, where, params, 500), totals=history_totals(db, where, params),
+        q=q, periods=INVOICE_PERIODS, period=period, start=start, end=end, csv_url=url_for("history_csv", **csv_args),
+    )
 
 
 @app.get("/history.csv")
 @need(None)
 def history_csv():
     q = request.args.get("q", "").strip()
-    rows = history_rows(get_db(), g.user["business_id"], q, 50000)
+    _, start, end = invoice_period()
+    rows = history_rows(get_db(), *history_filter(g.user["business_id"], q, start, end), 50000)
     return csv_response(
         "sales-invoices.csv",
         ["Invoice No", "Date/Time", "Type", "Customer", "Phone", "Total", "Paid", "Balance", "Status"],
@@ -5324,18 +5413,40 @@ def planting_delete(planting_id):
     return redirect(url_for("planting_list"))
 
 
+def up_next_url():
+    """Back to Up Next after a pre-order action, keeping the search that was on screen."""
+    q = text("q")
+    return (url_for("up_next", q=q) if q else url_for("up_next")) + "#preorders"
+
+
+def planting_matches(p, words):
+    """True when every searched word appears in the batch's name, label, seed, batch number or POS code."""
+    hay = norm(" ".join(str(p.get(key) or "") for key in ("label", "name", "seed_name", "seed_code", "batch_no", "pos_code")))
+    return all(word in hay for word in words)
+
+
 @app.get("/planting/up-next")
 @need(None)
 def up_next():
     db, biz = get_db(), g.user["business_id"]
+    q = " ".join(request.args.get("q", "").split())[:100]
+    words = norm(q).split()
     release_plantings(db, biz)
     rows = with_figures(db, biz, db.all("SELECT * FROM plantings WHERE business_id=? ORDER BY ready_on, id", (biz,)))
-    batches = [f for f in rows if f["available"] > 0 or f["pending"] > 0]
+    batches = [f for f in rows if (f["available"] > 0 or f["pending"] > 0) and planting_matches(f, words)]
+
+    # Pre-orders match on the product (batch) as above, or on the customer who placed them
+    where, params = "po.business_id=?", [biz]
+    for word in words:
+        like = f"%{word}%"
+        where += """ AND (LOWER(p.name) LIKE ? OR LOWER(p.seed_name) LIKE ? OR LOWER(p.seed_code) LIKE ? OR LOWER(COALESCE(p.batch_no, '')) LIKE ?
+                          OR LOWER(COALESCE(p.pos_code, '')) LIKE ? OR LOWER(po.customer_name) LIKE ? OR LOWER(COALESCE(po.customer_phone, '')) LIKE ?)"""
+        params += [like] * 7
     orders = db.all(
-        """SELECT po.*, p.name AS planting_name, p.batch_no AS planting_batch, p.planted_on AS planting_planted
-           FROM preorders po JOIN plantings p ON p.id = po.planting_id WHERE po.business_id=?
-           ORDER BY CASE WHEN po.status='pending' THEN 0 ELSE 1 END, po.id DESC LIMIT 200""",
-        (biz,),
+        f"""SELECT po.*, p.name AS planting_name, p.batch_no AS planting_batch, p.planted_on AS planting_planted
+            FROM preorders po JOIN plantings p ON p.id = po.planting_id WHERE {where}
+            ORDER BY CASE WHEN po.status='pending' THEN 0 ELSE 1 END, po.id DESC LIMIT 200""",
+        params,
     )
     for o in orders:
         o["label"] = planting_label({"name": o["planting_name"], "batch_no": o["planting_batch"], "planted_on": o["planting_planted"]})
@@ -5343,7 +5454,7 @@ def up_next():
         o["ask"] = active_request(db, o["id"], COLLECT_PREORDER) if o["status"] == "pending" and g.user["role"] != "admin" else None
         if o["ask"] and o["ask"]["status"] == "approved":
             o["ask"] = {**o["ask"], "until": (o["ask"]["expires_at"] or "")[11:16]}
-    return render_template("up_next.html", batches=batches, orders=orders, statuses=PAYMENT_STATUSES, release_days=RELEASE_DAYS)
+    return render_template("up_next.html", batches=batches, orders=orders, statuses=PAYMENT_STATUSES, release_days=RELEASE_DAYS, q=q)
 
 
 @app.post("/planting/<int:planting_id>/preorder")
@@ -5351,7 +5462,7 @@ def up_next():
 def preorder_create(planting_id):
     db, biz = get_db(), g.user["business_id"]
     p = get_planting(db, planting_id)
-    back = redirect(url_for("planting_detail", planting_id=planting_id) if text("back") == "detail" else url_for("up_next") + "#preorders")
+    back = redirect(url_for("planting_detail", planting_id=planting_id) if text("back") == "detail" else up_next_url())
     if not p["still_in_greenhouse"]:
         flash("This is a historical record, not currently in the greenhouse, so it cannot be pre-ordered.", "error")
         return back
@@ -5393,7 +5504,7 @@ def get_preorder(db, po_id):
 def preorder_cancel(po_id):
     db, biz = get_db(), g.user["business_id"]
     po = get_preorder(db, po_id)
-    back = redirect(url_for("up_next") + "#preorders")
+    back = redirect(up_next_url())
     if po["status"] != "pending":
         flash("That pre-order has already been collected or cancelled.", "error")
         return back
@@ -5409,7 +5520,7 @@ def preorder_cancel(po_id):
 def preorder_request(po_id):
     db, biz = get_db(), g.user["business_id"]
     po = get_preorder(db, po_id)
-    back = redirect(url_for("up_next") + "#preorders")
+    back = redirect(up_next_url())
     if g.user["role"] == "admin":
         flash("Admins approve and collect directly.", "ok")
         return back
@@ -5438,7 +5549,7 @@ def preorder_request(po_id):
 def preorder_collect(po_id):
     db, biz = get_db(), g.user["business_id"]
     po = get_preorder(db, po_id)
-    back = redirect(url_for("up_next") + "#preorders")
+    back = redirect(up_next_url())
     if po["status"] != "pending":
         flash("That pre-order has already been collected or cancelled.", "error")
         return back

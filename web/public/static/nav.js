@@ -46,6 +46,24 @@
         return true;
     }
 
+    // Search as you type: the results arrive while the box still has focus, often with a letter or two typed since the
+    // search was sent. The box in the new page is given back the focus and exactly what is in it now, so typing is never
+    // interrupted. Only for search boxes (type="search" with an id) and only when the page stays the same.
+    function searchFocus() {
+        const el = document.activeElement;
+        if (!el || el.tagName !== "INPUT" || el.type !== "search" || !el.id) return null;
+        return { id: el.id, value: el.value, path: location.pathname };
+    }
+
+    function restoreSearchFocus(kept, finalUrl) {
+        if (!kept || new URL(finalUrl).pathname !== kept.path) return;
+        const el = document.getElementById(kept.id);
+        if (!el || el.type !== "search") return;
+        el.value = kept.value;
+        el.focus();
+        el.setSelectionRange(el.value.length, el.value.length);
+    }
+
     function navigate(url, init, pushState, scrollBefore) {
         // A saved form almost always posts to an action URL and is then redirected back to a display page (often
         // the very one it was submitted from) - so whether to keep the scroll position has to be judged against
@@ -54,10 +72,14 @@
         return fetch(url, Object.assign({ credentials: "same-origin" }, init))
             .then(function (response) { return response.text().then(function (html) { return { html: html, finalUrl: response.url }; }); })
             .then(function (result) {
+                const kept = searchFocus();
                 if (!swap(result.html, result.finalUrl)) throw new Error("not a page");
                 if (pushState) history.pushState({ nav: true }, "", result.finalUrl);
                 const samePage = result.finalUrl.split("#")[0] === startPage;
                 window.scrollTo(0, samePage ? scrollBefore : 0);
+                restoreSearchFocus(kept, result.finalUrl);
+                // Lets dialog.js reopen an overlay whose save the server turned down
+                document.dispatchEvent(new CustomEvent("nav:swapped", { detail: { url: result.finalUrl } }));
             });
     }
 

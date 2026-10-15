@@ -418,7 +418,7 @@ td form { margin: 0; display: inline; }
 
 /* ---------- Reports ---------- */
 .report-filters select, .report-filters input[type="date"], .report-filters input[type="month"] { width: auto; margin-top: 0; display: inline-block; }
-#custom-range { display: inline-flex; align-items: center; gap: 8px; }
+#custom-range, .date-range { display: inline-flex; align-items: center; gap: 8px; }
 .period-line { margin: -6px 0 18px; }
 .chart-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 460px), 1fr)); gap: 18px; margin-top: 18px; }
 .chart { margin: 0; }
@@ -561,6 +561,7 @@ dialog.modal::backdrop { background: rgba(0, 0, 0, 0.45); }
 .modal-body h2 { margin: 0 0 12px; }
 .modal-body form + form { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); }
 .modal-body .hint { font-size: 12px; }
+.modal-body .flash { margin: 0 0 12px; }
 .cat-manage { position: relative; }
 .merge-tick { position: absolute; top: 10px; right: 10px; display: block; margin: 0; cursor: pointer; }
 .merge-tick input { width: 18px; height: 18px; }

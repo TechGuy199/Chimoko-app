@@ -1,6 +1,8 @@
 {% extends "base.html" %}
 {% block title %}Up Next — {% endblock %}
 {% block content %}
+{# Sent with every pre-order action, so the page comes back still showing the search that was on screen #}
+{% macro keep_search() %}{% if q %}<input type="hidden" name="q" value="{{ q }}">{% endif %}{% endmacro %}
 <div class="page-head">
     <div>
         <a class="back" href="{{ url_for('pos') }}">&larr; Sales &amp; POS</a>
@@ -12,6 +14,13 @@
     </div>
     <div class="head-actions"><a class="btn" href="{{ url_for('planting_list') }}">Planting records</a></div>
 </div>
+
+<form method="get" class="toolbar" id="upnext-search" role="search">
+    <input name="q" id="upnext-q" type="search" value="{{ q }}" placeholder="Search a product, batch number or customer" autocomplete="off" aria-label="Search batches and pre-orders">
+    <button class="btn primary">Search</button>
+    {% if q %}<a class="btn" href="{{ url_for('up_next') }}">Clear</a>{% endif %}
+</form>
+{% if q %}<p class="muted">{{ batches|length }} batch(es) and {{ orders|length }} pre-order(s) match &ldquo;{{ q }}&rdquo;.</p>{% endif %}
 
 <section class="card">
     <h2>Batches</h2>
@@ -37,7 +46,7 @@
                         <details class="inline-details">
                             <summary class="btn small">Pre-order</summary>
                             <form method="post" action="{{ url_for('preorder_create', planting_id=b.id) }}" class="preorder-form">
-                                {{ csrf_field() }}
+                                {{ csrf_field() }}{{ keep_search() }}
                                 <label>Customer name <input name="customer_name" required maxlength="100"></label>
                                 <label>Phone <input name="customer_phone" maxlength="40"></label>
                                 <label>Quantity (up to {{ b.available }}) <input name="qty" type="number" min="1" max="{{ b.available }}" value="1" required></label>
@@ -48,7 +57,7 @@
                     </td>
                 </tr>
             {% else %}
-                <tr><td colspan="9" class="muted center">Nothing is growing with seedlings still free. <a href="{{ url_for('planting_new') }}">Record a planting</a>.</td></tr>
+                <tr><td colspan="9" class="muted center">{% if q %}No batch with seedlings still free matches &ldquo;{{ q }}&rdquo;.{% else %}Nothing is growing with seedlings still free. <a href="{{ url_for('planting_new') }}">Record a planting</a>.{% endif %}</td></tr>
             {% endfor %}
             </tbody>
         </table>
@@ -80,7 +89,7 @@
                                 <summary class="btn success small">{{ 'Approve & collect' if user.role == 'admin' else 'Collect' }}</summary>
                                 <form method="post" action="{{ url_for('preorder_collect', po_id=o.id) }}" class="preorder-form"
                                       data-confirm="Record this pre-order as a sale of {{ o.total|money }}?{% if user.role == 'admin' %}&#10;&#10;This is your approval of the collection.{% endif %}">
-                                    {{ csrf_field() }}
+                                    {{ csrf_field() }}{{ keep_search() }}
                                     {% if o.ask %}<p class="muted">Approved by an admin, for one use{% if o.ask.until %} until {{ o.ask.until }}{% endif %}.</p>{% endif %}
                                     <label>Payment
                                         <select name="payment_status">{% for s in statuses %}<option>{{ s }}</option>{% endfor %}</select>
@@ -95,24 +104,37 @@
                             <details class="inline-details">
                                 <summary class="btn small">Ask an admin</summary>
                                 <form method="post" action="{{ url_for('preorder_request', po_id=o.id) }}" class="preorder-form">
-                                    {{ csrf_field() }}
+                                    {{ csrf_field() }}{{ keep_search() }}
                                     <label>Note (optional) <input name="reason" maxlength="200"></label>
                                     <button class="btn wide">Request approval to collect</button>
                                 </form>
                             </details>
                             {% endif %}
                             <form method="post" action="{{ url_for('preorder_cancel', po_id=o.id) }}" data-confirm="Cancel this pre-order? The seedlings become free again.">
-                                {{ csrf_field() }}
+                                {{ csrf_field() }}{{ keep_search() }}
                                 <button class="btn danger small">Cancel</button>
                             </form>
                         {% endif %}
                     </td>
                 </tr>
             {% else %}
-                <tr><td colspan="7" class="muted center">No pre-orders yet.</td></tr>
+                <tr><td colspan="7" class="muted center">{% if q %}No pre-order matches &ldquo;{{ q }}&rdquo;.{% else %}No pre-orders yet.{% endif %}</td></tr>
             {% endfor %}
             </tbody>
         </table>
     </div>
 </section>
+{% endblock %}
+{% block scripts %}
+<script>
+    // Search as you type: wait for a short pause, then bring the matching batches and pre-orders in place
+    (function () {
+        const box = document.getElementById("upnext-q");
+        let timer;
+        box.addEventListener("input", function () {
+            clearTimeout(timer);
+            timer = setTimeout(function () { document.getElementById("upnext-search").requestSubmit(); }, 450);
+        });
+    })();
+</script>
 {% endblock %}
