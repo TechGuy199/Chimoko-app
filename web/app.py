@@ -12,7 +12,7 @@ import re
 import secrets
 from zoneinfo import ZoneInfo
 
-from flask import Flask, Response, abort, flash, g, redirect, render_template, request, session, url_for
+from flask import Flask, Response, abort, flash, g, redirect, render_template, request, send_from_directory, session, url_for
 from markupsafe import Markup
 from werkzeug.security import check_password_hash, generate_password_hash
 
@@ -48,6 +48,25 @@ app.config.update(
     SESSION_COOKIE_SECURE=ON_VERCEL,
     PERMANENT_SESSION_LIFETIME=datetime.timedelta(hours=12),
 )
+
+PUBLIC_DIR = os.path.join(BASE_DIR, "public")
+
+
+# --- INSTALLABLE APP (PWA) ---
+# manifest.json and sw.js live at the project root (public/), not under public/static/, so they are served
+# at "/manifest.json" and "/sw.js" - a service worker's scope is the folder it is served from, and both need
+# to be at the site root to cover the whole app. On Vercel these two routes are never actually reached: Vercel
+# serves everything under public/** straight from its CDN, before a request would reach this Flask app. They
+# exist so the same URLs work the same way in local development, where Flask serves public/ itself.
+@app.get("/manifest.json")
+def pwa_manifest():
+    return send_from_directory(PUBLIC_DIR, "manifest.json", mimetype="application/manifest+json")
+
+
+@app.get("/sw.js")
+def pwa_service_worker():
+    return send_from_directory(PUBLIC_DIR, "sw.js", mimetype="application/javascript")
+
 
 init_schema()
 
