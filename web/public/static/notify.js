@@ -4,9 +4,12 @@
 (function () {
     const script = document.currentScript;
     const pollUrl = script.dataset.poll;
-    const count = document.getElementById("alerts-count");
-    const list = document.getElementById("alerts-list");
-    const toasts = document.getElementById("toasts");
+    // Looked up fresh each time, not cached: in-place navigation (nav.js) replaces the header and the toasts box
+    // with a freshly rendered copy on every page change, and this script runs only once, so it must not hold on
+    // to references to DOM nodes that stop existing.
+    function countEl() { return document.getElementById("alerts-count"); }
+    function listEl() { return document.getElementById("alerts-list"); }
+    function toastsEl() { return document.getElementById("toasts"); }
     const POLL_EVERY = 30000;
     const TOAST_FOR = 15000;
 
@@ -32,6 +35,8 @@
     }
 
     function renderList(items) {
+        const list = listEl();
+        if (!list) return;   // the header is momentarily out of the document mid-navigation
         list.replaceChildren();
         if (!items.length) {
             list.appendChild(element("span", "menu-note", "Nothing new."));
@@ -48,6 +53,8 @@
     }
 
     function toast(item) {
+        const toasts = toastsEl();
+        if (!toasts) return;
         const box = element("div", "toast");
         box.setAttribute("role", "alert");
         const close = element("button", "toast-close", "×");
@@ -80,8 +87,11 @@
             .then(function (response) { return response.ok ? response.json() : null; })
             .then(function (data) {
                 if (!data) return;
-                count.textContent = data.unread;
-                count.hidden = data.unread === 0;
+                const count = countEl();
+                if (count) {
+                    count.textContent = data.unread;
+                    count.hidden = data.unread === 0;
+                }
                 renderList(data.items);
                 // Oldest first, so a burst of alerts stacks in the order it happened
                 data.items.slice().reverse().forEach(function (item) {
@@ -94,32 +104,10 @@
             .catch(function () { /* offline or signed out: try again on the next round */ });
     }
 
-    // Always check once when a page opens; after that, only while the tab is actually being looked at
+    // Always check once when a page opens; after that, only while the tab is actually being looked at. This script
+    // tag is loaded once and deliberately never re-run by in-place navigation (nav.js), so this interval keeps
+    // running for as long as the tab is open, regardless of how many pages are visited inside it.
     poll();
     setInterval(function () { if (!document.hidden) poll(); }, POLL_EVERY);
     document.addEventListener("visibilitychange", function () { if (!document.hidden) poll(); });
-
-    // Settings page: the button that asks the browser for permission to show desktop notifications
-    const allow = document.getElementById("allow-desktop-alerts");
-    if (allow) {
-        const state = document.getElementById("desktop-alerts-state");
-        function describe() {
-            if (!("Notification" in window)) {
-                state.textContent = "This browser cannot show desktop notifications. Popups inside the app still work.";
-                allow.disabled = true;
-            } else if (Notification.permission === "granted") {
-                state.textContent = "Desktop notifications are allowed in this browser.";
-                allow.disabled = true;
-            } else if (Notification.permission === "denied") {
-                state.textContent = "Desktop notifications are blocked for this site. Allow them in the browser's site settings to turn them on.";
-                allow.disabled = true;
-            } else {
-                state.textContent = "Optional: also show alerts as desktop notifications while this site is open in a tab.";
-            }
-        }
-        allow.addEventListener("click", function () {
-            Notification.requestPermission().then(describe);
-        });
-        describe();
-    }
 })();

@@ -47,7 +47,7 @@
         box.setSelectionRange(box.value.length, box.value.length);
         box.addEventListener("input", function () {
             clearTimeout(timer);
-            timer = setTimeout(function () { document.getElementById("employee-search").submit(); }, 450);
+            timer = setTimeout(function () { document.getElementById("employee-search").requestSubmit(); }, 450);
         });
     })();
 </script>

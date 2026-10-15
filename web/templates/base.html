@@ -50,7 +50,7 @@
 {% set here = namespace(label='') %}
 {% for group, links in nav %}{% for label, endpoint, active, admin_only in links if request.endpoint in active %}{% set here.label = label %}{% endfor %}{% endfor %}
 
-<header class="topbar no-print">
+<header class="topbar no-print" id="app-header">
     <a class="brand" href="{{ url_for('pos') }}">{{ user.business_name }}</a>
     {% if here.label %}<span class="here">{{ here.label }}</span>{% endif %}
     <span class="spacer"></span>
@@ -96,7 +96,7 @@
 </header>
 {% endif %}
 
-<main>
+<main id="page-main">
     {% for category, message in get_flashed_messages(with_categories=true) %}
     <div class="flash {{ category }} no-print">{{ message }}</div>
     {% endfor %}
@@ -130,7 +130,10 @@
 <div id="toasts" class="toasts no-print" aria-live="polite"></div>
 <script src="{{ asset('notify.js') }}" data-poll="{{ url_for('notifications_poll') }}"></script>
 {% endif %}
-{% block scripts %}{% endblock %}
+{# In-place navigation (nav.js) swaps this page for the next one without a full reload; it re-runs only the
+   scripts inside #page-scripts on every page change, so it is loaded once, here, outside that container. #}
+<script src="{{ asset('nav.js') }}"></script>
+<div id="page-scripts">{% block scripts %}{% endblock %}</div>
 <script>
     // Lets the browser install this as an app (Windows, Android, desktop Chrome/Edge). Safe to skip silently
     // where it is not supported (older browsers, some iOS versions): the site still works normally either way.

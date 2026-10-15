@@ -35,7 +35,7 @@
             <li>Importing the same file twice adds the stock twice.</li>
         </ul>
         <p><a href="{{ url_for('import_template', kind='purchases') }}">Download the purchases template</a></p>
-        <form method="post" action="{{ url_for('import_purchases') }}" enctype="multipart/form-data">
+        <form method="post" action="{{ url_for('import_purchases') }}" enctype="multipart/form-data" data-full-reload>
             {{ csrf_field() }}
             <label>CSV file <input type="file" name="file" accept=".csv,text/csv" required></label>
             <button class="btn success">Import Purchases</button>
@@ -54,7 +54,7 @@
             <li>An Invoice No that already exists is rejected, which protects against importing a file twice.</li>
         </ul>
         <p><a href="{{ url_for('import_template', kind='sales') }}">Download the sales template</a></p>
-        <form method="post" action="{{ url_for('import_sales') }}" enctype="multipart/form-data">
+        <form method="post" action="{{ url_for('import_sales') }}" enctype="multipart/form-data" data-full-reload>
             {{ csrf_field() }}
             <label>CSV file <input type="file" name="file" accept=".csv,text/csv" required></label>
             <label class="check"><input type="checkbox" name="deduct_stock"> Also deduct these quantities from current POS stock</label>
@@ -82,7 +82,7 @@
             <li>A row identical to a batch that is already recorded (name, planting date, batch and seeds) is rejected, which protects against importing a file twice.</li>
         </ul>
         <p><a href="{{ url_for('import_template', kind='planting') }}">Download the planting records template</a></p>
-        <form method="post" action="{{ url_for('import_planting') }}" enctype="multipart/form-data">
+        <form method="post" action="{{ url_for('import_planting') }}" enctype="multipart/form-data" data-full-reload>
             {{ csrf_field() }}
             <label>CSV file <input type="file" name="file" accept=".csv,text/csv" required></label>
             <div class="grid">
@@ -112,7 +112,7 @@
             <li>An employee who already has a payslip for that month is rejected, which protects against importing a file twice.</li>
         </ul>
         <p><a href="{{ url_for('import_template', kind='payroll') }}">Download the salaries &amp; wages template</a></p>
-        <form method="post" action="{{ url_for('import_payroll') }}" enctype="multipart/form-data">
+        <form method="post" action="{{ url_for('import_payroll') }}" enctype="multipart/form-data" data-full-reload>
             {{ csrf_field() }}
             <label>CSV file <input type="file" name="file" accept=".csv,text/csv" required></label>
             <label class="check"><input type="checkbox" name="allow_repeats"> Allow extra payslips for a month that already has one</label>

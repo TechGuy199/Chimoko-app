@@ -8,7 +8,7 @@
             custom.hidden = false;
             custom.querySelector("input").focus();
         } else {
-            form.submit();
+            form.requestSubmit();
         }
     });
 
