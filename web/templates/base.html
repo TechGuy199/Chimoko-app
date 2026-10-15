@@ -83,7 +83,7 @@
     </details>
 
     <details class="menu">
-        <summary class="btn ghost">{{ user.username }}</summary>
+        <summary class="btn ghost" title="{{ user.username }}"><span class="who">{{ user.username }}</span></summary>
         <div class="menu-panel">
             <span class="menu-heading">Signed in as {{ user.role }}</span>
             <a class="menu-item {{ 'active' if request.endpoint == 'appearance' }}" href="{{ url_for('appearance') }}">Appearance</a>

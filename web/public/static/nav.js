@@ -131,6 +131,25 @@
         });
     });
 
+    // Dropdown menus (<details class="menu">) stay on screen: a panel that would open past either edge of a narrow
+    // screen (the Actions menu on Reports, when its button wraps to the left) is nudged back in. The header's own menus
+    // already open full width on a phone (styles.css). "toggle" does not bubble, hence the capture phase.
+    document.addEventListener("toggle", function (e) {
+        const menu = e.target;
+        if (!(menu instanceof HTMLDetailsElement) || !menu.open || !menu.classList.contains("menu")) return;
+        const panel = menu.querySelector(".menu-panel");
+        if (!panel) return;
+        panel.style.marginRight = "";
+        // The panel grows in from its top right corner, so its right edge is where it will settle; its width is
+        // read without the opening animation's scale
+        const edge = 8;
+        const right = panel.getBoundingClientRect().right;
+        const left = right - panel.offsetWidth;
+        const screen = document.documentElement.clientWidth;
+        if (left < edge) panel.style.marginRight = (left - edge) + "px";
+        else if (right > screen - edge) panel.style.marginRight = (right - (screen - edge)) + "px";
+    }, true);
+
     window.addEventListener("popstate", function () {
         navigate(location.href, { method: "GET" }, false, 0).catch(function () {
             location.reload();

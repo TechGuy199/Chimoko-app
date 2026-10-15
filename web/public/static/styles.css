@@ -663,9 +663,19 @@ tr.unread td:first-child { box-shadow: inset 3px 0 0 var(--primary); }
 
 @media (max-width: 560px) {
     main { padding: 16px 12px 40px; }
-    .topbar { padding: 10px 12px; }
+    .topbar { padding: 10px 12px; gap: 6px; }
     .here { display: none; }
     .menu-groups { grid-template-columns: 1fr; }
+    /* The header row must fit a phone: the business name gives way (with "...") before the buttons do */
+    .brand { flex: 0 1 auto; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+    .topbar .menu { flex: 0 0 auto; position: static; }
+    .topbar .menu > summary.btn { padding-left: 10px; padding-right: 10px; }
+    .topbar .menu > summary::after { display: none; }   /* the little arrows: room for the business name instead */
+    .topbar .who { display: inline-block; max-width: 24vw; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; vertical-align: bottom; }
+    /* With the menus no longer positioned, a header panel opens across the full width just under the header,
+       instead of hanging off its own button - where it could run past either edge of the screen */
+    .topbar .menu-panel { left: 12px; right: 12px; min-width: 0; transform-origin: top center; }
+    .topbar .menu-groups { width: auto; max-width: none; }
 }
 
 /* ---------- Print: always black on white, whatever theme is chosen ---------- */
