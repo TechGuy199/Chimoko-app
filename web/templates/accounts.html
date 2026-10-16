@@ -1,0 +1,259 @@
+{% extends "base.html" %}
+{% block title %}Accounts — {% endblock %}
+{% block content %}
+{# Keeps the rest of the page's choices when one form changes some of them #}
+{% macro keep(changing) %}{% for key in ['period', 'from', 'to', 'direction', 'channel', 'category', 'q'] if key not in changing and request.args.get(key) %}<input type="hidden" name="{{ key }}" value="{{ request.args.get(key) }}">{% endfor %}{% endmacro %}
+
+<div class="page-head">
+    <div>
+        <h1>Accounts</h1>
+        <p class="muted">
+            Every movement of money into and out of the business. Sales, customer payments, purchases, supplier payments, refunds and payslips
+            are recorded here as they happen, with how the money was paid. Anything else, like rent, fuel, or money the owner puts in, is added with the buttons.
+        </p>
+    </div>
+    <div class="head-actions no-print">
+        <button type="button" class="btn success" data-modal-open="money-in">Record money in</button>
+        <button type="button" class="btn danger" data-modal-open="money-out">Record money out</button>
+    </div>
+</div>
+
+<form method="get" class="toolbar no-print" id="accounts-period">
+    {{ keep(['period', 'from', 'to']) }}
+    <select name="period" id="accounts-period-select" aria-label="Date range">
+        {% for value, label in periods %}<option value="{{ value }}" {{ 'selected' if value == f.period }}>{{ label }}</option>{% endfor %}
+    </select>
+    <span id="accounts-custom" class="date-range" {{ 'hidden' if f.period != 'custom' }}>
+        <input type="date" name="from" value="{{ f.start.isoformat() if f.start and f.period == 'custom' }}" aria-label="From" {{ 'disabled' if f.period != 'custom' }}>
+        <span class="muted">to</span>
+        <input type="date" name="to" value="{{ f.end.isoformat() if f.end and f.period == 'custom' }}" aria-label="To" {{ 'disabled' if f.period != 'custom' }}>
+        <button class="btn primary">Apply</button>
+    </span>
+    <span class="spacer"></span>
+    <a class="btn" href="{{ csv_url }}">Export CSV</a>
+    <button type="button" class="btn" onclick="window.print()">Print / Save as PDF</button>
+</form>
+<p class="muted period-line">
+    {% if f.start and f.end %}{{ f.start.strftime('%d %b %Y') }}{% if f.end != f.start %} to {{ f.end.strftime('%d %b %Y') }}{% endif %}
+    {% elif f.start %}From {{ f.start.strftime('%d %b %Y') }}
+    {% elif f.end %}Up to {{ f.end.strftime('%d %b %Y') }}
+    {% else %}All dates{% endif %}
+</p>
+
+<div class="stats">
+    <div class="stat"><span>Money in</span><strong class="ok">{{ summary.in|money }}</strong><small>in this period</small></div>
+    <div class="stat"><span>Money out</span><strong class="warn">{{ summary.out|money }}</strong><small>in this period</small></div>
+    <div class="stat"><span>Net cash flow</span><strong class="{{ 'ok' if summary.net >= 0 else 'warn' }}">{{ summary.net|signed }}</strong>
+        <small>{{ 'more came in than went out' if summary.net >= 0 else 'more went out than came in' }}</small></div>
+    <div class="stat"><span>Customers owe us</span><strong class="gold">{{ owed_to_us|money }}</strong><small>on unpaid invoices, today</small></div>
+    <div class="stat"><span>We owe suppliers</span><strong class="warn">{{ we_owe|money }}</strong><small>on unpaid purchases, today</small></div>
+</div>
+
+<div class="accounts-grid">
+    <section class="card">
+        <h2>By payment method</h2>
+        <div class="table-wrap">
+            <table class="method-table">
+                <thead><tr><th>Method</th><th class="num">In</th><th class="num">Out</th><th class="num">Net</th><th class="num">Held {{ 'at ' ~ f.end.strftime('%d %b') if f.end else 'now' }}</th></tr></thead>
+                <tbody>
+                {% for ch in summary.channels %}
+                    <tr class="channel-row">
+                        <td><a href="{{ narrow('channel', ch.name) }}">{{ ch.name }}</a></td>
+                        <td class="num">{{ ch.in|money }}</td>
+                        <td class="num">{{ ch.out|money }}</td>
+                        <td class="num {{ 'warn' if ch.net < -0.005 }}">{{ ch.net|signed }}</td>
+                        <td class="num"><strong>{{ ch.held|money }}</strong></td>
+                    </tr>
+                    {% for m in ch.methods %}
+                    <tr class="method-row">
+                        <td>{{ m.name }}</td>
+                        <td class="num">{{ m.in|money }}</td>
+                        <td class="num">{{ m.out|money }}</td>
+                        <td class="num">{{ m.net|signed }}</td>
+                        <td class="num">{{ m.held|money }}</td>
+                    </tr>
+                    {% endfor %}
+                {% else %}
+                    <tr><td colspan="5" class="muted center">No money has been recorded yet.</td></tr>
+                {% endfor %}
+                </tbody>
+                {% if summary.channels %}
+                <tfoot>
+                    <tr><th>Total</th><th class="num">{{ summary.in|money }}</th><th class="num">{{ summary.out|money }}</th><th class="num">{{ summary.net|signed }}</th><th class="num">{{ summary.held|money }}</th></tr>
+                </tfoot>
+                {% endif %}
+            </table>
+        </div>
+        <p class="muted hint">
+            Held is everything that came in less everything that went out, from the first entry up to the end of this period: what should be in the
+            cash box, the bank and the mobile money wallet. It matches them once the money the business started with is recorded (as Owner's money put in).
+            {% if summary.channels|selectattr('name', 'equalto', 'Not recorded')|list %}Not recorded is money from before Accounts existed, or entered without a method.{% endif %}
+        </p>
+    </section>
+
+    <section class="card">
+        <h2>Where money came from</h2>
+        {% if summary.sources %}
+        <div class="rank">
+            {% for r in summary.sources %}
+            <a class="rank-name" href="{{ narrow('category', r.key) }}" title="{{ r.label }}">{{ r.label }}</a>
+            <span class="rank-track"><i style="width: {{ r.pct }}%" data-tip="{{ r.label }}&#10;{{ r.total|money }} ({{ r.pct }}% of money in)"></i></span>
+            <span class="rank-value">{{ r.total|money }}</span>
+            {% endfor %}
+        </div>
+        {% else %}<p class="muted">Nothing came in during this period.</p>{% endif %}
+
+        <h2 class="spaced">What money went on</h2>
+        {% if summary.purposes %}
+        <div class="rank">
+            {% for r in summary.purposes %}
+            <a class="rank-name" href="{{ narrow('category', r.key) }}" title="{{ r.label }}">{{ r.label }}</a>
+            <span class="rank-track"><i class="out" style="width: {{ r.pct }}%" data-tip="{{ r.label }}&#10;{{ r.total|money }} ({{ r.pct }}% of money out)"></i></span>
+            <span class="rank-value">{{ r.total|money }}</span>
+            {% endfor %}
+        </div>
+        {% else %}<p class="muted">Nothing went out during this period.</p>{% endif %}
+    </section>
+</div>
+
+<section class="card block">
+    <h2>Cash flow {{ 'day by day' if flow.by_day else 'month by month' }}</h2>
+    <div class="table-wrap">
+        <table>
+            <thead><tr><th>{{ 'Day' if flow.by_day else 'Month' }}</th><th class="num">In</th><th class="num">Out</th><th class="num">Net</th><th class="num">Balance</th></tr></thead>
+            <tbody>
+            {% if flow.has_start %}
+                <tr class="muted"><td>Brought forward from before {{ f.start.strftime('%d %b %Y') }}</td><td></td><td></td><td></td><td class="num">{{ flow.opening|money }}</td></tr>
+            {% endif %}
+            {% for line in flow.lines %}
+                <tr>
+                    <td>{{ line.label }}</td>
+                    <td class="num">{{ line.in|money }}</td>
+                    <td class="num">{{ line.out|money }}</td>
+                    <td class="num {{ 'warn' if line.net < -0.005 }}">{{ line.net|signed }}</td>
+                    <td class="num">{{ line.balance|money }}</td>
+                </tr>
+            {% else %}
+                <tr><td colspan="5" class="muted center">No money moved in this period.</td></tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+
+<section class="card block" id="transactions">
+    <h2>Entries</h2>
+    <form method="get" class="toolbar no-print" id="entries-filters" action="{{ url_for('accounts') }}#transactions">
+        {{ keep(['direction', 'channel', 'category', 'q']) }}
+        <select name="direction" aria-label="In or out" onchange="this.form.requestSubmit()">
+            <option value="">Money in and out</option>
+            <option value="in" {{ 'selected' if f.direction == 'in' }}>Money in only</option>
+            <option value="out" {{ 'selected' if f.direction == 'out' }}>Money out only</option>
+        </select>
+        <select name="channel" aria-label="Payment method" onchange="this.form.requestSubmit()">
+            <option value="">Every method</option>
+            {% for name in channels %}<option {{ 'selected' if f.channel == name }}>{{ name }}</option>{% endfor %}
+        </select>
+        <select name="category" aria-label="Category" onchange="this.form.requestSubmit()">
+            <option value="">Every category</option>
+            <optgroup label="Money in">{% for key, label in money_in %}<option value="{{ key }}" {{ 'selected' if f.category == key }}>{{ label }}</option>{% endfor %}</optgroup>
+            <optgroup label="Money out">{% for key, label in money_out %}<option value="{{ key }}" {{ 'selected' if f.category == key }}>{{ label }}</option>{% endfor %}</optgroup>
+        </select>
+        <input type="search" name="q" id="entries-q" value="{{ f.q }}" placeholder="Search name, details or reference" aria-label="Search entries" autocomplete="off">
+        <button class="btn primary">Filter</button>
+        {% if list_filtered %}<a class="btn" href="{{ clear_url }}">Clear filters</a>{% endif %}
+    </form>
+    <p class="muted">
+        {{ '{:,}'.format(listed.n) }} entr{{ 'y' if listed.n == 1 else 'ies' }}{% if list_filtered %} matching{% endif %}
+        &middot; in {{ listed.cin|money }} &middot; out {{ listed.cout|money }}
+        {% if listed.n > entries|length %}&middot; showing the latest {{ entries|length }}; Export CSV has all of them{% endif %}
+    </p>
+    <div class="table-wrap">
+        <table class="entries">
+            <thead><tr><th>Date</th><th>Category</th><th>From / to</th><th>Details</th><th>Method</th><th>Reference</th><th class="num">Amount</th><th>By</th><th class="no-print"></th></tr></thead>
+            <tbody>
+            {% for e in entries %}
+                {% set effect = e.amount if e.direction == 'in' else -e.amount %}
+                <tr>
+                    <td class="nowrap">{{ e.occurred_at[:10] }}{% if e.occurred_at[11:16] != '00:00' %}<br><small class="muted">{{ e.occurred_at[11:16] }}</small>{% endif %}</td>
+                    <td><span class="flow-tag {{ e.direction }}">{{ 'In' if e.direction == 'in' else 'Out' }}</span> {{ e.label }}</td>
+                    <td>{{ e.party or '—' }}</td>
+                    <td>{% if e.link %}<a href="{{ e.link }}">{{ e.description or 'Open' }}</a>{% else %}{{ e.description or '—' }}{% endif %}</td>
+                    <td>{{ e.method }}</td>
+                    <td>{{ e.reference or '—' }}</td>
+                    <td class="num {{ 'ok' if effect > 0 else 'warn' }}">{{ effect|signed }}</td>
+                    <td>{{ e.recorded_by }}</td>
+                    <td class="num no-print">
+                        {% if e.source == 'manual' %}
+                        <form method="post" action="{{ url_for('delete_account_entry', entry_id=e.id) }}" data-confirm="Remove this {{ e.amount|money }} entry ({{ e.label }}) from Accounts?">
+                            {{ csrf_field() }}<input type="hidden" name="back" value="{{ here }}">
+                            <button class="btn danger small">Remove</button>
+                        </form>
+                        {% endif %}
+                    </td>
+                </tr>
+            {% else %}
+                <tr><td colspan="9" class="muted center">{% if list_filtered %}No entry matches these filters in this period.{% else %}No money moved in this period.{% endif %}</td></tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+
+{# Money that no other page records #}
+{% for dir, title, cats in [('in', 'Record money in', manual_in), ('out', 'Record money out', manual_out)] %}
+<dialog class="modal" id="money-{{ dir }}" aria-labelledby="money-{{ dir }}-title">
+    <div class="modal-body">
+        <h2 id="money-{{ dir }}-title">{{ title }}</h2>
+        <p class="muted">
+            {% if dir == 'in' %}For money that is not a sale or a customer's payment (those are recorded by the POS and the statements): money the owner puts in, a loan, or other income.
+            {% else %}For money that is not a purchase or pay (those are recorded by Procurements and HR): rent, electricity, fuel, repairs, charges, taxes, drawings.{% endif %}
+        </p>
+        <form method="post" action="{{ url_for('record_account_entry') }}">
+            {{ csrf_field() }}
+            <input type="hidden" name="direction" value="{{ dir }}">
+            <input type="hidden" name="back" value="{{ here }}">
+            <label>{{ 'What it is' if dir == 'in' else 'What it was for' }}
+                <select name="category" required>
+                    <option value="">Choose&hellip;</option>
+                    {% for key, label in cats %}<option value="{{ key }}">{{ label }}</option>{% endfor %}
+                </select>
+            </label>
+            <div class="grid">
+                <label>Amount <input name="amount" type="number" min="0.01" step="0.01" inputmode="decimal" required></label>
+                <label>Date <input name="occurred_on" type="date" value="{{ today }}" max="{{ today }}" required></label>
+                <label>How it was paid
+                    <select name="payment_method" data-method-select required>
+                        <option value="">Choose a method</option>
+                        {% for method, label in methods %}<option value="{{ method }}" data-reference-label="{{ label }}">{{ method }}</option>{% endfor %}
+                    </select>
+                </label>
+                <label><span data-reference-text>Reference number</span> (optional) <input name="payment_reference" maxlength="60" data-reference autocomplete="off"></label>
+            </div>
+            <label>{{ 'Received from' if dir == 'in' else 'Paid to' }} (optional) <input name="party" maxlength="100"></label>
+            <label>Details (optional) <input name="description" maxlength="200" placeholder="{{ 'e.g. Capital from the directors' if dir == 'in' else 'e.g. October shop rent' }}"></label>
+            <button class="btn {{ 'success' if dir == 'in' else 'danger' }} wide">Save</button>
+            <p class="center"><button type="button" class="btn ghost" data-modal-close>Cancel</button></p>
+        </form>
+    </div>
+</dialog>
+{% endfor %}
+{% endblock %}
+{% block scripts %}
+<script src="{{ asset('payment_method.js') }}"></script>
+<script>
+    // Date range: a preset applies straight away; "Custom range" shows the two date boxes, applied with Apply
+    (function () {
+        const form = document.getElementById("accounts-period");
+        const period = document.getElementById("accounts-period-select");
+        const custom = document.getElementById("accounts-custom");
+        period.addEventListener("change", function () {
+            const isCustom = period.value === "custom";
+            custom.hidden = !isCustom;
+            custom.querySelectorAll("input").forEach(function (box) { box.disabled = !isCustom; });
+            if (isCustom) custom.querySelector("input").focus();
+            else form.requestSubmit();
+        });
+    })();
+</script>
+{% endblock %}

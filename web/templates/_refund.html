@@ -1,0 +1,17 @@
+{# Inside an invoice's cancel form: pay back what the customer had paid, and how, so Accounts records it as money out.
+   Unticked, what was paid stays in Accounts as money received (kept as credit, for example). Expects: inv, methods. #}
+{% if inv.amount_paid > 0.005 %}
+<div class="refund-fields">
+    <label class="check"><input type="checkbox" name="refund" value="1"> Refund the {{ inv.amount_paid|money }} the customer paid</label>
+    <div class="grid">
+        <label>Refunded by
+            <select name="payment_method">
+                <option value="">Choose a method</option>
+                {% for method, label in methods %}<option value="{{ method }}">{{ method }}</option>{% endfor %}
+            </select>
+        </label>
+        <label>Reference (optional) <input name="payment_reference" maxlength="60" autocomplete="off"></label>
+    </div>
+    <p class="muted hint">Leave it unticked if the money is not given back; it then stays in Accounts as money received.</p>
+</div>
+{% endif %}

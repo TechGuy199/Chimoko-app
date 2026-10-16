@@ -122,11 +122,21 @@
         if (matches.length === 1 && !customerPhone.value.trim()) customerPhone.value = matches[0].dataset.phone;
     });
 
-    status.addEventListener("change", function () {
+    // How it was paid is asked whenever money is being taken; for an unpaid sale it is hidden and switched off, so it is not sent
+    const methodRow = document.getElementById("pay-method-row");
+    const method = document.getElementById("pay-method");
+    const reference = document.getElementById("pay-reference");
+    function updatePayment() {
         const partial = status.value === "Partial Payment";
+        const paying = status.value !== "Unpaid";
         amountRow.hidden = !partial;
         amountPaid.required = partial;
-    });
+        methodRow.hidden = !paying;
+        method.disabled = !paying;
+        reference.disabled = !paying;
+    }
+    status.addEventListener("change", updatePayment);
+    updatePayment();
 
     form.addEventListener("submit", function (e) {
         if (cart.size === 0) {

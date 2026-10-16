@@ -114,6 +114,16 @@
                 </select>
             </label>
             <label id="amount-row" hidden>Amount paid <input name="amount_paid" id="amount-paid" inputmode="decimal"></label>
+            {# How the money came in, for Accounts. Switched off (and so not sent) when nothing is being paid. #}
+            <div id="pay-method-row">
+                <label>How it was paid
+                    <select name="payment_method" id="pay-method" data-method-select required>
+                        <option value="">Choose: cash, bank or mobile money</option>
+                        {% for method, label in methods %}<option value="{{ method }}" data-reference-label="{{ label }}">{{ method }}</option>{% endfor %}
+                    </select>
+                </label>
+                <label><span data-reference-text>Reference number</span> (optional) <input name="payment_reference" id="pay-reference" maxlength="60" data-reference autocomplete="off"></label>
+            </div>
             <p class="total">Total: <span id="cart-total">{{ 0|money }}</span></p>
             <button class="btn success wide" {{ 'disabled' if not can('sell') }}>Complete Invoice</button>
             {% if not can('sell') %}<p class="muted center">Your account cannot process sales.</p>{% endif %}
@@ -121,4 +131,4 @@
     </section>
 </div>
 {% endblock %}
-{% block scripts %}<script src="{{ asset('pos.js') }}"></script>{% endblock %}
+{% block scripts %}<script src="{{ asset('payment_method.js') }}"></script><script src="{{ asset('pos.js') }}"></script>{% endblock %}

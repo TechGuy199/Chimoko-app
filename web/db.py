@@ -182,6 +182,17 @@ SCHEMA = [
         id {pk}, business_id INTEGER NOT NULL, low_id INTEGER NOT NULL, high_id INTEGER NOT NULL,
         UNIQUE (business_id, low_id, high_id)
     )""",
+    # Accounts: every movement of money into or out of the business, one row each, written in the same transaction as the
+    # sale, payment, purchase or payslip it belongs to. direction is 'in' or 'out'; a negative amount corrects an earlier
+    # entry in the same direction. source/source_id point back at what it came from ('invoice', 'purchase', 'supplier_payment',
+    # 'customer', 'payslip'), or 'manual' for income and expenses entered on the Accounts page itself.
+    """CREATE TABLE IF NOT EXISTS cashbook (
+        id {pk}, business_id INTEGER NOT NULL, direction TEXT NOT NULL, amount DOUBLE PRECISION NOT NULL, method TEXT NOT NULL,
+        reference TEXT DEFAULT '', category TEXT NOT NULL, party TEXT DEFAULT '', description TEXT DEFAULT '',
+        source TEXT DEFAULT '', source_id INTEGER, occurred_at TEXT NOT NULL, recorded_by TEXT, recorded_at TEXT
+    )""",
+    "CREATE INDEX IF NOT EXISTS cashbook_by_date ON cashbook (business_id, occurred_at)",
+    "CREATE INDEX IF NOT EXISTS cashbook_by_source ON cashbook (business_id, source, source_id)",
 ]
 
 
@@ -264,6 +275,9 @@ def init_schema():
         # Whether a planting is really still out there (goes on the POS, can be pre-ordered) or is a historical
         # record only - for example backfilled greenhouse history that no longer physically exists.
         add_column(db, "plantings", "still_in_greenhouse", "INTEGER NOT NULL DEFAULT 1")
+        # Set once a business's earlier money records have been copied into the cashbook (see backfill_cashbook in app.py).
+        # A business created after Accounts existed starts with it set, since everything it does is recorded as it happens.
+        add_column(db, "businesses", "cashbook_ready", "INTEGER")
         add_column(db, "businesses", "alert_phone", "TEXT")
         add_column(db, "businesses", "alert_low_stock", "INTEGER")
         add_column(db, "businesses", "alert_permission", "INTEGER")

@@ -48,7 +48,12 @@
     <form method="post" action="{{ url_for('customer_payment', customer_id=customer.id) }}" class="toolbar">
         {{ csrf_field() }}
         <input name="amount" type="number" min="0.01" max="{{ '%.2f'|format(summary.owed) }}" step="0.01" placeholder="Amount received" aria-label="Amount received" required>
-        <input name="note" maxlength="150" placeholder='Note (optional, e.g. "Mobile money, ref 1234")' aria-label="Note">
+        <select name="payment_method" aria-label="How it was paid" data-method-select required>
+            <option value="">How it was paid</option>
+            {% for method, label in methods %}<option value="{{ method }}" data-reference-label="{{ label }}">{{ method }}</option>{% endfor %}
+        </select>
+        <input name="payment_reference" maxlength="60" placeholder="Reference (optional)" aria-label="Reference" data-reference autocomplete="off">
+        <input name="note" maxlength="150" placeholder="Note (optional)" aria-label="Note">
         <button class="btn success">Record Payment</button>
     </form>
 </section>
@@ -148,6 +153,7 @@
                     <textarea name="reason" rows="2" maxlength="300" required placeholder="For example: customer changed their mind before collecting"></textarea>
                 </label>
                 <label class="check"><input type="checkbox" name="return_stock" value="1" checked> Put the items back into the POS stock</label>
+                {% include "_refund.html" %}
                 <button class="btn danger wide">Cancel invoice</button>
             </form>
         </details>
@@ -176,3 +182,4 @@
     </div>
 </dialog>
 {% endblock %}
+{% block scripts %}<script src="{{ asset('payment_method.js') }}"></script>{% endblock %}

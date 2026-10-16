@@ -61,6 +61,8 @@
         <dt>Payment status</dt><dd>{{ inv.payment_status }}</dd>
         <dt>Grand total</dt><dd>{{ inv.total|money }}</dd>
         <dt>Amount paid</dt><dd>{{ inv.amount_paid|money }}</dd>
+        {% set paid_with = paid_by|selectattr('direction', 'equalto', 'in')|selectattr('amount', 'gt', 0)|map(attribute='method')|reject('equalto', 'Not recorded')|unique|list %}
+        {% if paid_with %}<dt>Paid by</dt><dd>{{ paid_with|join(', ') }}</dd>{% endif %}
         <dt>Balance due</dt><dd>{{ inv.balance_due|money }}</dd>
     </dl>
 
@@ -79,7 +81,8 @@
 <section class="card block narrow-form no-print" id="cancel-invoice">
     <h2>Cancel this invoice</h2>
     {% if inv.payment_status == 'Cancelled' %}
-    <p class="muted">Cancelled by {{ inv.cancelled_by }} on {{ inv.cancelled_at }}. Reason: {{ inv.cancel_reason }}</p>
+    <p class="muted">Cancelled by {{ inv.cancelled_by }} on {{ inv.cancelled_at }}. Reason: {{ inv.cancel_reason }}
+        {% for r in paid_by if r.category == 'refund' %} Refunded {{ r.amount|money }} by {{ r.method|lower }}{% if r.reference %} (reference {{ r.reference }}){% endif %}.{% endfor %}</p>
     {% else %}
     <p class="muted">The invoice stays here and on the customer's statement, clearly marked, but owes nothing and no longer counts toward sales. Unlike deleting, nothing is erased.</p>
     <form method="post" action="{{ url_for('cancel_invoice', invoice_id=inv.id) }}" autocomplete="off"
@@ -89,6 +92,7 @@
             <textarea name="reason" rows="2" maxlength="300" required placeholder="For example: customer changed their mind before collecting"></textarea>
         </label>
         <label class="check"><input type="checkbox" name="return_stock" value="1" checked> Put the items back into {{ stock_to }} stock</label>
+        {% include "_refund.html" %}
         <div class="toolbar"><button class="btn danger">Cancel invoice</button></div>
     </form>
     {% endif %}
@@ -135,3 +139,4 @@
     {% endif %}
 </section>
 {% endblock %}
+{% block scripts %}<script src="{{ asset('payment_method.js') }}"></script>{% endblock %}

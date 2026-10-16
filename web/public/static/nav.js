@@ -64,19 +64,25 @@
         el.setSelectionRange(el.value.length, el.value.length);
     }
 
-    function navigate(url, init, pushState, scrollBefore) {
+    function navigate(url, init, pushState, scrollBefore, filtering) {
         // A saved form almost always posts to an action URL and is then redirected back to a display page (often
         // the very one it was submitted from) - so whether to keep the scroll position has to be judged against
-        // where the fetch actually lands (finalUrl), not the address it started at.
+        // where the fetch actually lands (finalUrl), not the address it started at. A search or filter form (filtering)
+        // only changes what the same page lists, so the page counts as the same whatever its query string.
         const startPage = location.href.split("#")[0];
+        const startPath = location.pathname;
+        const hash = new URL(url, location.href).hash;   // fetch drops it, so it is put back on the address and scrolled to
         return fetch(url, Object.assign({ credentials: "same-origin" }, init))
             .then(function (response) { return response.text().then(function (html) { return { html: html, finalUrl: response.url }; }); })
             .then(function (result) {
                 const kept = searchFocus();
                 if (!swap(result.html, result.finalUrl)) throw new Error("not a page");
-                if (pushState) history.pushState({ nav: true }, "", result.finalUrl);
-                const samePage = result.finalUrl.split("#")[0] === startPage;
-                window.scrollTo(0, samePage ? scrollBefore : 0);
+                if (pushState) history.pushState({ nav: true }, "", result.finalUrl + (new URL(result.finalUrl).hash ? "" : hash));
+                const samePage = filtering ? new URL(result.finalUrl).pathname === startPath : result.finalUrl.split("#")[0] === startPage;
+                const target = hash && !samePage ? document.getElementById(decodeURIComponent(hash.slice(1))) : null;
+                // Instant, not the page's smooth scrolling: the new page should simply be there, where it belongs
+                if (target) target.scrollIntoView({ behavior: "instant" });
+                else window.scrollTo({ top: samePage ? scrollBefore : 0, left: 0, behavior: "instant" });
                 restoreSearchFocus(kept, result.finalUrl);
                 // Lets dialog.js reopen an overlay whose save the server turned down
                 document.dispatchEvent(new CustomEvent("nav:swapped", { detail: { url: result.finalUrl } }));
@@ -121,12 +127,15 @@
         const scrollBefore = window.scrollY;
         let init;
         if (method === "GET") {
-            url.search = new URLSearchParams(new FormData(form)).toString();
+            // Empty fields are left out of the address (the server reads a missing field and an empty one alike)
+            const query = new URLSearchParams();
+            new FormData(form).forEach(function (value, key) { if (value !== "") query.append(key, value); });
+            url.search = query.toString();
             init = { method: "GET" };
         } else {
             init = { method: method, body: new FormData(form) };
         }
-        navigate(url.toString(), init, true, scrollBefore).catch(function () {
+        navigate(url.toString(), init, true, scrollBefore, method === "GET").catch(function () {
             form.submit();   // a real submit, which this listener cannot intercept a second time
         });
     });

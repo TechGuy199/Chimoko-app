@@ -104,17 +104,26 @@
         }
     }
 
-    // What is paid to a named supplier is kept with its method and reference number, so those boxes show once there is a supplier
-    // and something was paid. A known supplier also fills in their phone number.
+    // Whatever is paid goes to Accounts with how it was paid, so the method shows whenever something is paid. Paid to a named
+    // supplier it is also kept on their statement, and then the reference number is needed too. A known supplier fills in their phone.
     const supplier = document.getElementById("purchase-supplier");
     const supplierPhone = document.getElementById("purchase-supplier-phone");
     const payStatus = document.getElementById("purchase-status");
     const payRow = document.getElementById("pay-method-row");
     const payMethod = document.getElementById("purchase-method");
+    const optional = document.getElementById("pay-reference-optional");
     function updatePayment() {
-        const show = payStatus.value !== "Unpaid" && supplier.value.trim() !== "";
-        payRow.hidden = !show;
-        payMethod.required = show;
+        const paying = payStatus.value !== "Unpaid";
+        const named = supplier.value.trim() !== "";
+        payRow.hidden = !paying;
+        payMethod.required = paying;
+        payMethod.disabled = !paying;
+        payRow.querySelector("[data-reference]").disabled = !paying;
+        // payment_method.js reads this to require the reference once a method is picked
+        if (named) payMethod.setAttribute("data-require-reference", "");
+        else payMethod.removeAttribute("data-require-reference");
+        optional.hidden = named;
+        payMethod.dispatchEvent(new Event("change"));
     }
     supplier.addEventListener("input", updatePayment);
     payStatus.addEventListener("change", updatePayment);

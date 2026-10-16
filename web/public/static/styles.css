@@ -453,6 +453,21 @@ td form { margin: 0; display: inline; }
 .rank-track { display: block; }
 .rank-track i { display: block; height: 14px; min-width: 2px; border-radius: 0 4px 4px 0; transform-origin: left; animation: grow-x 0.55s var(--ease) both; }
 .rank-value { color: var(--text-muted); font-variant-numeric: tabular-nums; }
+a.rank-name { color: var(--text); }
+a.rank-name:hover { color: var(--accent); }
+.rank-track i.out { background: var(--series-2); }
+
+/* Accounts */
+.accounts-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 560px), 1fr)); gap: 18px; align-items: start; }
+.accounts-grid > .card { margin: 0; }
+.method-table td:first-child { white-space: nowrap; }
+.method-table .channel-row td { font-weight: 600; }
+.method-table .method-row td { color: var(--text-muted); font-size: 12px; }
+.method-table .method-row td:first-child { padding-left: 24px; }
+.method-table tfoot th { color: var(--text); font-size: 13px; text-transform: none; letter-spacing: 0; border-top: 1px solid var(--line-strong); }
+.flow-tag { display: inline-block; min-width: 30px; margin-right: 4px; padding: 1px 6px; border-radius: 4px; font-size: 10.5px; font-weight: 700; text-align: center; text-transform: uppercase; }
+.flow-tag.in { background: rgba(34, 197, 94, 0.16); color: var(--ok-text); }
+.flow-tag.out { background: rgba(239, 68, 68, 0.14); color: var(--warn-text); }
 
 /* ---------- Customers ---------- */
 .twin-prompt { margin-bottom: 18px; border-color: rgba(202, 138, 4, 0.45); }

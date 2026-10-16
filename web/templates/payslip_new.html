@@ -33,6 +33,15 @@
         </div>
         <button type="button" class="btn small" data-add="deduction">+ Add deduction</button>
 
+        <h2 class="spaced">Paying it</h2>
+        <label>How the pay is paid
+            <select name="payment_method" required>
+                <option value="">Choose: cash, bank or mobile money</option>
+                {% for method, label in methods %}<option value="{{ method }}">{{ method }}</option>{% endfor %}
+            </select>
+        </label>
+        <p class="muted hint">Saving records the net pay, and NAPSA and NHIMA (both shares), as money out in Accounts. Deleting the payslip removes them.</p>
+
         <button class="btn success wide spaced">Generate &amp; Save Payslip</button>
     </form>
 </div>

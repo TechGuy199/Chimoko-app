@@ -259,7 +259,17 @@ def money_precise(value):
 def money(value):
     user = g.get("user")
     currency = user["currency"] if user else ""
-    return f"{currency}{float(value or 0):,.2f}"
+    amount = float(value or 0)
+    return f"{currency}{0.0 if abs(amount) < 0.005 else amount:,.2f}"   # never "-0.00" from rounding
+
+
+@app.template_filter("signed")
+def signed_money(value):
+    """An amount's effect on the money held: + for money in, a minus sign for money out."""
+    amount = float(value or 0)
+    if abs(amount) < 0.005:
+        return money(0)
+    return ("+ " if amount > 0 else "− ") + money(abs(amount))
 
 
 def text(key):
@@ -540,7 +550,7 @@ def setup():
         else:
             try:
                 biz = db.insert(
-                    "INSERT INTO businesses (name, subtitle, contact) VALUES (?, ?, ?)",
+                    "INSERT INTO businesses (name, subtitle, contact, cashbook_ready) VALUES (?, ?, ?, 1)",
                     (business, text("subtitle"), text("contact")),
                 )
                 db.execute("INSERT INTO departments (business_id, name) VALUES (?, 'General')", (biz,))
@@ -623,7 +633,7 @@ def pos():
     }
     known_customers = db.all("SELECT name, phone FROM customers WHERE business_id=? ORDER BY name LIMIT 1000", (biz,))
     return render_template(
-        "pos.html", products=products, stats=stats, departments=department_names(db, biz), statuses=PAYMENT_STATUSES,
+        "pos.html", products=products, stats=stats, departments=department_names(db, biz), statuses=PAYMENT_STATUSES, methods=PAYMENT_METHODS,
         known_customers=known_customers, up_next=up_next_summary(db, biz), removal_reasons=POS_REMOVAL_REASONS,
     )
 
@@ -747,18 +757,27 @@ def checkout():
         if amount_paid <= 0 or amount_paid >= total:
             flash("A partial payment must be more than zero and less than the invoice total.", "error")
             return redirect(url_for("pos"))
+    # Whatever is paid now goes to Accounts with how it was paid: cash, bank or mobile money
+    method, reference = NOT_RECORDED, ""
+    if amount_paid > 0.005:
+        method, reference, problem = read_money_method()
+        if problem:
+            flash(problem, "error")
+            return redirect(url_for("pos"))
 
     try:
         sold_at = now().strftime("%Y-%m-%d %H:%M:%S")
+        invoice_no, customer = next_invoice_no(db, biz), text("customer_name") or WALK_IN
         invoice_id = db.insert(
             """INSERT INTO invoices (business_id, invoice_no, kind, customer_name, customer_phone, payment_status, total, amount_paid, balance_due, created_by, created_at, customer_id)
                VALUES (?, ?, 'SALE', ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
-                biz, next_invoice_no(db, biz), text("customer_name") or WALK_IN, text("customer_phone"),
+                biz, invoice_no, customer, text("customer_phone"),
                 status, total, amount_paid, round(total - amount_paid, 2), g.user["username"], sold_at,
                 customer_for(db, biz, text("customer_name"), text("customer_phone"), sold_at),
             ),
         )
+        record_money(db, biz, "in", amount_paid, method, "sale", reference, customer, f"Invoice {invoice_no}", "invoice", invoice_id, sold_at)
         for p, qty, line_total in lines:
             # The quantity check in the WHERE clause stops two tills selling the same last units
             moved = db.execute(
@@ -1331,10 +1350,11 @@ def purchase():
     except ValueError as e:
         flash(str(e).capitalize() + ".", "error")
         return redirect(again)
-    # What is paid to a named supplier is kept with its method and reference number (for cash, the receipt number)
+    # How it was paid goes to Accounts. Paid to a named supplier it is also kept on their statement, and then it needs its
+    # reference number (for cash, the receipt number); with no supplier the reference is optional.
     method, reference = NOT_RECORDED, ""
-    if amount_paid > 0.005 and text("supplier_name"):
-        method, reference, problem = read_payment_details(strict=False)
+    if amount_paid > 0.005:
+        method, reference, problem = read_payment_details(strict=False) if text("supplier_name") else read_money_method(required=False)
         if problem:
             flash(problem, "error")
             return redirect(again)
@@ -1430,6 +1450,12 @@ def record_purchase(db, biz, p):
         add_supplier_payment(
             db, biz, supplier_id, paid_now, p.get("payment_method") or NOT_RECORDED, p.get("payment_reference") or "", p["purchase_date"],
             "Paid when the purchase was logged", [(procurement_id, paid_now)], apply=False,
+        )
+    elif paid_now > 0.005:
+        # Bought with no supplier account: the money still left the business
+        record_money(
+            db, biz, "out", paid_now, p.get("payment_method") or NOT_RECORDED, "purchase", p.get("payment_reference") or "", "",
+            f"{existing['name'] if existing else p['name']} x {p['quantity']:,}", "purchase", procurement_id, stamp_for_day(p["purchase_date"]),
         )
     if inventory:
         db.execute("UPDATE pos_products SET price=? WHERE business_id=? AND item_code=?", (price, biz, p["item_code"]))
@@ -1795,14 +1821,14 @@ def parse_day(value):
         return None
 
 
-def invoice_period():
+def invoice_period(default="all"):
     """The date filter on Sales & Invoices: (choice, first day, last day) from the query string.
 
     Either day can be None, meaning no limit on that side (both None for all dates). Weeks run Monday to Sunday.
     """
     today = now().date()
     day = datetime.timedelta(days=1)
-    choice = request.args.get("period", "all")
+    choice = request.args.get("period", default)
     start = end = None
     if choice == "today":
         start = end = today
@@ -1928,7 +1954,8 @@ def invoice(invoice_id):
         asked = {**asked, "until": (asked["expires_at"] or "")[11:16]}
     return render_template(
         "invoice.html", inv=inv, lines=lines, payments=payment_history(db, "sale", invoice_id), twins=twins, asked=asked,
-        stock_to=("inventory" if inv["kind"] == "FARM_USE" else "the POS"),
+        stock_to=("inventory" if inv["kind"] == "FARM_USE" else "the POS"), methods=PAYMENT_METHODS,
+        paid_by=money_lines(db, biz, "invoice", invoice_id),
     )
 
 
@@ -2031,6 +2058,8 @@ def delete_invoice(invoice_id):
 
         db.execute("DELETE FROM invoice_items WHERE invoice_id=? AND business_id=?", (invoice_id, biz))
         db.execute("DELETE FROM payment_log WHERE business_id=? AND kind='sale' AND ref_id=?", (biz, invoice_id))
+        # A deleted invoice was a mistake, so the money recorded against it goes from Accounts too (its payments stay in the deletion record)
+        db.execute("DELETE FROM cashbook WHERE business_id=? AND source='invoice' AND source_id=?", (biz, invoice_id))
         db.execute("DELETE FROM invoices WHERE id=? AND business_id=?", (invoice_id, biz))
         db.insert(
             """INSERT INTO deleted_invoices (business_id, invoice_no, kind, customer_name, customer_phone, payment_status, total, amount_paid, balance_due,
@@ -2081,6 +2110,15 @@ def cancel_invoice(invoice_id):
     if len(reason) < 5:
         flash("Say why the invoice is being cancelled (at least a few words). Nothing was changed.", "error")
         return back
+    # Cancelling moves no money by itself. What the customer had paid is refunded only when that is ticked, and then
+    # Accounts records it as money out, with how it was paid back.
+    refund = round(inv["amount_paid"], 2) if request.form.get("refund") and inv["amount_paid"] > 0.005 else 0.0
+    method, reference = NOT_RECORDED, ""
+    if refund:
+        method, reference, problem = read_money_method()
+        if problem or not text("payment_method"):
+            flash(("Choose how the refund was paid." if not text("payment_method") else problem) + " Nothing was changed.", "error")
+            return back
 
     lines = db.all("SELECT item_code, qty FROM invoice_items WHERE invoice_id=? AND business_id=?", (invoice_id, biz))
     try:
@@ -2097,9 +2135,13 @@ def cancel_invoice(invoice_id):
             "UPDATE invoices SET payment_status='Cancelled', balance_due=0, cancelled_at=?, cancelled_by=?, cancel_reason=? WHERE id=? AND business_id=?",
             (now().strftime("%Y-%m-%d %H:%M:%S"), g.user["username"], reason, invoice_id, biz),
         )
+        record_money(
+            db, biz, "out", refund, method, "refund", reference, inv["customer_name"], f"Refund on cancelled invoice {inv['invoice_no']}", "invoice", invoice_id,
+        )
         notify(
             db, "cancellation", f"Invoice {inv['invoice_no']} was cancelled",
-            f"{g.user['username']} cancelled invoice {inv['invoice_no']} ({inv['customer_name']}, {money(inv['total'])}). Reason: {reason}.",
+            f"{g.user['username']} cancelled invoice {inv['invoice_no']} ({inv['customer_name']}, {money(inv['total'])}). Reason: {reason}."
+            + (f" {money(refund)} was refunded by {method.lower()}." if refund else ""),
             url_for("invoice", invoice_id=invoice_id),
         )
         db.commit()
@@ -2108,7 +2150,8 @@ def cancel_invoice(invoice_id):
         flash("The invoice could not be cancelled. Please try again.", "error")
         return back
 
-    flash(f"Invoice {inv['invoice_no']} was cancelled. It stays on record but owes nothing and no longer counts toward sales. {stock_note}".strip(), "ok")
+    refund_note = f" {money(refund)} was refunded by {method.lower()} and recorded in Accounts." if refund else ""
+    flash(f"Invoice {inv['invoice_no']} was cancelled. It stays on record but owes nothing and no longer counts toward sales.{refund_note} {stock_note}".strip(), "ok")
     return back
 
 
@@ -2131,7 +2174,9 @@ def deleted_invoices():
 @need("admin")
 def invoice_payment(invoice_id):
     db, biz = get_db(), g.user["business_id"]
-    inv = db.one("SELECT total, amount_paid, payment_status FROM invoices WHERE id=? AND business_id=? AND kind='SALE'", (invoice_id, biz))
+    inv = db.one(
+        "SELECT invoice_no, customer_name, total, amount_paid, payment_status FROM invoices WHERE id=? AND business_id=? AND kind='SALE'", (invoice_id, biz)
+    )
     if inv is None:
         abort(404)
     if inv["payment_status"] == "Cancelled":
@@ -2144,9 +2189,22 @@ def invoice_payment(invoice_id):
         flash(f"Enter an amount between 0 and the invoice total ({money(inv['total'])}).", "error")
         return redirect(url_for("invoice", invoice_id=invoice_id))
 
+    # More paid is money received, with how it came in; less paid corrects an earlier entry
+    change = round(new_paid - inv["amount_paid"], 2)
+    method, reference = CORRECTION, ""
+    if change > 0.005:
+        method, reference, problem = read_money_method()
+        if problem:
+            db.rollback()
+            flash(problem, "error")
+            return redirect(url_for("invoice", invoice_id=invoice_id))
     db.execute(
         "UPDATE invoices SET amount_paid=?, balance_due=?, payment_status=? WHERE id=? AND business_id=?",
         (new_paid, round(inv["total"] - new_paid, 2), payment_status_for(inv["total"], new_paid), invoice_id, biz),
+    )
+    record_money(
+        db, biz, "in", change, method, "customer_payment", reference, inv["customer_name"],
+        f"Invoice {inv['invoice_no']}" + (f": {text('note')[:120]}" if text("note") else ""), "invoice", invoice_id,
     )
     db.commit()
     flash("Payment updated.", "ok")
@@ -2190,7 +2248,7 @@ def procurement(purchase_id):
     db = get_db()
     p = get_procurement(db, purchase_id)
     return render_template(
-        "purchase.html", p=p, payments=payment_history(db, "purchase", purchase_id), methods=PAYMENT_METHODS if p["supplier_id"] else None,
+        "purchase.html", p=p, payments=payment_history(db, "purchase", purchase_id), methods=PAYMENT_METHODS, ref_required=bool(p["supplier_id"]),
         supplier=db.one("SELECT id, name FROM suppliers WHERE id=? AND business_id=?", (p["supplier_id"], g.user["business_id"])) if p["supplier_id"] else None,
     )
 
@@ -2238,7 +2296,20 @@ def procurement_payment(purchase_id):
         flash(f"Enter an amount between 0 and the purchase total ({money(p['total_cost'])}).", "error")
         return redirect(url_for("procurement", purchase_id=purchase_id))
 
+    # No supplier account: the payment goes to Accounts on its own, with how it was paid (a reduction is a correction)
+    change = round(new_paid - p["amount_paid"], 2)
+    method, reference = CORRECTION, ""
+    if change > 0.005:
+        method, reference, problem = read_money_method()
+        if problem:
+            db.rollback()
+            flash(problem, "error")
+            return here
     db.execute("UPDATE procurements SET amount_paid=? WHERE id=? AND business_id=?", (new_paid, purchase_id, g.user["business_id"]))
+    record_money(
+        db, g.user["business_id"], "out", change, method, "purchase", reference, p["supplier_name"] or "",
+        f"{p['name']} x {p['quantity']:,}" + (f": {text('note')[:120]}" if text("note") else ""), "purchase", purchase_id,
+    )
     db.commit()
     flash("Payment updated.", "ok")
     return redirect(url_for("procurement", purchase_id=purchase_id))
@@ -2443,6 +2514,10 @@ def new_payslip():
         if employee is None or expected <= 0 or worked < 0:
             flash("Choose an employee; expected days must be above zero and days worked cannot be negative.", "error")
             return redirect(url_for("new_payslip"))
+        method, _, problem = read_money_method()
+        if problem:
+            flash(problem.replace("the money was paid", "the pay was paid"), "error")
+            return redirect(url_for("new_payslip"))
 
         basic = employee["basic_salary"]
         calculated_basic = round(basic / expected * worked, 2)
@@ -2462,10 +2537,14 @@ def new_payslip():
                 now().strftime("%Y-%m-%d %H:%M:%S"),
             ),
         )
+        record_payslip_money(
+            db, biz, payslip_id, employee["full_name"], period.strftime("%Y-%m"), net, emp_napsa + emp_nhima + employer_napsa + employer_nhima,
+            method, now().strftime("%Y-%m-%d %H:%M:%S"),
+        )
         db.commit()
         return redirect(url_for("payslips", id=payslip_id))
 
-    return render_template("payslip_new.html", employees=employees, hr=hr_set, this_month=now().strftime("%Y-%m"))
+    return render_template("payslip_new.html", employees=employees, hr=hr_set, this_month=now().strftime("%Y-%m"), methods=PAYMENT_METHODS)
 
 
 @app.get("/hr/payslips")
@@ -2494,8 +2573,9 @@ def payslips():
 def delete_payslip(payslip_id):
     db = get_db()
     db.execute("DELETE FROM payroll WHERE id=? AND business_id=?", (payslip_id, g.user["business_id"]))
+    db.execute("DELETE FROM cashbook WHERE business_id=? AND source='payslip' AND source_id=?", (g.user["business_id"], payslip_id))
     db.commit()
-    flash("Payslip deleted.", "ok")
+    flash("Payslip deleted, with its pay in Accounts.", "ok")
     return redirect(url_for("hr"))
 
 
@@ -3048,7 +3128,7 @@ def customer_statement(customer_id):
     db = get_db()
     return render_template(
         "customer.html", customer=get_customer(db, customer_id), twins=phone_twins(db, g.user["business_id"], customer_id),
-        **statement_data(db, customer_id),
+        methods=PAYMENT_METHODS, **statement_data(db, customer_id),
     )
 
 
@@ -3171,9 +3251,9 @@ def statement_pdf(customer, data):
 @app.post("/customers/<int:customer_id>/payment")
 @need("admin")
 def customer_payment(customer_id):
-    """Spreads one lump-sum payment over the customer's unpaid invoices, oldest first."""
+    """Spreads one lump-sum payment over the customer's unpaid invoices, oldest first. Accounts gets it as one payment."""
     db, biz = get_db(), g.user["business_id"]
-    get_customer(db, customer_id)
+    customer = get_customer(db, customer_id)
     back = redirect(url_for("customer_statement", customer_id=customer_id))
     unpaid = db.all(
         """SELECT id, total, amount_paid, balance_due FROM invoices
@@ -3187,6 +3267,10 @@ def customer_payment(customer_id):
         amount = 0.0
     if amount <= 0 or amount > owed + 0.005:
         flash(f"Enter an amount above zero and no more than the {money(owed)} this customer owes.", "error")
+        return back
+    method, reference, problem = read_money_method()
+    if problem:
+        flash(problem, "error")
         return back
 
     stamp = now().strftime("%Y-%m-%d %H:%M:%S")
@@ -3208,6 +3292,10 @@ def customer_payment(customer_id):
             )
             remaining = round(remaining - part, 2)
             settled += 1
+        record_money(
+            db, biz, "in", min(amount, owed), method, "customer_payment", reference, customer["name"],
+            f"Payment on account, spread over {settled} invoice(s)" + (f": {text('note')[:120]}" if text("note") else ""), "customer", customer_id, stamp,
+        )
         db.commit()
     except DB_ERRORS:
         db.rollback()
@@ -3546,7 +3634,112 @@ def add_supplier_payment(db, biz, supplier_id, amount, method, reference, paid_o
             "INSERT INTO supplier_payment_allocations (business_id, payment_id, procurement_id, amount) VALUES (?, ?, ?, ?)",
             (biz, payment_id, procurement_id, round(part, 2)),
         )
+    supplier = db.one("SELECT name FROM suppliers WHERE id=? AND business_id=?", (supplier_id, biz))
+    record_money(
+        db, biz, "out", amount, method, "supplier", reference, supplier["name"] if supplier else "", note or "Payment to supplier",
+        "supplier_payment", payment_id, stamp_for_day(paid_on),
+    )
     return payment_id
+
+
+# --- ACCOUNTS: THE CASHBOOK ---
+# Every movement of money is written to the cashbook when it happens, by the page it happens on, in the same transaction:
+#   in:  a sale paid at the till or when a pre-order is collected, a later payment on an invoice or on a customer's account,
+#        and other income entered on the Accounts page;
+#   out: payments to suppliers (when a purchase is logged, on its payment page, or on the supplier's statement), purchases
+#        with no supplier account, salaries and NAPSA/NHIMA from payslips, refunds on cancelled invoices, and other expenses
+#        entered on the Accounts page.
+# A payment lowered later is a negative entry in the same direction with the method "Correction", so nothing is rewritten.
+# The Accounts page reads from here alone.
+CORRECTION = "Correction"
+MONEY_IN = (
+    ("sale", "Sales paid at the till"),
+    ("customer_payment", "Payments on credit sales"),
+    ("other_income", "Other income"),
+    ("capital", "Owner's money put in"),
+    ("loan_in", "Loans received"),
+)
+MONEY_OUT = (
+    ("supplier", "Payments to suppliers"),
+    ("purchase", "Purchases (no supplier account)"),
+    ("salaries", "Salaries (net pay)"),
+    ("statutory", "NAPSA & NHIMA"),
+    ("refund", "Refunds to customers"),
+    ("rent", "Rent"),
+    ("utilities", "Electricity, water & internet"),
+    ("transport", "Transport & fuel"),
+    ("repairs", "Repairs & maintenance"),
+    ("charges", "Bank & mobile money charges"),
+    ("tax", "Taxes, levies & licences"),
+    ("loan_out", "Loan repayments"),
+    ("drawings", "Owner's drawings"),
+    ("other_expense", "Other expenses"),
+)
+# Entered by hand on the Accounts page. The other categories are written only by the pages they belong to.
+MANUAL_IN = ("other_income", "capital", "loan_in")
+MANUAL_OUT = ("rent", "utilities", "transport", "repairs", "charges", "tax", "loan_out", "drawings", "other_expense")
+CATEGORY_LABELS = dict(MONEY_IN + MONEY_OUT)
+# Where money is held: cash, the bank (cheques and card slips are paid through it) or mobile money
+CHANNELS = (
+    ("Cash", ("Cash",)), ("Bank", ("Bank transfer", "Cheque", "Card")), ("Mobile money", ("Mobile money",)),
+    ("Other", ("Other",)), (NOT_RECORDED, (NOT_RECORDED,)), ("Corrections", (CORRECTION,)),
+)
+CHANNEL_OF = {method: channel for channel, methods in CHANNELS for method in methods}
+
+
+def stamp_for_day(day):
+    """A full timestamp for money dated by day only: now when it is today (so it sorts after today's earlier entries), else that midnight."""
+    if not day or day[:10] == today_str():
+        return now().strftime("%Y-%m-%d %H:%M:%S")
+    return f"{day[:10]} 00:00:00"
+
+
+def record_money(db, biz, direction, amount, method, category, reference="", party="", description="", source="", source_id=None, when=None, by=None):
+    """Writes one movement of money to the cashbook. The caller commits, so the entry stands or falls with what it records.
+
+    amount is what moved; a negative amount corrects an earlier entry in the same direction. Nothing is written for zero.
+    """
+    amount = round(amount or 0.0, 2)
+    if abs(amount) < 0.005:
+        return None
+    stamp = now().strftime("%Y-%m-%d %H:%M:%S")
+    return db.insert(
+        """INSERT INTO cashbook (business_id, direction, amount, method, reference, category, party, description, source, source_id, occurred_at, recorded_by, recorded_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            biz, direction, amount, method or NOT_RECORDED, (reference or "")[:60], category, (party or "")[:100], (description or "")[:200],
+            source, source_id, when or stamp, by or g.user["username"], stamp,
+        ),
+    )
+
+
+def read_money_method(required=True):
+    """How money moved, from a payment form: (method, reference, problem). The reference (receipt number, transaction ID) is optional.
+
+    A form without the method field at all (an older page, or nothing being paid) gives 'Not recorded'. A method field sent
+    blank is a problem to show, unless not required (then it is 'Not recorded' too); something unknown always is.
+    """
+    if "payment_method" not in request.form or (not required and not text("payment_method")):
+        return NOT_RECORDED, "", None
+    method = method_from_text(text("payment_method"))
+    if method is None:
+        return None, None, "Choose how the money was paid: " + ", ".join(m.lower() for m in METHOD_LABELS) + "."
+    return method, " ".join(text("payment_reference").split())[:60], None
+
+
+def money_lines(db, biz, source, source_id):
+    """The cashbook entries belonging to one invoice, purchase or payslip, oldest first."""
+    return db.all(
+        """SELECT direction, amount, method, reference, category, occurred_at FROM cashbook
+           WHERE business_id=? AND source=? AND source_id=? ORDER BY occurred_at, id""",
+        (biz, source, source_id),
+    )
+
+
+def record_payslip_money(db, biz, slip_id, employee, month, net, statutory, method, when, by=None):
+    """A payslip's pay leaves the business as two entries: net pay to the employee, and NAPSA/NHIMA (both shares) to the authorities."""
+    record_money(db, biz, "out", net, method, "salaries", "", employee, f"Pay for {month}", "payslip", slip_id, when, by)
+    record_money(db, biz, "out", statutory, method, "statutory", "", employee, f"NAPSA & NHIMA for {month}", "payslip", slip_id, when, by)
 
 
 @app.get("/suppliers")
@@ -4283,6 +4476,8 @@ SALES_COLUMNS = {
     "unit_price": ("unit price", "price"),
     "payment_status": ("payment status", "status"),
     "amount_paid": ("amount paid", "paid"),
+    "payment_method": ("payment method", "method", "mode of payment", "paid by", "payment mode"),
+    "payment_reference": ("payment reference", "reference", "receipt number", "receipt no", "reference number", "transaction id", "payment ref"),
 }
 IMPORT_TEMPLATES = {
     "purchases": (
@@ -4290,8 +4485,8 @@ IMPORT_TEMPLATES = {
         ["SEED-001", "Tomato Seed Pack", "Seeds", "Greenhouse", 50, 450, 600, "Agro Supplies Ltd", "SUP-1001", "2026-10-01", "B-22", "", "2027-10-01", "Paid", "", 1000, "pack", "Yes", "0977123456", "Bank transfer", "TRX-5521"],
     ),
     "sales": (
-        ["Invoice No", "Date", "Customer", "Phone", "Item Code", "Item Name", "Quantity", "Unit Price", "Payment Status", "Amount Paid"],
-        ["", "2026-10-01 09:30", "Jane Banda", "0977123456", "SEED-001", "Maize Seed 10kg", 2, 600, "Paid", ""],
+        ["Invoice No", "Date", "Customer", "Phone", "Item Code", "Item Name", "Quantity", "Unit Price", "Payment Status", "Amount Paid", "Payment Method", "Payment Reference"],
+        ["", "2026-10-01 09:30", "Jane Banda", "0977123456", "SEED-001", "Maize Seed 10kg", 2, 600, "Paid", "", "Mobile money", "MP261001.0930"],
     ),
     "payroll": (
         ["Employee Name", "NRC Number", "Employment Type", "Pay Month", "Basic Salary", "Expected Days", "Worked Days", "Bonus: Transport", "Deduction: Advance", "Employee NAPSA", "Employee NHIMA", "Employer NAPSA", "Employer NHIMA", "Net Pay"],
@@ -4496,13 +4691,13 @@ def import_purchases():
             except ValueError as e:
                 problems.append(str(e))
 
-        # How a payment to a named supplier was made. Optional in a file (older records have none); when given, it needs its reference number.
+        # How it was paid. Optional in a file (older records have none). Paid to a named supplier, a method given needs its reference number.
         pay_method, pay_ref = NOT_RECORDED, ""
-        if not problems and amount_paid and amount_paid > 0.005 and rec["supplier_name"] and (rec["payment_method"] or rec["payment_reference"]):
+        if not problems and amount_paid and amount_paid > 0.005 and (rec["payment_method"] or rec["payment_reference"]):
             found_method = method_from_text(rec["payment_method"])
             if found_method is None:
                 problems.append(f"payment method '{rec['payment_method']}' must be one of: " + ", ".join(METHOD_LABELS))
-            elif not rec["payment_reference"]:
+            elif rec["supplier_name"] and not rec["payment_reference"]:
                 problems.append(f"a {found_method.lower()} payment needs its {METHOD_LABELS[found_method].lower()}")
             else:
                 pay_method, pay_ref = found_method, rec["payment_reference"][:60]
@@ -4675,6 +4870,14 @@ def import_sales():
             status, amount_paid = "Paid", total
             problems.append(f"payment status '{first['payment_status']}' must be Paid, Partial Payment or Unpaid")
 
+        # How it was paid, for Accounts. Optional (older records have none); a method given must be one the app knows.
+        pay_method = NOT_RECORDED
+        if first.get("payment_method"):
+            pay_method = method_from_text(first["payment_method"])
+            if pay_method is None:
+                problems.append(f"payment method '{first['payment_method']}' must be one of: " + ", ".join(METHOD_LABELS))
+        first["pay_method"] = pay_method or NOT_RECORDED
+
         if problems:
             errors.append(f"Row {first['_row']}: " + "; ".join(problems))
         invoices.append((number_given, first, when, status, total, amount_paid, lines))
@@ -4706,6 +4909,10 @@ def import_sales():
                     round(total - amount_paid, 2), g.user["username"] + " (import)", sold_at,
                     customer_for(db, biz, first["customer_name"], first["customer_phone"], sold_at),
                 ),
+            )
+            record_money(
+                db, biz, "in", amount_paid, first["pay_method"], "sale", (first.get("payment_reference") or "")[:60], first["customer_name"] or WALK_IN,
+                f"Invoice {invoice_no} (imported)", "invoice", invoice_id, sold_at,
             )
             for code, name, dept, batch, qty, unit_price, line_total in lines:
                 db.execute(
@@ -4880,7 +5087,7 @@ def import_payroll():
                 (biz, hire["name"], hire["nrc"], hire["salary"], hire["type"], hire["since"]),
             )
         for s in slips:
-            db.execute(
+            slip_id = db.insert(
                 """INSERT INTO payroll (business_id, employee_id, employee_name, pay_month, basic_salary, expected_days, worked_days, calculated_basic,
                                         bonuses_json, deductions_json, napsa_amt, nhima_amt, employer_napsa, employer_nhima, net_payable, created_at)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
@@ -4888,6 +5095,12 @@ def import_payroll():
                     biz, s["employee_id"] or new_ids[s["hire_key"]], s["name"], s["month"], s["basic"], s["expected"], s["worked"], s["calculated_basic"],
                     json.dumps(s["bonuses"]), json.dumps(s["deductions"]), s["napsa"], s["nhima"], s["employer_napsa"], s["employer_nhima"], s["net"], stamp,
                 ),
+            )
+            # Imported pay was paid out at the time, dated here at the end of its pay month; the file does not say how it was paid
+            year, month = int(s["month"][:4]), int(s["month"][5:7])
+            record_payslip_money(
+                db, biz, slip_id, s["name"], s["month"], s["net"], s["napsa"] + s["nhima"] + s["employer_napsa"] + s["employer_nhima"], NOT_RECORDED,
+                f"{s['month']}-{calendar.monthrange(year, month)[1]:02d} 00:00:00",
             )
         db.commit()
     except DB_ERRORS:
@@ -5454,7 +5667,7 @@ def up_next():
         o["ask"] = active_request(db, o["id"], COLLECT_PREORDER) if o["status"] == "pending" and g.user["role"] != "admin" else None
         if o["ask"] and o["ask"]["status"] == "approved":
             o["ask"] = {**o["ask"], "until": (o["ask"]["expires_at"] or "")[11:16]}
-    return render_template("up_next.html", batches=batches, orders=orders, statuses=PAYMENT_STATUSES, release_days=RELEASE_DAYS, q=q)
+    return render_template("up_next.html", batches=batches, orders=orders, statuses=PAYMENT_STATUSES, release_days=RELEASE_DAYS, q=q, methods=PAYMENT_METHODS)
 
 
 @app.post("/planting/<int:planting_id>/preorder")
@@ -5571,17 +5784,25 @@ def preorder_collect(po_id):
     except ValueError as e:
         flash(f"Payment: {e}.", "error")
         return back
+    method, reference = NOT_RECORDED, ""
+    if amount_paid > 0.005:
+        method, reference, problem = read_money_method()
+        if problem:
+            flash(f"Payment: {problem}", "error")
+            return back
 
     try:
         sold_at = now().strftime("%Y-%m-%d %H:%M:%S")
+        invoice_no = next_invoice_no(db, biz)
         invoice_id = db.insert(
             """INSERT INTO invoices (business_id, invoice_no, kind, customer_name, customer_phone, payment_status, total, amount_paid, balance_due, created_by, created_at, customer_id)
                VALUES (?, ?, 'SALE', ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
-                biz, next_invoice_no(db, biz), po["customer_name"], po["customer_phone"], payment_status_for(total, amount_paid), total, amount_paid,
+                biz, invoice_no, po["customer_name"], po["customer_phone"], payment_status_for(total, amount_paid), total, amount_paid,
                 round(total - amount_paid, 2), g.user["username"], sold_at, customer_for(db, biz, po["customer_name"], po["customer_phone"], sold_at),
             ),
         )
+        record_money(db, biz, "in", amount_paid, method, "sale", reference, po["customer_name"], f"Invoice {invoice_no} (pre-order collected)", "invoice", invoice_id, sold_at)
         # The seedlings were taken out of stock when the pre-order was recorded, so only the sale itself is entered here
         db.execute(
             """INSERT INTO invoice_items (invoice_id, business_id, item_code, item_name, department, batch_no, qty, unit_price, line_total)
@@ -5788,6 +6009,391 @@ def stock_adjustments():
     return render_template("stock_adjustments.html", rows=rows, kind=kind)
 
 
+# --- ACCOUNTS PAGE (ADMIN) ---
+# Money in and money out over a chosen period: how much came in and went out, through which channel (cash, bank, mobile money),
+# where it came from and what it was spent on, how it moved day by day or month by month, and every entry behind those totals.
+ACCOUNT_PARAMS = ("period", "from", "to", "direction", "channel", "category", "q")
+ACCOUNT_LIST_LIMIT = 500
+
+
+def account_filters():
+    """What the Accounts page shows: a date range for everything, and the narrowing of its list of entries."""
+    period, start, end = invoice_period(default="this_month")
+    pick = lambda key, allowed: request.args.get(key, "") if request.args.get(key, "") in allowed else ""  # noqa: E731
+    return {
+        "period": period, "start": start, "end": end,
+        "direction": pick("direction", ("in", "out")), "channel": pick("channel", dict(CHANNELS)),
+        "category": pick("category", CATEGORY_LABELS), "q": " ".join(request.args.get("q", "").split())[:100],
+    }
+
+
+def days_where(start, end, column="occurred_at"):
+    """SQL limiting a timestamp column to whole days; either day may be None (no limit on that side)."""
+    where, params = "", []
+    if start:
+        where += f" AND {column} >= ?"
+        params.append(start.isoformat())
+    if end:
+        where += f" AND {column} < ?"
+        params.append((end + datetime.timedelta(days=1)).isoformat())
+    return where, params
+
+
+def entries_where(biz, f):
+    """The WHERE clause shared by the list of entries, its totals and its CSV export."""
+    where, params = days_where(f["start"], f["end"], "c.occurred_at")
+    if f["direction"]:
+        where += " AND c.direction=?"
+        params.append(f["direction"])
+    if f["channel"]:
+        methods = dict(CHANNELS)[f["channel"]]
+        where += f" AND c.method IN ({', '.join('?' for _ in methods)})"
+        params += list(methods)
+    if f["category"]:
+        where += " AND c.category=?"
+        params.append(f["category"])
+    for word in f["q"].lower().split():
+        like = f"%{word}%"
+        where += """ AND (LOWER(COALESCE(c.party, '')) LIKE ? OR LOWER(COALESCE(c.description, '')) LIKE ?
+                          OR LOWER(COALESCE(c.reference, '')) LIKE ? OR LOWER(COALESCE(c.recorded_by, '')) LIKE ?)"""
+        params += [like] * 4
+    return "c.business_id=?" + where, [biz] + params
+
+
+def entry_link(row):
+    """Where an entry came from, for a link back to it."""
+    source, ref = row["source"], row["source_id"]
+    if source == "invoice" and ref:
+        return url_for("invoice", invoice_id=ref)
+    if source == "purchase" and ref:
+        return url_for("procurement", purchase_id=ref)
+    if source == "supplier_payment" and row.get("supplier_id"):
+        return url_for("supplier_statement", supplier_id=row["supplier_id"])
+    if source == "customer" and ref:
+        return url_for("customer_statement", customer_id=ref)
+    if source == "payslip" and ref:
+        return url_for("payslips", id=ref)
+    return None
+
+
+def account_entries(db, biz, f, limit):
+    where, params = entries_where(biz, f)
+    rows = db.all(
+        f"""SELECT c.id, c.direction, c.amount, c.method, c.reference, c.category, c.party, c.description, c.source, c.source_id,
+                   c.occurred_at, c.recorded_by, sp.supplier_id
+            FROM cashbook c LEFT JOIN supplier_payments sp ON c.source = 'supplier_payment' AND sp.id = c.source_id
+            WHERE {where} ORDER BY c.occurred_at DESC, c.id DESC LIMIT ?""",
+        params + [limit],
+    )
+    for r in rows:
+        r["label"] = CATEGORY_LABELS.get(r["category"], r["category"])
+        r["channel"] = CHANNEL_OF.get(r["method"], "Other")
+        r["link"] = entry_link(r)
+    return rows
+
+
+def account_summary(db, biz, start, end):
+    """Totals for the period: in, out, by channel and method (with what is held in each up to the end of the period),
+    and by where money came from and what it went on."""
+    where, params = days_where(start, end)
+    groups = db.all(
+        f"""SELECT direction, method, category, COALESCE(SUM(amount), 0) AS total FROM cashbook
+            WHERE business_id=?{where} GROUP BY direction, method, category""",
+        [biz] + params,
+    )
+    up_to, up_params = days_where(None, end)
+    held_rows = db.all(
+        f"SELECT direction, method, COALESCE(SUM(amount), 0) AS total FROM cashbook WHERE business_id=?{up_to} GROUP BY direction, method",
+        [biz] + up_params,
+    )
+    sign = {"in": 1, "out": -1}
+    held = {}
+    for r in held_rows:
+        held[r["method"]] = held.get(r["method"], 0.0) + sign.get(r["direction"], 0) * r["total"]
+    flows = {}
+    for r in groups:
+        flows.setdefault(r["method"], {"in": 0.0, "out": 0.0})[r["direction"]] += r["total"]
+
+    channels, known = [], set(CHANNEL_OF)
+    for name, methods in CHANNELS:
+        # A method the app no longer knows (from an old record) is shown with Other
+        members = list(methods) + ([m for m in set(flows) | set(held) if m not in known] if name == "Other" else [])
+        rows = []
+        for m in members:
+            fin, fout = flows.get(m, {}).get("in", 0.0), flows.get(m, {}).get("out", 0.0)
+            if abs(fin) > 0.005 or abs(fout) > 0.005 or abs(held.get(m, 0.0)) > 0.005:
+                rows.append({"name": m, "in": fin, "out": fout, "net": fin - fout, "held": held.get(m, 0.0)})
+        if rows:
+            channels.append({
+                "name": name, "methods": rows if len(rows) > 1 else [],
+                "in": sum(r["in"] for r in rows), "out": sum(r["out"] for r in rows),
+                "net": sum(r["net"] for r in rows), "held": sum(r["held"] for r in rows),
+            })
+
+    def ranked(direction, categories):
+        totals = {}
+        for r in groups:
+            if r["direction"] == direction:
+                totals[r["category"]] = totals.get(r["category"], 0.0) + r["total"]
+        whole = sum(v for v in totals.values() if v > 0) or 1.0
+        known_keys = [key for key, _ in categories]
+        rows = [
+            {"key": key, "label": CATEGORY_LABELS.get(key, key), "total": value, "pct": max(0.0, round(value / whole * 100, 1))}
+            for key, value in totals.items() if abs(value) > 0.005
+        ]
+        return sorted(rows, key=lambda r: (-r["total"], known_keys.index(r["key"]) if r["key"] in known_keys else 99))
+
+    money_in = sum(r["total"] for r in groups if r["direction"] == "in")
+    money_out = sum(r["total"] for r in groups if r["direction"] == "out")
+    return {
+        "in": money_in, "out": money_out, "net": money_in - money_out, "channels": channels,
+        "held": sum(held.values()), "sources": ranked("in", MONEY_IN), "purposes": ranked("out", MONEY_OUT),
+    }
+
+
+def account_flow(db, biz, start, end):
+    """Money in and out per day (a period up to two months) or per month, with the balance carried from before the period."""
+    by_day = bool(start and end and (end - start).days <= 62)
+    width = 10 if by_day else 7
+    where, params = days_where(start, end)
+    rows = db.all(
+        f"""SELECT SUBSTR(occurred_at, 1, {width}) AS bucket, direction, COALESCE(SUM(amount), 0) AS total FROM cashbook
+            WHERE business_id=?{where} GROUP BY bucket, direction ORDER BY bucket""",
+        [biz] + params,
+    )
+    opening = 0.0
+    if start:
+        before = db.one(
+            """SELECT COALESCE(SUM(CASE WHEN direction='in' THEN amount ELSE 0 END), 0) AS cin,
+                      COALESCE(SUM(CASE WHEN direction='out' THEN amount ELSE 0 END), 0) AS cout
+               FROM cashbook WHERE business_id=? AND occurred_at < ?""",
+            (biz, start.isoformat()),
+        )
+        opening = before["cin"] - before["cout"]
+    buckets = {}
+    for r in rows:
+        buckets.setdefault(r["bucket"], {"in": 0.0, "out": 0.0})[r["direction"]] = r["total"]
+    lines, balance = [], opening
+    for bucket in sorted(buckets):
+        b = buckets[bucket]
+        balance += b["in"] - b["out"]
+        if by_day:
+            label = datetime.date.fromisoformat(bucket).strftime("%a %d %b %Y")
+        else:
+            label = datetime.date(int(bucket[:4]), int(bucket[5:7]), 1).strftime("%B %Y")
+        lines.append({"label": label, "in": b["in"], "out": b["out"], "net": b["in"] - b["out"], "balance": balance})
+    return {"by_day": by_day, "opening": opening, "lines": lines, "has_start": bool(start)}
+
+
+@app.get("/accounts")
+@need("admin")
+def accounts():
+    db, biz = get_db(), g.user["business_id"]
+    f = account_filters()
+    where, params = entries_where(biz, f)
+    listed = db.one(
+        f"""SELECT COUNT(*) AS n, COALESCE(SUM(CASE WHEN c.direction='in' THEN c.amount ELSE 0 END), 0) AS cin,
+                   COALESCE(SUM(CASE WHEN c.direction='out' THEN c.amount ELSE 0 END), 0) AS cout
+            FROM cashbook c WHERE {where}""",
+        params,
+    )
+    owed_to_us = db.one(
+        "SELECT COALESCE(SUM(balance_due), 0) AS owed FROM invoices WHERE business_id=? AND kind='SALE' AND payment_status <> 'Cancelled'", (biz,)
+    )["owed"]
+    we_owe = db.one("SELECT COALESCE(SUM(total_cost - COALESCE(amount_paid, total_cost)), 0) AS owed FROM procurements WHERE business_id=?", (biz,))["owed"]
+    args = {key: request.args.get(key) for key in ACCOUNT_PARAMS if request.args.get(key)}
+    period_args = {key: value for key, value in args.items() if key in ("period", "from", "to")}
+    return render_template(
+        "accounts.html", f=f, periods=INVOICE_PERIODS, summary=account_summary(db, biz, f["start"], f["end"]),
+        flow=account_flow(db, biz, f["start"], f["end"]), entries=account_entries(db, biz, f, ACCOUNT_LIST_LIMIT), listed=listed,
+        owed_to_us=owed_to_us, we_owe=we_owe, channels=[name for name, _ in CHANNELS], money_in=MONEY_IN, money_out=MONEY_OUT,
+        manual_in=[(k, CATEGORY_LABELS[k]) for k in MANUAL_IN], manual_out=[(k, CATEGORY_LABELS[k]) for k in MANUAL_OUT],
+        methods=PAYMENT_METHODS, csv_url=url_for("accounts_csv", **args), here=url_for("accounts", **args), today=today_str(),
+        list_filtered=bool(f["direction"] or f["channel"] or f["category"] or f["q"]),
+        # The list of entries showing just one channel or category of the period (from the totals above it), or all of it again
+        narrow=lambda key, value: url_for("accounts", **{**period_args, key: value}) + "#transactions",
+        clear_url=url_for("accounts", **period_args) + "#transactions",
+    )
+
+
+@app.get("/accounts.csv")
+@need("admin")
+def accounts_csv():
+    db, biz = get_db(), g.user["business_id"]
+    rows = account_entries(db, biz, account_filters(), 100000)
+    return csv_response(
+        "accounts.csv",
+        ["Date", "In / Out", "Category", "From / To", "Details", "Method", "Channel", "Reference", "Amount", "Recorded by"],
+        [
+            (r["occurred_at"], "In" if r["direction"] == "in" else "Out", r["label"], r["party"], r["description"], r["method"], r["channel"],
+             r["reference"], r["amount"], r["recorded_by"])
+            for r in rows
+        ],
+    )
+
+
+def accounts_back():
+    """Back to the Accounts page as it was, from the address the form was sent with (never anywhere else)."""
+    back = text("back")
+    return redirect(back if back.startswith("/accounts") and not back.startswith("//") else url_for("accounts"))
+
+
+@app.post("/accounts/record")
+@need("admin")
+def record_account_entry():
+    """Money in or out that no other page records: rent, fuel, owner's money put in, a loan, bank charges..."""
+    db, biz = get_db(), g.user["business_id"]
+    back = accounts_back()
+    direction = text("direction")
+    allowed = MANUAL_IN if direction == "in" else MANUAL_OUT if direction == "out" else ()
+    category = text("category")
+    try:
+        amount = round(number("amount"), 2)
+    except ValueError:
+        amount = 0.0
+    method = method_from_text(text("payment_method"))
+    day = day_or_none(text("occurred_on")) if text("occurred_on") else None
+    if category not in allowed:
+        flash("Choose what the money was for from the list.", "error")
+    elif amount <= 0:
+        flash("Enter the amount, above zero.", "error")
+    elif method is None:
+        flash("Choose how the money was paid: " + ", ".join(m.lower() for m in METHOD_LABELS) + ".", "error")
+    elif day is None or day > today_str():
+        flash("Enter the date the money moved (today or earlier).", "error")
+    else:
+        record_money(
+            db, biz, direction, amount, method, category, " ".join(text("payment_reference").split())[:60], clean_name(text("party"), 100),
+            " ".join(text("description").split())[:200], "manual", None, stamp_for_day(day),
+        )
+        db.commit()
+        flash(f"Recorded {money(amount)} {'in' if direction == 'in' else 'out'}: {CATEGORY_LABELS[category]}, by {method.lower()}.", "ok")
+    return back
+
+
+@app.post("/accounts/<int:entry_id>/delete")
+@need("admin")
+def delete_account_entry(entry_id):
+    """Only entries made on the Accounts page can be removed here; the rest follow the sale, payment or payslip they belong to."""
+    db, biz = get_db(), g.user["business_id"]
+    removed = db.execute("DELETE FROM cashbook WHERE id=? AND business_id=? AND source='manual'", (entry_id, biz)).rowcount
+    db.commit()
+    flash("Entry removed from Accounts." if removed else "That entry belongs to a sale, payment, purchase or payslip; change it there.", "ok" if removed else "error")
+    return accounts_back()
+
+
+def history_stamp(value):
+    """A stored date or date-and-time as a full timestamp, or None when there is none."""
+    value = (value or "").strip()
+    if len(value) >= 19:
+        return value[:19]
+    return f"{value[:10]} 00:00:00" if len(value) >= 10 else None
+
+
+def cashbook_history(db, biz):
+    """The money recorded before Accounts existed, as cashbook entries. How it was paid was not kept for sales or for purchases
+    without a supplier account, so those say 'Not recorded'; supplier payments kept theirs."""
+    entries = []
+    fallback = now().strftime("%Y-%m-%d %H:%M:%S")
+
+    def add(direction, amount, method, category, when, party, description, source, source_id, reference=""):
+        if abs(round(amount or 0.0, 2)) >= 0.005:
+            entries.append((direction, round(amount, 2), method, reference or "", category, party or "", (description or "")[:200], source, source_id, when or fallback))
+
+    def changes(kind, extra=""):
+        found = {}
+        for row in db.all(f"SELECT ref_id, old_paid, new_paid, note, changed_at FROM payment_log WHERE business_id=? AND kind=?{extra} ORDER BY id", (biz, kind)):
+            found.setdefault(row["ref_id"], []).append(row)
+        return found
+
+    # Sales: what was paid at the time of sale, then every later change to it
+    sale_changes = changes("sale")
+    for inv in db.all("SELECT id, invoice_no, customer_name, amount_paid, created_at FROM invoices WHERE business_id=? AND kind='SALE'", (biz,)):
+        logged = sale_changes.get(inv["id"], [])
+        when = history_stamp(inv["created_at"])
+        add("in", logged[0]["old_paid"] if logged else inv["amount_paid"], NOT_RECORDED, "sale", when, inv["customer_name"], f"Invoice {inv['invoice_no']}", "invoice", inv["id"])
+        for c in logged:
+            delta = c["new_paid"] - c["old_paid"]
+            add(
+                "in", delta, NOT_RECORDED if delta > 0 else CORRECTION, "customer_payment", history_stamp(c["changed_at"]) or when, inv["customer_name"],
+                f"Invoice {inv['invoice_no']}" + (f": {c['note']}" if c["note"] else ""), "invoice", inv["id"],
+            )
+
+    # Payments to supplier accounts were kept with their method and reference
+    for sp in db.all(
+        """SELECT sp.id, sp.amount, sp.method, sp.reference, sp.paid_on, sp.note, sp.recorded_at, s.name
+           FROM supplier_payments sp LEFT JOIN suppliers s ON s.id = sp.supplier_id WHERE sp.business_id=?""",
+        (biz,),
+    ):
+        add("out", sp["amount"], sp["method"] or NOT_RECORDED, "supplier", history_stamp(sp["paid_on"]) or history_stamp(sp["recorded_at"]),
+            sp["name"], sp["note"] or "Payment to supplier", "supplier_payment", sp["id"], sp["reference"])
+
+    # Purchases: for a supplier account, whatever was paid outside the supplier payments above (from before they were kept);
+    # with no supplier account, what was paid when it was logged and every later change
+    allocated = {
+        r["procurement_id"]: r["total"]
+        for r in db.all("SELECT procurement_id, COALESCE(SUM(amount), 0) AS total FROM supplier_payment_allocations WHERE business_id=? GROUP BY procurement_id", (biz,))
+    }
+    purchase_changes = changes("purchase", " AND payment_id IS NULL")
+    for pr in db.all(
+        "SELECT id, name, quantity, supplier_name, supplier_id, purchase_date, COALESCE(amount_paid, total_cost) AS paid FROM procurements WHERE business_id=?",
+        (biz,),
+    ):
+        when, what = history_stamp(pr["purchase_date"]), f"{pr['name']} x {pr['quantity'] or 0:,}"
+        if pr["supplier_id"]:
+            loose = (pr["paid"] or 0.0) - allocated.get(pr["id"], 0.0)
+            if loose > 0.005:
+                add("out", loose, NOT_RECORDED, "supplier", when, pr["supplier_name"], what, "purchase", pr["id"])
+            continue
+        logged = purchase_changes.get(pr["id"], [])
+        add("out", logged[0]["old_paid"] if logged else pr["paid"], NOT_RECORDED, "purchase", when, pr["supplier_name"], what, "purchase", pr["id"])
+        for c in logged:
+            delta = c["new_paid"] - c["old_paid"]
+            add("out", delta, NOT_RECORDED if delta > 0 else CORRECTION, "purchase", history_stamp(c["changed_at"]) or when, pr["supplier_name"], what, "purchase", pr["id"])
+
+    # Payslips: the net pay, and NAPSA/NHIMA (both shares)
+    for s in db.all(
+        "SELECT id, employee_name, pay_month, net_payable, napsa_amt, nhima_amt, employer_napsa, employer_nhima, created_at FROM payroll WHERE business_id=?",
+        (biz,),
+    ):
+        when = history_stamp(s["created_at"])
+        add("out", s["net_payable"], NOT_RECORDED, "salaries", when, s["employee_name"], f"Pay for {s['pay_month']}", "payslip", s["id"])
+        add("out", (s["napsa_amt"] or 0) + (s["nhima_amt"] or 0) + (s["employer_napsa"] or 0) + (s["employer_nhima"] or 0), NOT_RECORDED, "statutory", when,
+            s["employee_name"], f"NAPSA & NHIMA for {s['pay_month']}", "payslip", s["id"])
+    return entries
+
+
+def backfill_cashbook():
+    """Copies each business's earlier money records into the cashbook, once. Safe to repeat and to run on two servers at once:
+    a business is claimed before its records are copied, and if anything fails nothing is kept, so it is tried again next start."""
+    db = Database()
+    try:
+        for row in db.all("SELECT id FROM businesses WHERE cashbook_ready IS NULL"):
+            biz = row["id"]
+            if db.execute("UPDATE businesses SET cashbook_ready=1 WHERE id=? AND cashbook_ready IS NULL", (biz,)).rowcount != 1:
+                db.rollback()
+                continue
+            stamp = now().strftime("%Y-%m-%d %H:%M:%S")
+            entries = cashbook_history(db, biz)
+            # Many rows per statement, so a long history is copied in a few round trips
+            for i in range(0, len(entries), 60):
+                chunk = entries[i:i + 60]
+                db.execute(
+                    """INSERT INTO cashbook (business_id, direction, amount, method, reference, category, party, description, source, source_id,
+                                             occurred_at, recorded_by, recorded_at) VALUES """
+                    + ", ".join("(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)" for _ in chunk),
+                    [value for e in chunk for value in (biz, *e, "Copied from earlier records", stamp)],
+                )
+            db.commit()
+    except DB_ERRORS:
+        db.rollback()
+    finally:
+        db.close()
+
+
+backfill_cashbook()
+
+
 # --- RESET THE APP (ADMIN) ---
 # A reset wipes the records the app has logged for this business. It keeps what makes the app usable
 # and was set up rather than logged: user accounts (with their permissions and appearance), the business
@@ -5803,6 +6409,7 @@ RESET_GROUPS = (
     ("Customer accounts", ("customers", "customer_aliases", "customer_distinct")),
     ("Supplier accounts", ("suppliers", "supplier_aliases", "supplier_distinct")),
     ("Supplier payments", ("supplier_payments", "supplier_payment_allocations")),
+    ("Accounts: money in and out", ("cashbook",)),
     ("Employees", ("employees",)),
     ("Payslips", ("payroll",)),
     ("Sowing batches", ("seedling_batches",)),

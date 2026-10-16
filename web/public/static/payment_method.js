@@ -13,7 +13,7 @@
             if (text) text.textContent = label;
             reference.placeholder = select.value ? label : "";
             // Browsers enforce it where the form is not otherwise optional; the server checks it again
-            if (select.dataset.requireReference !== undefined) reference.required = !!select.value;
+            reference.required = select.dataset.requireReference !== undefined && !!select.value;
         }
         select.addEventListener("change", update);
         update();
