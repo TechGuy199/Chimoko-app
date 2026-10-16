@@ -457,6 +457,13 @@ a.rank-name { color: var(--text); }
 a.rank-name:hover { color: var(--accent); }
 .rank-track i.out { background: var(--series-2); }
 
+/* Supplier payment overlay: which purchases a payment will pay off */
+.pay-preview { margin: 12px 0; padding: 10px 12px; border: 1px dashed var(--line-strong); border-radius: var(--radius-small); }
+.pay-preview h3 { margin: 0 0 6px; font-size: 12px; color: var(--text-muted); }
+.pay-preview ol { margin: 0 0 6px; padding-left: 20px; font-size: 13px; }
+.pay-preview ol:empty { display: none; }
+.pay-preview p { margin: 0; font-size: 12px; }
+
 /* Accounts */
 .accounts-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 560px), 1fr)); gap: 18px; align-items: start; }
 .accounts-grid > .card { margin: 0; }
@@ -582,7 +589,7 @@ dialog.modal::backdrop { background: rgba(0, 0, 0, 0.45); }
 .merge-tick input { width: 18px; height: 18px; }
 .merge-cell { width: 28px; padding-right: 0; }
 .merge-bar .toolbar { margin-bottom: 0; }
-.merge-bar input[name="category_name"] { flex: 0 1 280px; margin-top: 0; }
+.merge-bar input[name="category_name"], .merge-bar input[name="supplier_name"] { flex: 0 1 280px; margin-top: 0; }
 .merge-form input { margin: 4px 0 8px; }
 .merge-count { font-size: 12px; margin: 6px 0 0; }
 

@@ -3881,9 +3881,15 @@ def statement_period():
 def supplier_statement(supplier_id):
     db, biz = get_db(), g.user["business_id"]
     start, end = statement_period()
+    data = supplier_statement_data(db, supplier_id, start, end)
+    # What a new payment would settle, oldest first, for the preview in the Record Payment overlay
+    unpaid = [
+        {"label": f"{p['purchase_date'] or 'No date'} · " + (f"{p['invoice_no']} · {p['name']}" if p["invoice_no"] else p["name"]), "owed": p["balance"]}
+        for p in data["purchases"] if p["balance"] > 0.005
+    ]
     return render_template(
         "supplier.html", supplier=get_supplier(db, supplier_id), twins=supplier_twins(db, biz, supplier_id), methods=PAYMENT_METHODS, methods_labels=METHOD_LABELS,
-        today=today_str(), start=start, end=end, **supplier_statement_data(db, supplier_id, start, end),
+        today=today_str(), start=start, end=end, unpaid=unpaid, **data,
     )
 
 
@@ -4023,13 +4029,11 @@ def supplier_payment(supplier_id):
         flash("Enter the date the payment was made.", "error")
         return back
 
-    allocations, remaining = [], min(amount, owed)
-    for u in unpaid:
-        if remaining <= 0.005:
-            break
-        part = round(min(remaining, u["total_cost"] - u["paid"]), 2)
-        allocations.append((u["id"], part))
-        remaining = round(remaining - part, 2)
+    if paid_on > today_str():
+        flash("The payment date cannot be in the future.", "error")
+        return back
+
+    allocations = spread_over_unpaid(db, biz, supplier_id, min(amount, owed))
     try:
         add_supplier_payment(db, biz, supplier_id, amount, method, reference, paid_on, text("note")[:150], allocations)
         db.commit()
@@ -4038,6 +4042,180 @@ def supplier_payment(supplier_id):
         flash("The payment could not be saved. Please try again.", "error")
         return back
     flash(f"Recorded {money(amount)} paid by {method.lower()} (reference {reference}) across {len(allocations)} purchase(s), oldest first. Balance now owed: {money(owed - min(amount, owed))}.", "ok")
+    return back
+
+
+def spread_over_unpaid(db, biz, supplier_id, amount):
+    """How an amount paid to a supplier is shared over their unpaid purchases, oldest first: [(purchase id, part)]."""
+    unpaid = db.all(
+        "SELECT id, total_cost, COALESCE(amount_paid, total_cost) AS paid FROM procurements WHERE supplier_id=? AND business_id=? ORDER BY purchase_date, id",
+        (supplier_id, biz),
+    )
+    allocations, remaining = [], round(amount, 2)
+    for u in unpaid:
+        if remaining <= 0.005:
+            break
+        owed = round(u["total_cost"] - u["paid"], 2)
+        if owed > 0.005:
+            part = round(min(remaining, owed), 2)
+            allocations.append((u["id"], part))
+            remaining = round(remaining - part, 2)
+    return allocations
+
+
+def supplier_owed(db, biz, supplier_id):
+    rows = db.all("SELECT total_cost - COALESCE(amount_paid, total_cost) AS owed FROM procurements WHERE supplier_id=? AND business_id=?", (supplier_id, biz))
+    return round(sum(r["owed"] for r in rows if r["owed"] > 0.005), 2)
+
+
+def payment_how(method, reference):
+    return method + (f", {METHOD_LABELS[method].lower()} {reference}" if reference and method in METHOD_LABELS else "")
+
+
+def move_payment_share(db, biz, payment_id, procurement_id, part, note, stamp):
+    """Changes what one purchase has had paid by one supplier payment (a negative part takes some back), with its payment history.
+    Never takes a purchase below nothing paid. Returns the part actually moved. The caller commits."""
+    row = db.one("SELECT COALESCE(amount_paid, total_cost) AS paid FROM procurements WHERE id=? AND business_id=?", (procurement_id, biz))
+    if row is None:
+        return 0.0
+    part = round(max(part, -row["paid"]), 2)
+    new_paid = round(row["paid"] + part, 2)
+    db.execute("UPDATE procurements SET amount_paid=? WHERE id=? AND business_id=?", (new_paid, procurement_id, biz))
+    db.execute(
+        """INSERT INTO payment_log (business_id, kind, ref_id, old_paid, new_paid, note, changed_by, changed_at, payment_id)
+           VALUES (?, 'purchase', ?, ?, ?, ?, ?, ?, ?)""",
+        (biz, procurement_id, row["paid"], new_paid, note[:200], g.user["username"], stamp, payment_id),
+    )
+    return part
+
+
+def take_back(db, biz, payment_id, amount, note, stamp):
+    """Takes an amount off what a payment paid, from the newest purchase it settled first (the reverse of how it was spread)."""
+    remaining = round(amount, 2)
+    shares = db.all(
+        """SELECT a.id, a.procurement_id, a.amount FROM supplier_payment_allocations a JOIN procurements pr ON pr.id = a.procurement_id
+           WHERE a.payment_id=? AND a.business_id=? AND a.amount > 0 ORDER BY pr.purchase_date DESC, pr.id DESC, a.id DESC""",
+        (payment_id, biz),
+    )
+    for share in shares:
+        if remaining <= 0.005:
+            break
+        taken = -move_payment_share(db, biz, payment_id, share["procurement_id"], -min(remaining, share["amount"]), note, stamp)
+        left = round(share["amount"] - taken, 2)
+        if left <= 0.005:
+            db.execute("DELETE FROM supplier_payment_allocations WHERE id=?", (share["id"],))
+        else:
+            db.execute("UPDATE supplier_payment_allocations SET amount=? WHERE id=?", (left, share["id"]))
+        remaining = round(remaining - taken, 2)
+
+
+def get_supplier_payment(db, biz, supplier_id, payment_id):
+    pay = db.one(
+        "SELECT id, amount, method, reference, paid_on, note FROM supplier_payments WHERE id=? AND supplier_id=? AND business_id=?",
+        (payment_id, supplier_id, biz),
+    )
+    if pay is None:
+        abort(404)
+    return pay
+
+
+@app.post("/suppliers/<int:supplier_id>/payments/<int:payment_id>/update")
+@need("admin")
+def update_supplier_payment(supplier_id, payment_id):
+    """Raises or lowers a recorded payment, or corrects its date, method or reference. More paid is spread over the unpaid purchases
+    oldest first; less is taken back from the newest purchase it paid. Its entry in Accounts follows."""
+    db, biz = get_db(), g.user["business_id"]
+    supplier = get_supplier(db, supplier_id)
+    back = redirect(url_for("supplier_statement", supplier_id=supplier_id))
+    pay = get_supplier_payment(db, biz, supplier_id, payment_id)
+    if pay["amount"] <= 0.005:
+        flash("A payment correction cannot be edited. Edit the payment it corrected, or record a new payment.", "error")
+        return back
+    try:
+        amount = round(number("amount"), 2)
+    except ValueError:
+        amount = 0.0
+    if amount <= 0:
+        flash("Enter the amount paid, above zero. To take the whole payment off the statement, use Remove payment.", "error")
+        return back
+    method, reference, problem = read_payment_details(strict=True)
+    if problem:
+        flash(problem, "error")
+        return back
+    paid_on = day_or_none(text("paid_on")) if text("paid_on") else None
+    if paid_on is None or paid_on > today_str():
+        flash("Enter the date the payment was made (today or earlier).", "error")
+        return back
+    change = round(amount - pay["amount"], 2)
+    owed = supplier_owed(db, biz, supplier_id)
+    if change > owed + 0.005:
+        flash(f"That adds {money(change)} to the payment, but only {money(owed)} is still owed to {supplier['name']}. Nothing was changed.", "error")
+        return back
+
+    note = " ".join(text("note").split())[:150]
+    stamp = now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        if change > 0.005:
+            for procurement_id, part in spread_over_unpaid(db, biz, supplier_id, change):
+                move_payment_share(db, biz, payment_id, procurement_id, part, f"{payment_how(method, reference)}: payment raised by {money(change)}", stamp)
+                db.execute(
+                    "INSERT INTO supplier_payment_allocations (business_id, payment_id, procurement_id, amount) VALUES (?, ?, ?, ?)",
+                    (biz, payment_id, procurement_id, part),
+                )
+        elif change < -0.005:
+            take_back(db, biz, payment_id, -change, f"{payment_how(method, reference)}: payment lowered by {money(-change)}", stamp)
+        db.execute(
+            "UPDATE supplier_payments SET amount=?, method=?, reference=?, paid_on=?, note=? WHERE id=? AND business_id=?",
+            (amount, method, reference, paid_on, note, payment_id, biz),
+        )
+        # Its entry in Accounts is the same payment, so it changes with it (keeping its time of day if the date did not change)
+        entry = db.one("SELECT id, occurred_at FROM cashbook WHERE business_id=? AND source='supplier_payment' AND source_id=?", (biz, payment_id))
+        when = entry["occurred_at"] if entry and paid_on == pay["paid_on"] else stamp_for_day(paid_on)
+        if entry:
+            db.execute(
+                "UPDATE cashbook SET amount=?, method=?, reference=?, occurred_at=?, party=?, description=? WHERE id=?",
+                (amount, method, reference, when, supplier["name"], note or "Payment to supplier", entry["id"]),
+            )
+        else:
+            record_money(db, biz, "out", amount, method, "supplier", reference, supplier["name"], note or "Payment to supplier", "supplier_payment", payment_id, when)
+        db.commit()
+    except DB_ERRORS:
+        db.rollback()
+        flash("The payment could not be updated, so nothing was changed. Please try again.", "error")
+        return back
+
+    if abs(change) < 0.005:
+        flash(f"Payment of {paid_on} updated.", "ok")
+    elif change > 0:
+        flash(f"Payment raised from {money(pay['amount'])} to {money(amount)}; the extra {money(change)} went to the oldest unpaid purchases. Balance now owed: {money(owed - change)}.", "ok")
+    else:
+        flash(f"Payment lowered from {money(pay['amount'])} to {money(amount)}; {money(-change)} is owed again on the newest purchases it had paid. Balance now owed: {money(owed - change)}.", "ok")
+    return back
+
+
+@app.post("/suppliers/<int:supplier_id>/payments/<int:payment_id>/delete")
+@need("admin")
+def remove_supplier_payment(supplier_id, payment_id):
+    """Takes a payment off the statement: what it paid on each purchase is owed again, and it leaves Accounts."""
+    db, biz = get_db(), g.user["business_id"]
+    get_supplier(db, supplier_id)
+    back = redirect(url_for("supplier_statement", supplier_id=supplier_id))
+    pay = get_supplier_payment(db, biz, supplier_id, payment_id)
+    if pay["amount"] <= 0.005:
+        flash("A payment correction cannot be removed here.", "error")
+        return back
+    stamp = now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        take_back(db, biz, payment_id, pay["amount"], f"{payment_how(pay['method'], pay['reference'])}: payment of {pay['paid_on'] or 'an earlier date'} removed", stamp)
+        db.execute("DELETE FROM supplier_payment_allocations WHERE payment_id=? AND business_id=?", (payment_id, biz))
+        db.execute("DELETE FROM supplier_payments WHERE id=? AND business_id=?", (payment_id, biz))
+        db.execute("DELETE FROM cashbook WHERE business_id=? AND source='supplier_payment' AND source_id=?", (biz, payment_id))
+        db.commit()
+    except DB_ERRORS:
+        db.rollback()
+        flash("The payment could not be removed, so nothing was changed. Please try again.", "error")
+        return back
+    flash(f"The {money(pay['amount'])} payment of {pay['paid_on'] or 'an earlier date'} was removed. What it paid is owed again. Balance now owed: {money(supplier_owed(db, biz, supplier_id))}.", "ok")
     return back
 
 
@@ -4103,6 +4281,105 @@ def supplier_pair_from_form(db, biz, first, second):
     return (a, b) if a and b and a["id"] != b["id"] else (None, None)
 
 
+def absorb_supplier(db, biz, keep, remove):
+    """Moves one supplier account into another: its purchases, its payments and the spellings that led to it. keep is updated
+    in place (a phone number it lacked, the earliest start date). The caller commits. Returns (purchases moved, payments moved)."""
+    moved = db.execute("UPDATE procurements SET supplier_id=? WHERE supplier_id=? AND business_id=?", (keep["id"], remove["id"], biz)).rowcount
+    paid = db.execute("UPDATE supplier_payments SET supplier_id=? WHERE supplier_id=? AND business_id=?", (keep["id"], remove["id"], biz)).rowcount
+    # The removed account's spelling, and any spellings merged into it earlier, now lead to the kept account
+    db.execute("UPDATE supplier_aliases SET supplier_id=? WHERE supplier_id=? AND business_id=?", (keep["id"], remove["id"], biz))
+    db.execute("DELETE FROM supplier_aliases WHERE business_id=? AND name_key=? AND phone_key=?", (biz, remove["name_key"], remove["phone_key"]))
+    db.execute(
+        "INSERT INTO supplier_aliases (business_id, name_key, phone_key, supplier_id) VALUES (?, ?, ?, ?)",
+        (biz, remove["name_key"], remove["phone_key"], keep["id"]),
+    )
+    db.execute("DELETE FROM supplier_distinct WHERE business_id=? AND (low_id=? OR high_id=?)", (biz, remove["id"], remove["id"]))
+    db.execute("DELETE FROM suppliers WHERE id=? AND business_id=?", (remove["id"], biz))
+
+    since = min(keep["created_at"] or "9999", remove["created_at"] or "9999")
+    phone, pkey = keep["phone"], keep["phone_key"]
+    if not pkey and remove["phone_key"]:
+        taken = db.one(
+            "SELECT id FROM suppliers WHERE business_id=? AND name_key=? AND phone_key=? AND id<>?",
+            (biz, keep["name_key"], remove["phone_key"], keep["id"]),
+        )
+        if not taken:
+            phone, pkey = remove["phone"], remove["phone_key"]
+    keep.update(phone=phone, phone_key=pkey, created_at=None if since == "9999" else since)
+    db.execute(
+        "UPDATE suppliers SET phone=?, phone_key=?, created_at=? WHERE id=? AND business_id=?",
+        (phone, pkey, keep["created_at"], keep["id"], biz),
+    )
+    return moved, paid
+
+
+@app.post("/suppliers/combine")
+@need("admin")
+def combine_suppliers():
+    """Combines two or more ticked supplier statements into one, under the name given: every purchase and payment moves onto it,
+    the other accounts are removed, and their spellings lead to it from now on."""
+    db, biz = get_db(), g.user["business_id"]
+    # Back to the list as it was: the search and balance filter come with the form
+    back = redirect(url_for("suppliers", **{key: text(key) for key in ("q", "balance") if text(key)}))
+    ids = set(read_ids())
+    chosen = [r for r in db.all(f"SELECT {SUPPLIER_COLUMNS} FROM suppliers WHERE business_id=? ORDER BY id", (biz,)) if r["id"] in ids]
+    final = clean_name(text("supplier_name"), 100)
+    if len(ids) < 2:
+        flash("Tick at least two supplier statements to combine.", "error")
+        return back
+    if len(chosen) != len(ids):
+        flash("Some of the ticked suppliers no longer exist. Refresh the page and try again.", "error")
+        return back
+    if not final:
+        flash("Type the name for the combined statement.", "error")
+        return back
+
+    # The account already called that stays, keeping its own spelling; otherwise the oldest one does, renamed
+    keep = next((r for r in chosen if norm(r["name"]) == norm(final)), chosen[0])
+    if norm(keep["name"]) == norm(final):
+        final = keep["name"]
+    others = [r for r in chosen if r is not keep]
+    # The keys the kept account was found by before anything changed (it may take a phone number from another below)
+    spellings = {(keep["name_key"], keep["phone_key"])}
+    moved = paid = 0
+    try:
+        for other in others:
+            m, p = absorb_supplier(db, biz, keep, other)
+            moved, paid = moved + m, paid + p
+        nkey = supplier_key(final)
+        spellings.add((keep["name_key"], keep["phone_key"]))
+        if final != keep["name"]:
+            clash = db.one("SELECT name FROM suppliers WHERE business_id=? AND name_key=? AND phone_key=? AND id<>?", (biz, nkey, keep["phone_key"], keep["id"]))
+            if clash:
+                db.rollback()
+                flash(f"There is already a supplier account called '{clash['name']}' with the same phone number. Tick it as well to combine it too. Nothing was changed.", "error")
+                return back
+            db.execute("UPDATE suppliers SET name=?, name_key=? WHERE id=? AND business_id=?", (final, nkey, keep["id"], biz))
+        # The kept account's old spellings still lead to it; a remembered spelling that is now its own name is not needed
+        for name_key_, phone_key_ in spellings:
+            db.execute("DELETE FROM supplier_aliases WHERE business_id=? AND name_key=? AND phone_key=?", (biz, name_key_, phone_key_))
+            if (name_key_, phone_key_) != (nkey, keep["phone_key"]):
+                db.execute(
+                    "INSERT INTO supplier_aliases (business_id, name_key, phone_key, supplier_id) VALUES (?, ?, ?, ?)",
+                    (biz, name_key_, phone_key_, keep["id"]),
+                )
+        # Accounts lists supplier payments under the account's name
+        db.execute(
+            """UPDATE cashbook SET party=? WHERE business_id=? AND source='supplier_payment'
+               AND source_id IN (SELECT id FROM supplier_payments WHERE supplier_id=? AND business_id=?)""",
+            (final, biz, keep["id"], biz),
+        )
+        db.commit()
+    except DB_ERRORS:
+        db.rollback()
+        flash("The statements could not be combined, so nothing was changed. Please try again.", "error")
+        return back
+
+    names = ", ".join(f"'{r['name']}'" for r in chosen)
+    flash(f"Combined {names} into one statement, '{final}': {moved} purchase(s) and {paid} payment(s) moved onto it.", "ok")
+    return redirect(url_for("supplier_statement", supplier_id=keep["id"]))
+
+
 @app.post("/suppliers/merge")
 @need("admin")
 def merge_suppliers():
@@ -4113,31 +4390,7 @@ def merge_suppliers():
         return redirect(url_for("supplier_duplicates"))
 
     try:
-        moved = db.execute("UPDATE procurements SET supplier_id=? WHERE supplier_id=? AND business_id=?", (keep["id"], remove["id"], biz)).rowcount
-        paid = db.execute("UPDATE supplier_payments SET supplier_id=? WHERE supplier_id=? AND business_id=?", (keep["id"], remove["id"], biz)).rowcount
-        # The removed account's spelling, and any spellings merged into it earlier, now lead to the kept account
-        db.execute("UPDATE supplier_aliases SET supplier_id=? WHERE supplier_id=? AND business_id=?", (keep["id"], remove["id"], biz))
-        db.execute("DELETE FROM supplier_aliases WHERE business_id=? AND name_key=? AND phone_key=?", (biz, remove["name_key"], remove["phone_key"]))
-        db.execute(
-            "INSERT INTO supplier_aliases (business_id, name_key, phone_key, supplier_id) VALUES (?, ?, ?, ?)",
-            (biz, remove["name_key"], remove["phone_key"], keep["id"]),
-        )
-        db.execute("DELETE FROM supplier_distinct WHERE business_id=? AND (low_id=? OR high_id=?)", (biz, remove["id"], remove["id"]))
-        db.execute("DELETE FROM suppliers WHERE id=? AND business_id=?", (remove["id"], biz))
-
-        since = min(keep["created_at"] or "9999", remove["created_at"] or "9999")
-        phone, pkey = keep["phone"], keep["phone_key"]
-        if not pkey and remove["phone_key"]:
-            taken = db.one(
-                "SELECT id FROM suppliers WHERE business_id=? AND name_key=? AND phone_key=? AND id<>?",
-                (biz, keep["name_key"], remove["phone_key"], keep["id"]),
-            )
-            if not taken:
-                phone, pkey = remove["phone"], remove["phone_key"]
-        db.execute(
-            "UPDATE suppliers SET phone=?, phone_key=?, created_at=? WHERE id=? AND business_id=?",
-            (phone, pkey, None if since == "9999" else since, keep["id"], biz),
-        )
+        moved, paid = absorb_supplier(db, biz, keep, remove)
         db.commit()
     except DB_ERRORS:
         db.rollback()

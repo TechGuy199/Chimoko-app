@@ -25,13 +25,31 @@
 </div>
 {% endif %}
 
+{# The tick-boxes sit in the table but belong to this form #}
+<section class="card block merge-bar no-print">
+    <h2>Combine statements</h2>
+    <p class="muted">
+        Tick two or more suppliers below and give them one name. Every purchase and payment moves onto one statement, the other accounts are
+        removed, and purchases typed with any of their names later land on it too. This cannot be undone.
+    </p>
+    <form id="combine-suppliers-form" method="post" action="{{ url_for('combine_suppliers') }}" class="toolbar" data-merge data-noun="supplier statement" data-plural="supplier statements">
+        {{ csrf_field() }}
+        {% if q %}<input type="hidden" name="q" value="{{ q }}">{% endif %}
+        {% if balance %}<input type="hidden" name="balance" value="{{ balance }}">{% endif %}
+        <input name="supplier_name" maxlength="100" placeholder="Name for the combined statement" aria-label="Name for the combined statement" autocomplete="off">
+        <button class="btn primary" disabled>Combine ticked statements</button>
+        <span class="muted merge-count" role="status">Nothing ticked yet.</span>
+    </form>
+</section>
+
 <section class="card">
     <div class="table-wrap">
         <table>
-            <thead><tr><th>Supplier</th><th>Phone</th><th class="num">Purchases</th><th class="num">Total bought</th><th class="num">We owe</th><th></th></tr></thead>
+            <thead><tr><th class="merge-cell no-print"></th><th>Supplier</th><th>Phone</th><th class="num">Purchases</th><th class="num">Total bought</th><th class="num">We owe</th><th></th></tr></thead>
             <tbody>
             {% for s in results %}
                 <tr>
+                    <td class="merge-cell no-print"><input type="checkbox" name="ids" value="{{ s.id }}" form="combine-suppliers-form" data-name="{{ s.name }}" aria-label="Combine {{ s.name }}"></td>
                     <td><a href="{{ url_for('supplier_statement', supplier_id=s.id) }}">{{ s.name }}</a></td>
                     <td>{{ s.phone or '—' }}</td>
                     <td class="num">{{ s.purchases }}</td>
@@ -40,7 +58,7 @@
                     <td class="num"><a class="btn small" href="{{ url_for('supplier_statement', supplier_id=s.id) }}">Statement</a></td>
                 </tr>
             {% else %}
-                <tr><td colspan="6" class="muted center">
+                <tr><td colspan="7" class="muted center">
                     {% if q or balance %}No supplier matches that search.{% else %}No supplier accounts yet. One is opened automatically when a purchase is logged with a supplier name.{% endif %}
                 </td></tr>
             {% endfor %}
@@ -51,6 +69,7 @@
 </section>
 {% endblock %}
 {% block scripts %}
+<script src="{{ asset('merge.js') }}"></script>
 <script>
     // Search as you type: wait for a short pause, then reload the list with the cursor kept at the end
     (function () {

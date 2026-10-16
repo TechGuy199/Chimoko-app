@@ -7,6 +7,8 @@
         <a class="back" href="{{ url_for('suppliers') }}">&larr; All suppliers</a>
         <h1>{{ supplier.name }}</h1>
     </div>
+    <div class="head-actions">
+    <button type="button" class="btn success" data-modal-open="supplier-pay" {{ 'disabled title="Nothing is owed to this supplier"'|safe if summary.owed <= 0.005 }}>Record payment</button>
     <details class="menu">
         <summary class="btn primary">Actions</summary>
         <div class="menu-panel">
@@ -15,6 +17,7 @@
             <a class="menu-item" href="{{ url_for('supplier_duplicates') }}">Find duplicates</a>
         </div>
     </details>
+    </div>
 </div>
 
 {% for twin in twins %}
@@ -45,29 +48,40 @@
 {% if summary.owed > 0.005 %}
 <section class="card no-print lump-sum" id="pay">
     <h2>Record a Payment</h2>
-    <p class="muted">
-        One amount is spread over this supplier's unpaid purchases, starting with the oldest. We owe {{ summary.owed|money }}.
-        Every payment needs how it was paid and its reference number; for cash the receipt number is enough.
-    </p>
-    <form method="post" action="{{ url_for('supplier_payment', supplier_id=supplier.id) }}">
-        {{ csrf_field() }}
-        <div class="grid">
-            <label>Amount paid
-                <input name="amount" type="number" min="0.01" max="{{ '%.2f'|format(summary.owed) }}" step="0.01" placeholder="0.00" required>
-            </label>
-            <label>How it was paid
-                <select name="payment_method" data-method-select data-require-reference required>
-                    <option value="">Choose a method</option>
-                    {% for method, label in methods %}<option value="{{ method }}" data-reference-label="{{ label }}">{{ method }}</option>{% endfor %}
-                </select>
-            </label>
-            <label><span data-reference-text>Reference number</span> <input name="payment_reference" maxlength="60" autocomplete="off" data-reference></label>
-            <label>Date paid <input name="paid_on" type="date" value="{{ today }}"></label>
-        </div>
-        <label>Note (optional) <input name="note" maxlength="150"></label>
-        <button class="btn success">Record Payment</button>
-    </form>
+    <p class="muted">We owe {{ summary.owed|money }}. A payment pays off the oldest unpaid purchase first, then the next, and so on.</p>
+    <button type="button" class="btn success" data-modal-open="supplier-pay">Record payment</button>
 </section>
+
+<dialog class="modal modal-wide no-print" id="supplier-pay" aria-labelledby="supplier-pay-title">
+    <div class="modal-body">
+        <h2 id="supplier-pay-title">Payment to {{ supplier.name }}</h2>
+        <p class="muted">We owe {{ summary.owed|money }}. Every payment needs how it was paid and its reference number; for cash the receipt number is enough.</p>
+        <form method="post" action="{{ url_for('supplier_payment', supplier_id=supplier.id) }}">
+            {{ csrf_field() }}
+            <div class="grid">
+                <label>Amount paid
+                    <input name="amount" id="pay-amount" type="number" min="0.01" max="{{ '%.2f'|format(summary.owed) }}" step="0.01" placeholder="0.00" inputmode="decimal" required>
+                </label>
+                <label>Date paid <input name="paid_on" type="date" value="{{ today }}" max="{{ today }}" required></label>
+                <label>How it was paid
+                    <select name="payment_method" data-method-select data-require-reference required>
+                        <option value="">Choose a method</option>
+                        {% for method, label in methods %}<option value="{{ method }}" data-reference-label="{{ label }}">{{ method }}</option>{% endfor %}
+                    </select>
+                </label>
+                <label><span data-reference-text>Reference number</span> <input name="payment_reference" maxlength="60" autocomplete="off" data-reference></label>
+            </div>
+            <label>Note (optional) <input name="note" maxlength="150"></label>
+            <div class="pay-preview" id="pay-preview" data-unpaid="{{ unpaid|tojson|forceescape }}" data-currency="{{ user.currency }}" aria-live="polite">
+                <h3>How it will be applied, oldest first</h3>
+                <ol></ol>
+                <p class="muted" id="pay-preview-note">Type an amount to see which purchases it pays off.</p>
+            </div>
+            <button class="btn success wide">Record Payment</button>
+            <p class="center"><button type="button" class="btn ghost" data-modal-close>Cancel</button></p>
+        </form>
+    </div>
+</dialog>
 {% endif %}
 
 <form method="get" class="toolbar no-print" id="statement-filter">
@@ -132,7 +146,7 @@
     <h2 class="spaced">Payments Made</h2>
     <div class="table-wrap">
         <table>
-            <thead><tr><th>Date paid</th><th>Method</th><th>Reference</th><th class="num">Amount</th><th>Covers</th><th>Recorded by</th></tr></thead>
+            <thead><tr><th>Date paid</th><th>Method</th><th>Reference</th><th class="num">Amount</th><th>Covers</th><th>Recorded by</th><th class="no-print"></th></tr></thead>
             <tbody>
             {% for p in payments %}
                 <tr>
@@ -142,9 +156,10 @@
                     <td class="num">{{ p.amount|money }}</td>
                     <td class="wrap">{{ p.covers or '—' }}{% if p.note %}<br><small class="muted">{{ p.note }}</small>{% endif %}</td>
                     <td>{{ p.recorded_by or '—' }}<br><small class="muted">{{ p.recorded_at }}</small></td>
+                    <td class="num no-print">{% if p.amount > 0.005 %}<button type="button" class="btn small" data-modal-open="pay-edit-{{ p.id }}">Edit</button>{% endif %}</td>
                 </tr>
             {% else %}
-                <tr><td colspan="6" class="muted center">No payments recorded {{ 'in this period' if period.on }}.</td></tr>
+                <tr><td colspan="7" class="muted center">No payments recorded {{ 'in this period' if period.on }}.</td></tr>
             {% endfor %}
             </tbody>
         </table>
@@ -191,11 +206,49 @@
     </div>
 </article>
 
+{# Changing a recorded payment: raised, the extra pays the oldest unpaid purchases; lowered or removed, the difference is owed again
+   on the newest purchases it had paid #}
+{% for p in payments if p.amount > 0.005 %}
+<dialog class="modal no-print" id="pay-edit-{{ p.id }}" aria-labelledby="pay-edit-title-{{ p.id }}">
+    <div class="modal-body">
+        <h2 id="pay-edit-title-{{ p.id }}">Payment of {{ p.paid_on or 'an earlier date' }}</h2>
+        <p class="muted">
+            Raise it and the extra pays the oldest unpaid purchases; lower it and the difference is owed again on the newest purchases it paid.
+            It can go up to {{ (p.amount + summary.owed)|money }}.
+        </p>
+        <form method="post" action="{{ url_for('update_supplier_payment', supplier_id=supplier.id, payment_id=p.id) }}">
+            {{ csrf_field() }}
+            <div class="grid">
+                <label>Amount paid
+                    <input name="amount" type="number" min="0.01" max="{{ '%.2f'|format(p.amount + summary.owed) }}" step="0.01" value="{{ '%.2f'|format(p.amount) }}" inputmode="decimal" required>
+                </label>
+                <label>Date paid <input name="paid_on" type="date" value="{{ p.paid_on }}" max="{{ today }}" required></label>
+                <label>How it was paid
+                    <select name="payment_method" data-method-select data-require-reference required>
+                        <option value="">Choose a method</option>
+                        {% for method, label in methods %}<option value="{{ method }}" data-reference-label="{{ label }}" {{ 'selected' if method == p.method }}>{{ method }}</option>{% endfor %}
+                    </select>
+                </label>
+                <label><span data-reference-text>Reference number</span> <input name="payment_reference" maxlength="60" autocomplete="off" data-reference value="{{ p.reference or '' }}"></label>
+            </div>
+            <label>Note (optional) <input name="note" maxlength="150" value="{{ p.note or '' }}"></label>
+            <button class="btn primary wide">Save changes</button>
+        </form>
+        <form method="post" action="{{ url_for('remove_supplier_payment', supplier_id=supplier.id, payment_id=p.id) }}"
+              data-confirm="Remove the {{ p.amount|money }} payment of {{ p.paid_on or 'an earlier date' }}?&#10;&#10;What it paid on the purchases is owed again, and it leaves Accounts.">
+            {{ csrf_field() }}
+            <button class="btn danger wide">Remove payment</button>
+        </form>
+        <p class="center"><button type="button" class="btn ghost" data-modal-close>Cancel</button></p>
+    </div>
+</dialog>
+{% endfor %}
+
 <section class="card block no-print narrow-form">
     <h2>Supplier Details</h2>
     <p>{{ supplier.name }}{% if supplier.phone %} &middot; {{ supplier.phone }}{% endif %}</p>
     <p><button type="button" class="btn" data-modal-open="supplier-edit">Edit Supplier Details</button></p>
-    <p class="muted">To correct a payment on one purchase, open it from Procurements or use "payments" in the table above.</p>
+    <p class="muted">To change a payment, use Edit beside it under Payments Made. To change what was paid on one purchase alone, use "payments" in Purchases in Full.</p>
 </section>
 
 <dialog class="modal no-print" id="supplier-edit" aria-labelledby="supplier-edit-title">
@@ -211,4 +264,44 @@
     </div>
 </dialog>
 {% endblock %}
-{% block scripts %}<script src="{{ asset('payment_method.js') }}"></script>{% endblock %}
+{% block scripts %}
+<script src="{{ asset('payment_method.js') }}"></script>
+<script>
+    // Record Payment: as the amount is typed, show which purchases it pays off, oldest first
+    (function () {
+        const box = document.getElementById("pay-preview");
+        if (!box) return;
+        const amount = document.getElementById("pay-amount");
+        const unpaid = JSON.parse(box.dataset.unpaid);
+        const list = box.querySelector("ol");
+        const note = document.getElementById("pay-preview-note");
+        const currency = box.dataset.currency;
+        const cents = function (n) { return Math.round(n * 100); };
+        const money = function (c) { return currency + (c / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }); };
+        const owedAll = unpaid.reduce(function (sum, u) { return sum + cents(u.owed); }, 0);
+        function render() {
+            const typed = cents(parseFloat(amount.value));
+            list.replaceChildren();
+            if (!(typed > 0)) {
+                note.textContent = "Type an amount to see which purchases it pays off.";
+                return;
+            }
+            let left = typed;
+            unpaid.forEach(function (u) {
+                if (left <= 0) return;
+                const owed = cents(u.owed);
+                const part = Math.min(left, owed);
+                left -= part;
+                const li = document.createElement("li");
+                li.textContent = u.label + ": " + money(part) + (part === owed ? ", paid off" : " of " + money(owed) + ", " + money(owed - part) + " still owed");
+                list.appendChild(li);
+            });
+            note.textContent = left > 0
+                ? "That is " + money(left) + " more than is owed (" + money(owedAll) + ")."
+                : "Still owed to this supplier after it: " + money(owedAll - typed) + ".";
+        }
+        amount.addEventListener("input", render);
+        render();
+    })();
+</script>
+{% endblock %}
