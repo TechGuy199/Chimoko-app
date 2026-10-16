@@ -7,14 +7,17 @@ import hmac
 import io
 import json
 import math
+import numbers
 import os
 import re
 import secrets
+import zipfile
 from zoneinfo import ZoneInfo
 
 from flask import Flask, Response, abort, flash, g, redirect, render_template, request, send_from_directory, session, url_for
 from markupsafe import Markup
 from werkzeug.security import check_password_hash, generate_password_hash
+import xlsxwriter
 
 from db import DB_ERRORS, IS_POSTGRES, Database, init_schema
 
@@ -116,7 +119,7 @@ def load_user_and_check_csrf():
         g.user = get_db().one(
             """SELECT u.id, u.business_id, u.username, u.role, u.can_sell, u.can_procure, u.can_transfer, u.can_delete, u.theme, u.glass,
                       b.name AS business_name, b.subtitle, b.contact, b.currency, b.low_stock_threshold,
-                      b.alert_phone, b.alert_low_stock, b.alert_permission
+                      b.alert_phone, b.alert_low_stock, b.alert_permission, b.backup_hour, b.last_backup_at, b.last_backup_by
                FROM users u JOIN businesses b ON b.id = u.business_id WHERE u.id=?""",
             (uid,),
         )
@@ -6645,6 +6648,477 @@ def backfill_cashbook():
 
 
 backfill_cashbook()
+
+
+# --- BACKUPS (ADMIN) ---
+# A backup is the business's records as Excel books - a master workbook holding every book, and each book on its own - and every
+# table as a CSV file. backup.js saves them into a folder the admin chose once on their computer, replacing the files from the last
+# backup (the file names never change). A browser that cannot write into a folder downloads everything as one ZIP instead.
+# The Sales, Purchase, Planting and Inventory books come first everywhere, so they are always saved first.
+BACKUP_HOUR_DEFAULT = 17
+BACKUP_HOURS = [(-1, "Off: never remind me")] + [(h, f"{h:02d}:00") for h in range(12, 24)]
+# Every table that holds this business's records, for the CSV copy. Users are written separately, without their passwords.
+BACKUP_TABLES = (
+    "invoices", "invoice_items", "payment_log", "deleted_invoices", "customers", "customer_aliases", "customer_distinct",
+    "procurements", "suppliers", "supplier_aliases", "supplier_distinct", "supplier_payments", "supplier_payment_allocations",
+    "products", "pos_products", "categories", "departments", "stock_adjustments", "plantings", "preorders", "seedling_batches",
+    "cashbook", "employees", "payroll", "hr_settings", "notifications", "permission_requests",
+)
+TEXT, MONEY, WHOLE, NUMBER = "text", "money", "whole", "number"
+
+
+def joined_amounts(raw):
+    """A payslip's bonuses or deductions, stored as JSON, as one readable line."""
+    try:
+        items = json.loads(raw or "{}")
+    except ValueError:
+        return ""
+    return "; ".join(f"{name} {float(value):,.2f}" for name, value in items.items())
+
+
+def sales_book(db, biz):
+    paid_by = {}
+    for r in db.all("SELECT source_id, method FROM cashbook WHERE business_id=? AND source='invoice' AND direction='in' AND amount > 0 ORDER BY id", (biz,)):
+        methods = paid_by.setdefault(r["source_id"], [])
+        if r["method"] not in (NOT_RECORDED, CORRECTION) and r["method"] not in methods:
+            methods.append(r["method"])
+    invoices = db.all(
+        """SELECT id, invoice_no, created_at, kind, customer_name, customer_phone, total, amount_paid, balance_due, payment_status, created_by,
+                  cancelled_at, cancelled_by, cancel_reason
+           FROM invoices WHERE business_id=? ORDER BY created_at, id""",
+        (biz,),
+    )
+    lines = db.all(
+        """SELECT i.invoice_no, i.created_at, i.customer_name, i.payment_status, ii.item_code, ii.item_name, ii.department, ii.batch_no, ii.qty,
+                  ii.unit_price, ii.line_total
+           FROM invoice_items ii JOIN invoices i ON i.id = ii.invoice_id WHERE ii.business_id=? ORDER BY i.created_at, i.id, ii.id""",
+        (biz,),
+    )
+    deleted = db.all(
+        """SELECT invoice_no, created_at, customer_name, total, amount_paid, reason, deleted_by, approved_by, deleted_at
+           FROM deleted_invoices WHERE business_id=? ORDER BY id""",
+        (biz,),
+    )
+    return [
+        ("Sales invoices",
+         [("Invoice No", TEXT), ("Date / time", TEXT), ("Type", TEXT), ("Customer", TEXT), ("Phone", TEXT), ("Total", MONEY), ("Paid", MONEY),
+          ("Balance", MONEY), ("Status", TEXT), ("Paid by", TEXT), ("Recorded by", TEXT), ("Cancelled", TEXT)],
+         [(i["invoice_no"], i["created_at"], "Farm use" if i["kind"] == "FARM_USE" else "Sale", i["customer_name"], i["customer_phone"], i["total"],
+           i["amount_paid"], i["balance_due"], i["payment_status"], ", ".join(paid_by.get(i["id"], [])), i["created_by"],
+           f"{i['cancelled_at']} by {i['cancelled_by']}: {i['cancel_reason']}" if i["cancelled_at"] else "") for i in invoices]),
+        ("Sales lines",
+         [("Invoice No", TEXT), ("Date / time", TEXT), ("Customer", TEXT), ("Item code", TEXT), ("Item", TEXT), ("Department", TEXT), ("Batch", TEXT),
+          ("Qty", WHOLE), ("Unit price", MONEY), ("Line total", MONEY), ("Invoice status", TEXT)],
+         [(r["invoice_no"], r["created_at"], r["customer_name"], r["item_code"], r["item_name"], r["department"], r["batch_no"], r["qty"],
+           r["unit_price"], r["line_total"], r["payment_status"]) for r in lines]),
+        ("Deleted invoices",
+         [("Invoice No", TEXT), ("Sold on", TEXT), ("Customer", TEXT), ("Total", MONEY), ("Paid", MONEY), ("Reason", TEXT), ("Deleted by", TEXT),
+          ("Approved by", TEXT), ("Deleted on", TEXT)],
+         [(r["invoice_no"], r["created_at"], r["customer_name"], r["total"], r["amount_paid"], r["reason"], r["deleted_by"], r["approved_by"],
+           r["deleted_at"]) for r in deleted]),
+    ]
+
+
+def purchase_book(db, biz):
+    purchases = db.all(
+        """SELECT purchase_date, supplier_name, invoice_no, item_code, name, category, department, COALESCE(in_inventory, 1) AS in_inventory, quantity,
+                  unit_cost, total_cost, COALESCE(amount_paid, total_cost) AS paid, expiry_date
+           FROM procurements WHERE business_id=? ORDER BY purchase_date, id""",
+        (biz,),
+    )
+    payments = db.all(
+        """SELECT sp.paid_on, s.name AS supplier, sp.method, sp.reference, sp.amount, sp.note, sp.recorded_by, sp.recorded_at
+           FROM supplier_payments sp LEFT JOIN suppliers s ON s.id = sp.supplier_id WHERE sp.business_id=? ORDER BY sp.paid_on, sp.id""",
+        (biz,),
+    )
+    return [
+        ("Purchases",
+         [("Date", TEXT), ("Supplier", TEXT), ("Supplier invoice", TEXT), ("Item code", TEXT), ("Item", TEXT), ("Category", TEXT), ("Department", TEXT),
+          ("In inventory", TEXT), ("Qty", WHOLE), ("Unit cost", MONEY), ("Total cost", MONEY), ("Paid", MONEY), ("Balance", MONEY), ("Status", TEXT),
+          ("Expiry", TEXT)],
+         [(r["purchase_date"], r["supplier_name"], r["invoice_no"], r["item_code"], r["name"], r["category"], r["department"],
+           "Yes" if r["in_inventory"] else "No", r["quantity"], r["unit_cost"], r["total_cost"], r["paid"],
+           round((r["total_cost"] or 0) - (r["paid"] or 0), 2), payment_status_for(r["total_cost"] or 0, r["paid"] or 0), r["expiry_date"])
+          for r in purchases]),
+        ("Supplier payments",
+         [("Date paid", TEXT), ("Supplier", TEXT), ("Method", TEXT), ("Reference", TEXT), ("Amount", MONEY), ("Note", TEXT), ("Recorded by", TEXT),
+          ("Recorded at", TEXT)],
+         [(r["paid_on"], r["supplier"], r["method"], r["reference"], r["amount"], r["note"], r["recorded_by"], r["recorded_at"]) for r in payments]),
+    ]
+
+
+def planting_book(db, biz):
+    plantings = with_figures(db, biz, db.all("SELECT * FROM plantings WHERE business_id=? ORDER BY planted_on, id", (biz,)))
+    orders = db.all(
+        """SELECT po.created_at, po.customer_name, po.customer_phone, p.name AS planting, po.qty, po.unit_price, po.status, po.collected_at,
+                  po.approved_by, i.invoice_no
+           FROM preorders po JOIN plantings p ON p.id = po.planting_id LEFT JOIN invoices i ON i.id = po.invoice_id
+           WHERE po.business_id=? ORDER BY po.id""",
+        (biz,),
+    )
+    sowings = db.all(
+        """SELECT created_at, seed_code, seed_name, seedling_name, packs, seeds_sown, germination_pct, seedlings, cost_per_seedling, selling_price, created_by
+           FROM seedling_batches WHERE business_id=? ORDER BY id""",
+        (biz,),
+    )
+    return [
+        ("Planting records",
+         [("Batch", TEXT), ("Batch No", TEXT), ("Seed", TEXT), ("Seed code", TEXT), ("Department", TEXT), ("Planted on", TEXT), ("Ready on", TEXT),
+          ("Actually ready", TEXT), ("Seeds planted", WHOLE), ("Packs used", WHOLE), ("Mortality %", NUMBER), ("Seedlings", WHOLE),
+          ("Cost per seedling", NUMBER), ("Price", MONEY), ("Sold", WHOLE), ("Pre-ordered", WHOLE), ("Available", WHOLE), ("In greenhouse", TEXT),
+          ("POS code", TEXT), ("Notes", TEXT), ("Recorded by", TEXT)],
+         [(p["name"], p["batch_no"], p["seed_name"], p["seed_code"], p["department"], p["planted_on"], p["ready_on"], p["actual_ready_on"],
+           p["seeds_planted"], p["packs_used"], p["mortality_pct"], p["seedlings"], p["cost_per_seedling"], p["price"], p["sold"], p["pending"],
+           p["available"], "Yes" if p["still_in_greenhouse"] else "No (record)", p["pos_code"], p["notes"], p["created_by"]) for p in plantings]),
+        ("Pre-orders",
+         [("Placed", TEXT), ("Customer", TEXT), ("Phone", TEXT), ("Batch", TEXT), ("Qty", WHOLE), ("Unit price", MONEY), ("Total", MONEY),
+          ("Status", TEXT), ("Collected", TEXT), ("Approved by", TEXT), ("Invoice No", TEXT)],
+         [(r["created_at"], r["customer_name"], r["customer_phone"], r["planting"], r["qty"], r["unit_price"], round(r["qty"] * r["unit_price"], 2),
+           r["status"], r["collected_at"], r["approved_by"], r["invoice_no"]) for r in orders]),
+        ("Seed sowings",
+         [("Sown", TEXT), ("Seed code", TEXT), ("Seed", TEXT), ("Seedlings listed as", TEXT), ("Packs", WHOLE), ("Seeds sown", WHOLE),
+          ("Germination %", NUMBER), ("Seedlings", WHOLE), ("Cost per seedling", NUMBER), ("Selling price", MONEY), ("By", TEXT)],
+         [(r["created_at"], r["seed_code"], r["seed_name"], r["seedling_name"], r["packs"], r["seeds_sown"], r["germination_pct"], r["seedlings"],
+           r["cost_per_seedling"], r["selling_price"], r["created_by"]) for r in sowings]),
+    ]
+
+
+def inventory_book(db, biz):
+    items = db.all(
+        """SELECT item_code, name, category, department, unit, quantity, unit_cost, price, seeds_per_pack, supplier_name, invoice_no, purchase_date,
+                  batch_no, date_planted, expiry_date
+           FROM products WHERE business_id=? ORDER BY category, name""",
+        (biz,),
+    )
+    listed = db.all(
+        "SELECT item_code, name, category, department, date_planted, batch_no, quantity, price FROM pos_products WHERE business_id=? ORDER BY name",
+        (biz,),
+    )
+    changes = db.all(
+        """SELECT created_at, kind, item_code, item_name, department, quantity_before, quantity_after, delta, reason, note, created_by
+           FROM stock_adjustments WHERE business_id=? ORDER BY id""",
+        (biz,),
+    )
+    return [
+        ("Inventory",
+         [("Item code", TEXT), ("Item", TEXT), ("Category", TEXT), ("Department", TEXT), ("Unit", TEXT), ("In stock", WHOLE), ("Unit cost", MONEY),
+          ("Stock value", MONEY), ("Selling price", MONEY), ("Seeds per pack", WHOLE), ("Supplier", TEXT), ("Supplier invoice", TEXT),
+          ("Purchase date", TEXT), ("Batch", TEXT), ("Date planted", TEXT), ("Expiry", TEXT)],
+         [(r["item_code"], r["name"], r["category"], r["department"], r["unit"], r["quantity"], r["unit_cost"],
+           round((r["quantity"] or 0) * (r["unit_cost"] or 0), 2), r["price"], r["seeds_per_pack"], r["supplier_name"], r["invoice_no"],
+           r["purchase_date"], r["batch_no"], r["date_planted"], r["expiry_date"]) for r in items]),
+        ("POS listings",
+         [("Code", TEXT), ("Name", TEXT), ("Category", TEXT), ("Department", TEXT), ("Planted", TEXT), ("Batch", TEXT), ("In stock", WHOLE),
+          ("Price", MONEY), ("Value at price", MONEY)],
+         [(r["item_code"], r["name"], r["category"], r["department"], r["date_planted"], r["batch_no"], r["quantity"], r["price"],
+           round((r["quantity"] or 0) * (r["price"] or 0), 2)) for r in listed]),
+        ("Stock adjustments",
+         [("When", TEXT), ("Where", TEXT), ("Item code", TEXT), ("Item", TEXT), ("Department", TEXT), ("Before", WHOLE), ("After", WHOLE),
+          ("Change", WHOLE), ("Reason", TEXT), ("Note", TEXT), ("By", TEXT)],
+         [(r["created_at"], "POS" if r["kind"] == "pos_removal" else "Inventory", r["item_code"], r["item_name"], r["department"],
+           r["quantity_before"], r["quantity_after"], r["delta"], r["reason"], r["note"], r["created_by"]) for r in changes]),
+    ]
+
+
+def accounts_book(db, biz):
+    rows = db.all(
+        """SELECT occurred_at, direction, category, party, description, method, reference, amount, recorded_by
+           FROM cashbook WHERE business_id=? ORDER BY occurred_at, id""",
+        (biz,),
+    )
+    return [(
+        "Accounts entries",
+        [("Date / time", TEXT), ("In / Out", TEXT), ("Category", TEXT), ("From / to", TEXT), ("Details", TEXT), ("Method", TEXT), ("Channel", TEXT),
+         ("Reference", TEXT), ("Money in", MONEY), ("Money out", MONEY), ("Recorded by", TEXT)],
+        [(r["occurred_at"], "In" if r["direction"] == "in" else "Out", CATEGORY_LABELS.get(r["category"], r["category"]), r["party"], r["description"],
+          r["method"], CHANNEL_OF.get(r["method"], "Other"), r["reference"], r["amount"] if r["direction"] == "in" else None,
+          r["amount"] if r["direction"] == "out" else None, r["recorded_by"]) for r in rows],
+    )]
+
+
+def customers_book(db, biz):
+    rows = db.all(
+        """SELECT c.name, c.phone, c.created_at, COUNT(i.id) AS invoices, COALESCE(SUM(i.total), 0) AS total, COALESCE(SUM(i.amount_paid), 0) AS paid,
+                  COALESCE(SUM(i.balance_due), 0) AS owed
+           FROM customers c LEFT JOIN invoices i ON i.customer_id = c.id AND i.kind = 'SALE' AND i.payment_status <> 'Cancelled'
+           WHERE c.business_id=? GROUP BY c.id, c.name, c.phone, c.created_at ORDER BY c.name""",
+        (biz,),
+    )
+    return [(
+        "Customers",
+        [("Customer", TEXT), ("Phone", TEXT), ("Customer since", TEXT), ("Invoices", WHOLE), ("Total bought", MONEY), ("Paid", MONEY), ("Owes", MONEY)],
+        [(r["name"], r["phone"], (r["created_at"] or "")[:10], r["invoices"], r["total"], r["paid"], r["owed"]) for r in rows],
+    )]
+
+
+def suppliers_book(db, biz):
+    rows = db.all(
+        """SELECT s.name, s.phone, s.created_at, COUNT(pr.id) AS purchases, COALESCE(SUM(pr.total_cost), 0) AS total,
+                  COALESCE(SUM(COALESCE(pr.amount_paid, pr.total_cost)), 0) AS paid
+           FROM suppliers s LEFT JOIN procurements pr ON pr.supplier_id = s.id
+           WHERE s.business_id=? GROUP BY s.id, s.name, s.phone, s.created_at ORDER BY s.name""",
+        (biz,),
+    )
+    return [(
+        "Suppliers",
+        [("Supplier", TEXT), ("Phone", TEXT), ("Supplier since", TEXT), ("Purchases", WHOLE), ("Total bought", MONEY), ("Paid", MONEY), ("We owe", MONEY)],
+        [(r["name"], r["phone"], (r["created_at"] or "")[:10], r["purchases"], r["total"], r["paid"], round(r["total"] - r["paid"], 2)) for r in rows],
+    )]
+
+
+def payroll_book(db, biz):
+    slips = db.all(
+        """SELECT pay_month, employee_name, basic_salary, expected_days, worked_days, calculated_basic, bonuses_json, deductions_json, napsa_amt, nhima_amt,
+                  employer_napsa, employer_nhima, net_payable, created_at
+           FROM payroll WHERE business_id=? ORDER BY pay_month, employee_name""",
+        (biz,),
+    )
+    staff = db.all(
+        "SELECT full_name, nrc_number, employment_type, basic_salary, start_date, expected_days_week, address FROM employees WHERE business_id=? ORDER BY full_name",
+        (biz,),
+    )
+    return [
+        ("Payslips",
+         [("Pay month", TEXT), ("Employee", TEXT), ("Basic salary", MONEY), ("Expected days", NUMBER), ("Days worked", NUMBER), ("Basic for days", MONEY),
+          ("Bonuses", TEXT), ("Deductions", TEXT), ("NAPSA (employee)", MONEY), ("NHIMA (employee)", MONEY), ("NAPSA (employer)", MONEY),
+          ("NHIMA (employer)", MONEY), ("Net pay", MONEY), ("Made", TEXT)],
+         [(r["pay_month"], r["employee_name"], r["basic_salary"], r["expected_days"], r["worked_days"], r["calculated_basic"],
+           joined_amounts(r["bonuses_json"]), joined_amounts(r["deductions_json"]), r["napsa_amt"], r["nhima_amt"], r["employer_napsa"],
+           r["employer_nhima"], r["net_payable"], r["created_at"]) for r in slips]),
+        ("Employees",
+         [("Employee", TEXT), ("NRC", TEXT), ("Type", TEXT), ("Basic salary", MONEY), ("Started", TEXT), ("Days a week", WHOLE), ("Address", TEXT)],
+         [(r["full_name"], r["nrc_number"], r["employment_type"], r["basic_salary"], r["start_date"], r["expected_days_week"], r["address"]) for r in staff]),
+    ]
+
+
+# (key, file name, what builds it). The first four are the priority books.
+BACKUP_BOOKS = (
+    ("sales", "Sales Book", sales_book),
+    ("purchases", "Purchase Book", purchase_book),
+    ("plantings", "Planting Records", planting_book),
+    ("inventory", "Inventory Records", inventory_book),
+    ("accounts", "Accounts", accounts_book),
+    ("customers", "Customers", customers_book),
+    ("suppliers", "Suppliers", suppliers_book),
+    ("payroll", "Payroll", payroll_book),
+)
+PRIORITY_BOOKS = 4
+
+
+def workbook_bytes(sheets, contents=None):
+    """An Excel workbook of sheets [(title, [(column, kind)], rows)], with a contents sheet first when given. Text is always written
+    as text (never run as a formula); amounts are real numbers, so they can be added up in Excel."""
+    buffer = io.BytesIO()
+    book = xlsxwriter.Workbook(buffer, {"in_memory": True, "strings_to_formulas": False, "strings_to_urls": False, "strings_to_numbers": False})
+    head = book.add_format({"bold": True, "bg_color": "#DCE6F2", "border": 1, "text_wrap": True, "valign": "top"})
+    kinds = {
+        MONEY: book.add_format({"num_format": "#,##0.00"}), WHOLE: book.add_format({"num_format": "#,##0"}),
+        NUMBER: book.add_format({"num_format": "#,##0.####"}),
+    }
+    if contents:
+        sheet = book.add_worksheet("Contents")
+        title = book.add_format({"bold": True, "font_size": 14})
+        sheet.write_string(0, 0, contents["title"], title)
+        row = 2
+        for label, value in contents["facts"]:
+            sheet.write_string(row, 0, label, head)
+            sheet.write_string(row, 1, str(value))
+            row += 1
+        row += 1
+        for c, name in enumerate(("Book", "Sheet", "Rows")):
+            sheet.write_string(row, c, name, head)
+        for book_title, sheet_title, count in contents["sheets"]:
+            row += 1
+            sheet.write_string(row, 0, book_title)
+            sheet.write_string(row, 1, sheet_title)
+            sheet.write_number(row, 2, count, kinds[WHOLE])
+        sheet.set_column(0, 0, 26)
+        sheet.set_column(1, 1, 34)
+        sheet.set_column(2, 2, 10)
+    for title, columns, rows in sheets:
+        sheet = book.add_worksheet(title[:31])
+        widths = [len(name) for name, _ in columns]
+        for c, (name, _) in enumerate(columns):
+            sheet.write_string(0, c, name, head)
+        for r, row in enumerate(rows, start=1):
+            for c, (value, (_, kind)) in enumerate(zip(row, columns)):
+                if value is None or value == "":
+                    continue
+                if kind != TEXT and isinstance(value, numbers.Number) and not isinstance(value, bool):
+                    sheet.write_number(r, c, float(value), kinds[kind])
+                    widths[c] = max(widths[c], len(f"{float(value):,.2f}"))
+                else:
+                    value = str(value)
+                    sheet.write_string(r, c, value)
+                    widths[c] = max(widths[c], min(len(value), 60))
+        for c, width in enumerate(widths):
+            sheet.set_column(c, c, min(max(width + 2, 8), 62))
+        sheet.freeze_panes(1, 0)
+        if rows:
+            sheet.autofilter(0, 0, len(rows), len(columns) - 1)
+    book.close()
+    return buffer.getvalue()
+
+
+def backup_facts():
+    return [
+        ("Business", g.user["business_name"]),
+        ("Backed up", now().strftime("%d %b %Y %H:%M")),
+        ("By", g.user["username"]),
+    ]
+
+
+def master_workbook(db, biz):
+    sheets, listing = [], []
+    for _, title, build in BACKUP_BOOKS:
+        for sheet in build(db, biz):
+            sheets.append(sheet)
+            listing.append((title, sheet[0], len(sheet[2])))
+    contents = {"title": f"{g.user['business_name']}: backup of all records", "facts": backup_facts(), "sheets": listing}
+    return workbook_bytes(sheets, contents)
+
+
+def book_workbook(db, biz, key):
+    title, build = next(((t, b) for k, t, b in BACKUP_BOOKS if k == key), (None, None))
+    if build is None:
+        abort(404)
+    sheets = build(db, biz)
+    contents = {"title": f"{g.user['business_name']}: {title}", "facts": backup_facts(), "sheets": [(title, s[0], len(s[2])) for s in sheets]}
+    return title, workbook_bytes(sheets, contents)
+
+
+def table_csv(db, biz, table):
+    """One table of this business's records as CSV. The table name comes from the list above, never from the request as such."""
+    if table == "business":
+        sql, params = "SELECT * FROM businesses WHERE id=?", (biz,)
+    elif table == "users":
+        sql, params = "SELECT id, username, role, can_sell, can_procure, can_transfer, can_delete FROM users WHERE business_id=? ORDER BY id", (biz,)
+    elif table in BACKUP_TABLES:
+        sql, params = f"SELECT * FROM {table} WHERE business_id=? ORDER BY 1", (biz,)
+    else:
+        abort(404)
+    cursor = db.execute(sql + " LIMIT 0", params)
+    columns = [d[0] for d in cursor.description]
+    cursor.close()
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(columns)
+    for row in db.all(sql, params):
+        writer.writerow([csv_safe(row[c]) for c in columns])
+    return buffer.getvalue().encode("utf-8-sig")
+
+
+def backup_tables():
+    return list(BACKUP_TABLES) + ["business", "users"]
+
+
+def backup_files():
+    """Every file a backup holds, in the order they are saved: the priority books, the master workbook, the other books, then the data."""
+    books = [{"path": f"Books/{title}.xlsx", "url": url_for("backup_book", key=key)} for key, title, _ in BACKUP_BOOKS]
+    return (
+        books[:PRIORITY_BOOKS] + [{"path": "Master Backup.xlsx", "url": url_for("backup_master")}] + books[PRIORITY_BOOKS:]
+        + [{"path": f"Data (CSV)/{table}.csv", "url": url_for("backup_table", table=table)} for table in backup_tables()]
+    )
+
+
+def xlsx_response(name, data):
+    return Response(
+        data, mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{name}"', "Cache-Control": "no-store"},
+    )
+
+
+def note_backup(db, biz):
+    db.execute("UPDATE businesses SET last_backup_at=?, last_backup_by=? WHERE id=?", (now().strftime("%Y-%m-%d %H:%M:%S"), g.user["username"], biz))
+    db.commit()
+
+
+@app.get("/backup")
+@need("admin")
+def backup_page():
+    hour = g.user["backup_hour"]
+    return render_template(
+        "backup.html", books=[(key, title) for key, title, _ in BACKUP_BOOKS], priority=PRIORITY_BOOKS, tables=backup_tables(),
+        hours=BACKUP_HOURS, hour=BACKUP_HOUR_DEFAULT if hour is None else hour, file_count=len(backup_files()),
+    )
+
+
+@app.get("/backup/files.json")
+@need("admin")
+def backup_manifest():
+    return Response(json.dumps(backup_files()), mimetype="application/json", headers={"Cache-Control": "no-store"})
+
+
+@app.get("/backup/master.xlsx")
+@need("admin")
+def backup_master():
+    db, biz = get_db(), g.user["business_id"]
+    return xlsx_response("Master Backup.xlsx", master_workbook(db, biz))
+
+
+@app.get("/backup/books/<key>.xlsx")
+@need("admin")
+def backup_book(key):
+    db, biz = get_db(), g.user["business_id"]
+    title, data = book_workbook(db, biz, key)
+    return xlsx_response(f"{title}.xlsx", data)
+
+
+@app.get("/backup/data/<table>.csv")
+@need("admin")
+def backup_table(table):
+    db, biz = get_db(), g.user["business_id"]
+    return Response(
+        table_csv(db, biz, table), mimetype="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{table}.csv"', "Cache-Control": "no-store"},
+    )
+
+
+@app.get("/backup/all.zip")
+@need("admin")
+def backup_zip():
+    """Everything in one ZIP, laid out like the backup folder, for a browser that cannot save into a folder."""
+    db, biz = get_db(), g.user["business_id"]
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        for key, title, _ in BACKUP_BOOKS[:PRIORITY_BOOKS]:
+            archive.writestr(f"Books/{title}.xlsx", book_workbook(db, biz, key)[1])
+        archive.writestr("Master Backup.xlsx", master_workbook(db, biz))
+        for key, title, _ in BACKUP_BOOKS[PRIORITY_BOOKS:]:
+            archive.writestr(f"Books/{title}.xlsx", book_workbook(db, biz, key)[1])
+        for table in backup_tables():
+            archive.writestr(f"Data (CSV)/{table}.csv", table_csv(db, biz, table))
+        archive.writestr("Backup info.txt", "\r\n".join(f"{label}: {value}" for label, value in backup_facts()) + "\r\n")
+    note_backup(db, biz)
+    stamp = now().strftime("%Y-%m-%d")
+    return Response(
+        buffer.getvalue(), mimetype="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="Backup {stamp}.zip"', "Cache-Control": "no-store"},
+    )
+
+
+@app.post("/backup/done")
+@need("admin")
+def backup_done():
+    """backup.js reports a backup it finished saving into the folder, so the end-of-day reminder knows today is done."""
+    db, biz = get_db(), g.user["business_id"]
+    note_backup(db, biz)
+    row = db.one("SELECT last_backup_at FROM businesses WHERE id=?", (biz,))
+    return Response(json.dumps({"ok": True, "at": row["last_backup_at"]}), mimetype="application/json")
+
+
+@app.post("/backup/settings")
+@need("admin")
+def backup_settings():
+    db, biz = get_db(), g.user["business_id"]
+    hour = request.form.get("backup_hour", type=int)
+    if hour not in dict(BACKUP_HOURS):
+        flash("Choose a time for the reminder from the list.", "error")
+    else:
+        db.execute("UPDATE businesses SET backup_hour=? WHERE id=?", (hour, biz))
+        db.commit()
+        flash("The end-of-day backup reminder is off." if hour < 0 else f"The backup reminder will appear from {hour:02d}:00 each day until that day's backup is made.", "ok")
+    return redirect(url_for("backup_page"))
 
 
 # --- RESET THE APP (ADMIN) ---

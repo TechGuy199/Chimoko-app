@@ -1,0 +1,127 @@
+{% extends "base.html" %}
+{% block title %}Backups — {% endblock %}
+{% block content %}
+<div class="page-head">
+    <div>
+        <h1>Backups</h1>
+        <p class="muted">
+            A copy of every record, kept on this computer: the books as Excel files, a master workbook with all of them, and every table as a CSV file.
+            Each backup replaces the files from the last one, so the folder always holds the latest copy.
+        </p>
+    </div>
+</div>
+
+<div class="split">
+    <section class="card grow">
+        <h2>Back up to this computer</h2>
+        <p id="last-backup">
+            {% if user.last_backup_at %}Last backup: <strong>{{ user.last_backup_at[:16] }}</strong> by {{ user.last_backup_by }}.
+            {% else %}<strong class="warn">No backup has been made yet.</strong>{% endif %}
+        </p>
+        <p id="backup-folder" class="muted">Checking where backups are saved&hellip;</p>
+        <div class="toolbar">
+            <button type="button" class="btn success" id="backup-now">Back up now</button>
+            <button type="button" class="btn" id="backup-choose">Choose the backup folder</button>
+        </div>
+        <p id="backup-status" class="muted" role="status"></p>
+        <p class="muted hint">
+            The folder gets <strong>Master Backup.xlsx</strong>, a <strong>Books</strong> folder with each book, and a <strong>Data (CSV)</strong> folder with
+            every table ({{ file_count }} files in all). Saving straight into a folder works in Chrome and Edge on a computer; the browser asks once for
+            permission to save there. Other browsers download the backup as one ZIP file instead, which cannot replace the last one by itself.
+        </p>
+    </section>
+
+    <section class="card side">
+        <h2>End of day reminder</h2>
+        <p class="muted">From this time, an admin with the app open is asked to back up, once a day, until that day's backup is made.</p>
+        <form method="post" action="{{ url_for('backup_settings') }}">
+            {{ csrf_field() }}
+            <label>Remind me at
+                <select name="backup_hour" onchange="this.form.requestSubmit()">
+                    {% for value, label in hours %}<option value="{{ value }}" {{ 'selected' if value == hour }}>{{ label }}</option>{% endfor %}
+                </select>
+            </label>
+            <noscript><button class="btn primary">Save</button></noscript>
+        </form>
+    </section>
+</div>
+
+<section class="card block">
+    <h2>Download one at a time</h2>
+    <p class="muted">Each file is made fresh from today's records when you click it.</p>
+    <div class="table-wrap">
+        <table>
+            <thead><tr><th>File</th><th>What it holds</th><th></th></tr></thead>
+            <tbody>
+                {% for key, title in books[:priority] %}
+                <tr><td><strong>{{ title }}.xlsx</strong> <span class="flow-tag in">Priority</span></td><td>{{ {'sales': 'Every invoice by invoice number, every line sold, and deleted invoices', 'purchases': 'Every purchase and every payment to suppliers', 'plantings': 'Every planting record with what was sold and pre-ordered, pre-orders, and seed sowings', 'inventory': 'Every inventory item with its stock value, the POS listings, and every stock adjustment'}[key] }}</td>
+                    <td class="num"><a class="btn small" href="{{ url_for('backup_book', key=key) }}">Download</a></td></tr>
+                {% endfor %}
+                <tr><td><strong>Master Backup.xlsx</strong></td><td>All the books in one workbook, with a contents sheet</td>
+                    <td class="num"><a class="btn small" href="{{ url_for('backup_master') }}">Download</a></td></tr>
+                {% for key, title in books[priority:] %}
+                <tr><td><strong>{{ title }}.xlsx</strong></td><td>{{ {'accounts': 'Every movement of money in and out', 'customers': "Every customer account and what they owe", 'suppliers': 'Every supplier account and what is owed to them', 'payroll': 'Every payslip and every employee'}[key] }}</td>
+                    <td class="num"><a class="btn small" href="{{ url_for('backup_book', key=key) }}">Download</a></td></tr>
+                {% endfor %}
+                <tr><td><strong>Everything (ZIP)</strong></td><td>All of the above and every table as CSV, in one file</td>
+                    <td class="num"><a class="btn small" href="{{ url_for('backup_zip') }}">Download</a></td></tr>
+            </tbody>
+        </table>
+    </div>
+    <details class="spaced">
+        <summary>Every table as CSV ({{ tables|length }} files)</summary>
+        <p class="toolbar spaced">
+            {% for table in tables %}<a class="btn small" href="{{ url_for('backup_table', table=table) }}">{{ table }}.csv</a>{% endfor %}
+        </p>
+    </details>
+</section>
+{% endblock %}
+{% block scripts %}
+<script>
+    // The buttons use backup.js, which every admin page loads
+    (function () {
+        const backup = window.ChimokoBackup;
+        const where = document.getElementById("backup-folder");
+        const status = document.getElementById("backup-status");
+        const now = document.getElementById("backup-now");
+        const choose = document.getElementById("backup-choose");
+        if (!backup) return;
+        function showFolder() {
+            if (!backup.supported) {
+                where.textContent = "This browser cannot save into a folder, so Back up now downloads one ZIP file. Use Chrome or Edge to have each backup replace the last one.";
+                choose.hidden = true;
+                return;
+            }
+            backup.folderName().then(function (name) {
+                where.textContent = name ? "Backups are saved in the folder “" + name + "” on this computer." : "No folder chosen yet: Back up now asks you to choose one first.";
+                choose.textContent = name ? "Choose another folder" : "Choose the backup folder";
+            });
+        }
+        async function act(work) {
+            now.disabled = choose.disabled = true;
+            try {
+                await work();
+            } catch (error) {
+                status.textContent = backup.failure(error);
+            } finally {
+                now.disabled = choose.disabled = false;
+                showFolder();
+            }
+        }
+        now.addEventListener("click", function () {
+            act(async function () {
+                const result = await backup.run(function (text) { status.textContent = text; });
+                status.textContent = result.zip ? "The ZIP file is downloading." : "Saved " + result.files + " files to “" + result.folder + "”.";
+                document.getElementById("last-backup").textContent = "Last backup: " + backup.lastDone().slice(0, 16) + ", just now.";
+            });
+        });
+        choose.addEventListener("click", function () {
+            act(async function () {
+                const handle = await backup.chooseFolder();
+                status.textContent = "Backups will be saved in “" + handle.name + "”.";
+            });
+        });
+        showFolder();
+    })();
+</script>
+{% endblock %}

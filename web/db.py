@@ -278,6 +278,10 @@ def init_schema():
         # Set once a business's earlier money records have been copied into the cashbook (see backfill_cashbook in app.py).
         # A business created after Accounts existed starts with it set, since everything it does is recorded as it happens.
         add_column(db, "businesses", "cashbook_ready", "INTEGER")
+        # Backups: the hour the end-of-day reminder appears (NULL = the default, -1 = off), and the last backup made
+        add_column(db, "businesses", "backup_hour", "INTEGER")
+        add_column(db, "businesses", "last_backup_at", "TEXT")
+        add_column(db, "businesses", "last_backup_by", "TEXT")
         add_column(db, "businesses", "alert_phone", "TEXT")
         add_column(db, "businesses", "alert_low_stock", "INTEGER")
         add_column(db, "businesses", "alert_permission", "INTEGER")

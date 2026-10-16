@@ -48,8 +48,9 @@
             if (dialog) dialog.close();
             return;
         }
-        // The inner box fills the dialog, so a click that lands on the dialog itself is a click on the dark backdrop
-        if (e.target instanceof HTMLDialogElement && e.target.open) e.target.close();
+        // The inner box fills the dialog, so a click that lands on the dialog itself is a click on the dark backdrop.
+        // A dialog that is in the middle of something (data-busy, like a backup being saved) stays open.
+        if (e.target instanceof HTMLDialogElement && e.target.open && !e.target.dataset.busy) e.target.close();
     }, true);
 
     document.addEventListener("submit", function (e) {

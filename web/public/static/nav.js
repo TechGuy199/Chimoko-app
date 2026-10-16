@@ -5,11 +5,11 @@
 // in the header. Loaded once, like notify.js, and never re-run by itself.
 //
 // What is deliberately left to a real browser navigation: links to another site, "open in a new tab" clicks,
-// download links (.csv/.pdf exports), and forms marked data-full-reload (the CSV/XLSX import uploads, kept as
+// download links (.csv/.pdf/.xlsx/.zip exports), and forms marked data-full-reload (the CSV/XLSX import uploads, kept as
 // plain uploads for now). Anything that fails - offline, a server error, an unexpected response - falls back to
 // a real navigation too, so the app is never left in a half-updated state.
 (function () {
-    const DOWNLOAD_PATH = /\.(csv|pdf)(?:$|\?)/i;
+    const DOWNLOAD_PATH = /\.(csv|pdf|xlsx|zip)(?:$|\?)/i;
 
     function sameOrigin(url) {
         return url.origin === location.origin;
