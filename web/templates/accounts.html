@@ -18,6 +18,61 @@
     </div>
 </div>
 
+<section class="card block balances" id="balances">
+    <div class="page-head">
+        <h2>Balances now</h2>
+        <button type="button" class="btn primary no-print" data-modal-open="set-balances">{{ 'Count the balances again' if balances else 'Enter your balances' }}</button>
+    </div>
+    {% if balances %}
+    <div class="stats">
+        {% for a in balances.accounts %}
+        <div class="stat"><span>{{ a.label }}</span><strong class="{{ 'warn' if a.amount < -0.005 }}">{{ a.amount|money }}</strong>
+            <small>{{ a.count.amount|money }} when counted, {{ a.count.as_of[:16] }}</small></div>
+        {% endfor %}
+        <div class="stat"><span>Total held</span><strong class="gold">{{ balances.total|money }}</strong><small>cash, bank and both wallets</small></div>
+    </div>
+    <p class="muted hint">
+        Each balance is what was counted, plus every payment in and less every payment out through it since. Cash moves with cash payments,
+        the bank with bank transfers, cheques and cards, and each wallet with its own mobile money.
+    </p>
+    {% if balances.loose.n %}
+    <p class="flash notice">
+        {{ balances.loose.n }} entr{{ 'y' if balances.loose.n == 1 else 'ies' }} since the balances were counted do{{ 'es' if balances.loose.n == 1 }} not say which account
+        the money went through ({{ balances.loose.cin|money }} in, {{ balances.loose.cout|money }} out), so no balance includes {{ 'it' if balances.loose.n == 1 else 'them' }}.
+        <a href="{{ assign_url }}">Assign {{ 'it' if balances.loose.n == 1 else 'them' }} to an account</a>.
+    </p>
+    {% endif %}
+    {% else %}
+    <p class="muted">
+        Enter what is in the cash box, the bank account and each mobile money wallet (Airtel Money and MTN Money) right now. From then on every
+        sale, payment, purchase, payslip, refund and entry made here updates the right balance by itself. The records already in Accounts stay as they are.
+    </p>
+    {% endif %}
+    {% if history %}
+    <details class="no-print">
+        <summary>Balance counts ({{ history|length }})</summary>
+        <div class="table-wrap">
+            <table>
+                <thead><tr><th>Counted at</th><th>By</th>{% for key, label in balance_accounts %}<th class="num">{{ label }}</th>{% endfor %}</tr></thead>
+                <tbody>
+                {% for h in history %}
+                    <tr>
+                        <td>{{ h.as_of[:16] }}</td>
+                        <td>{{ h.set_by }}</td>
+                        {% for key, label in balance_accounts %}
+                        {% set row = h.rows|selectattr('0', 'equalto', label)|first %}
+                        <td class="num">{% if row %}{{ row[1]|money }}{% if row[2] is not none and (row[1] - row[2])|abs > 0.005 %}<br>
+                            <small class="{{ 'warn' if row[1] < row[2] else 'ok' }}">{{ (row[1] - row[2])|signed }} on {{ row[2]|money }} expected</small>{% endif %}{% else %}—{% endif %}</td>
+                        {% endfor %}
+                    </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </details>
+    {% endif %}
+</section>
+
 <form method="get" class="toolbar no-print" id="accounts-period">
     {{ keep(['period', 'from', 'to']) }}
     <select name="period" id="accounts-period-select" aria-label="Date range">
@@ -54,7 +109,7 @@
         <h2>By payment method</h2>
         <div class="table-wrap">
             <table class="method-table">
-                <thead><tr><th>Method</th><th class="num">In</th><th class="num">Out</th><th class="num">Net</th><th class="num">Held {{ 'at ' ~ f.end.strftime('%d %b') if f.end else 'now' }}</th></tr></thead>
+                <thead><tr><th>Method</th><th class="num">In</th><th class="num">Out</th><th class="num">Net</th></tr></thead>
                 <tbody>
                 {% for ch in summary.channels %}
                     <tr class="channel-row">
@@ -62,7 +117,6 @@
                         <td class="num">{{ ch.in|money }}</td>
                         <td class="num">{{ ch.out|money }}</td>
                         <td class="num {{ 'warn' if ch.net < -0.005 }}">{{ ch.net|signed }}</td>
-                        <td class="num"><strong>{{ ch.held|money }}</strong></td>
                     </tr>
                     {% for m in ch.methods %}
                     <tr class="method-row">
@@ -70,24 +124,22 @@
                         <td class="num">{{ m.in|money }}</td>
                         <td class="num">{{ m.out|money }}</td>
                         <td class="num">{{ m.net|signed }}</td>
-                        <td class="num">{{ m.held|money }}</td>
                     </tr>
                     {% endfor %}
                 {% else %}
-                    <tr><td colspan="5" class="muted center">No money has been recorded yet.</td></tr>
+                    <tr><td colspan="4" class="muted center">No money moved in this period.</td></tr>
                 {% endfor %}
                 </tbody>
                 {% if summary.channels %}
                 <tfoot>
-                    <tr><th>Total</th><th class="num">{{ summary.in|money }}</th><th class="num">{{ summary.out|money }}</th><th class="num">{{ summary.net|signed }}</th><th class="num">{{ summary.held|money }}</th></tr>
+                    <tr><th>Total</th><th class="num">{{ summary.in|money }}</th><th class="num">{{ summary.out|money }}</th><th class="num">{{ summary.net|signed }}</th></tr>
                 </tfoot>
                 {% endif %}
             </table>
         </div>
         <p class="muted hint">
-            Held is everything that came in less everything that went out, from the first entry up to the end of this period: what should be in the
-            cash box, the bank and the mobile money wallet. It matches them once the money the business started with is recorded (as Owner's money put in).
-            {% if summary.channels|selectattr('name', 'equalto', 'Not recorded')|list %}Not recorded is money from before Accounts existed, or entered without a method.{% endif %}
+            Bank is bank transfers, cheques and cards. Not recorded is money from before Accounts existed or imported without a method; Mobile money
+            (wallet not said) is from before Airtel Money and MTN Money were told apart; Corrections are lowered payments from before they had to say which account.
         </p>
     </section>
 
@@ -118,6 +170,10 @@
 
 <section class="card block">
     <h2>Cash flow {{ 'day by day' if flow.by_day else 'month by month' }}</h2>
+    <p class="muted hint">
+        {% if flow.counted %}Balance is what was held in cash, at the bank and in both wallets at the end of each {{ 'day' if flow.by_day else 'month' }}, worked out from the counts.
+        {% else %}Balance is everything recorded in less everything out. Enter your balances above to have it show what is really held.{% endif %}
+    </p>
     <div class="table-wrap">
         <table>
             <thead><tr><th>{{ 'Day' if flow.by_day else 'Month' }}</th><th class="num">In</th><th class="num">Out</th><th class="num">Net</th><th class="num">Balance</th></tr></thead>
@@ -153,6 +209,7 @@
         <select name="channel" aria-label="Payment method" onchange="this.form.requestSubmit()">
             <option value="">Every method</option>
             {% for name in channels %}<option {{ 'selected' if f.channel == name }}>{{ name }}</option>{% endfor %}
+            <option value="Unassigned" {{ 'selected' if f.channel == 'Unassigned' }}>Not in any balance yet</option>
         </select>
         <select name="category" aria-label="Category" onchange="this.form.requestSubmit()">
             <option value="">Every category</option>
@@ -179,14 +236,25 @@
                     <td><span class="flow-tag {{ e.direction }}">{{ 'In' if e.direction == 'in' else 'Out' }}</span> {{ e.label }}</td>
                     <td>{{ e.party or '—' }}</td>
                     <td>{% if e.link %}<a href="{{ e.link }}">{{ e.description or 'Open' }}</a>{% else %}{{ e.description or '—' }}{% endif %}</td>
-                    <td>{{ e.method }}</td>
+                    <td>{% if e.method in unassigned %}
+                        {# Says how it was paid, so the right balance includes it #}
+                        <form method="post" action="{{ url_for('assign_account_entry', entry_id=e.id) }}" class="assign-form no-print">
+                            {{ csrf_field() }}<input type="hidden" name="back" value="{{ return_to }}">
+                            <select name="payment_method" aria-label="Paid by" required>
+                                <option value="">{{ e.method }}: paid by?</option>
+                                {% for name in method_names %}<option>{{ name }}</option>{% endfor %}
+                            </select>
+                            <button class="btn small">Assign</button>
+                        </form>
+                        <span class="print-only">{{ e.method }}</span>
+                        {% else %}{{ e.method }}{% endif %}</td>
                     <td>{{ e.reference or '—' }}</td>
                     <td class="num {{ 'ok' if effect > 0 else 'warn' }}">{{ effect|signed }}</td>
                     <td>{{ e.recorded_by }}</td>
                     <td class="num no-print">
                         {% if e.source == 'manual' %}
                         <form method="post" action="{{ url_for('delete_account_entry', entry_id=e.id) }}" data-confirm="Remove this {{ e.amount|money }} entry ({{ e.label }}) from Accounts?">
-                            {{ csrf_field() }}<input type="hidden" name="back" value="{{ here }}">
+                            {{ csrf_field() }}<input type="hidden" name="back" value="{{ return_to }}">
                             <button class="btn danger small">Remove</button>
                         </form>
                         {% endif %}
@@ -212,7 +280,7 @@
         <form method="post" action="{{ url_for('record_account_entry') }}">
             {{ csrf_field() }}
             <input type="hidden" name="direction" value="{{ dir }}">
-            <input type="hidden" name="back" value="{{ here }}">
+            <input type="hidden" name="back" value="{{ return_to }}">
             <label>{{ 'What it is' if dir == 'in' else 'What it was for' }}
                 <select name="category" required>
                     <option value="">Choose&hellip;</option>
@@ -238,6 +306,32 @@
     </div>
 </dialog>
 {% endfor %}
+
+<dialog class="modal" id="set-balances" aria-labelledby="set-balances-title">
+    <div class="modal-body">
+        <h2 id="set-balances-title">{{ 'Count the balances' if balances else 'Enter your balances' }}</h2>
+        <p class="muted">
+            What is really held in each, at the time below. Money dated before then is already part of it; every payment after it moves the balance.
+            {% if balances %}Each box shows what the app expects now; change any that differ from the count, and the difference is noted.{% endif %}
+        </p>
+        <form method="post" action="{{ url_for('set_balances') }}">
+            {{ csrf_field() }}
+            <input type="hidden" name="back" value="{{ return_to }}">
+            <div class="grid">
+                {% for key, label in balance_accounts %}
+                {% set current = (balances.accounts|selectattr('key', 'equalto', key)|first) if balances else none %}
+                <label>{{ label }}
+                    <input name="{{ balance_fields[key] }}" type="number" step="0.01" inputmode="decimal" placeholder="0.00"
+                           value="{{ '%.2f'|format(current.amount) if current }}" required>
+                </label>
+                {% endfor %}
+            </div>
+            <label>Counted at <input type="datetime-local" name="as_of" id="balances-as-of" value="{{ moment }}" required></label>
+            <button class="btn primary wide">Save balances</button>
+            <p class="center"><button type="button" class="btn ghost" data-modal-close>Cancel</button></p>
+        </form>
+    </div>
+</dialog>
 {% endblock %}
 {% block scripts %}
 <script src="{{ asset('payment_method.js') }}"></script>
@@ -253,6 +347,19 @@
             custom.querySelectorAll("input").forEach(function (box) { box.disabled = !isCustom; });
             if (isCustom) custom.querySelector("input").focus();
             else form.requestSubmit();
+        });
+    })();
+
+    // The count is "as at now" unless changed: set when the box opens, not when the page was loaded
+    (function () {
+        const opener = document.querySelector('[data-modal-open="set-balances"]');
+        const when = document.getElementById("balances-as-of");
+        if (!opener || !when) return;
+        opener.addEventListener("click", function () {
+            const d = new Date();
+            const pad = function (n) { return (n < 10 ? "0" : "") + n; };
+            when.value = d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + "T" + pad(d.getHours()) + ":" + pad(d.getMinutes());
+            when.max = when.value;
         });
     })();
 </script>

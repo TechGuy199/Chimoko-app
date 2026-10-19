@@ -118,7 +118,7 @@
             <div id="pay-method-row">
                 <label>How it was paid
                     <select name="payment_method" id="pay-method" data-method-select required>
-                        <option value="">Choose: cash, bank or mobile money</option>
+                        <option value="">Choose: cash, bank, Airtel Money or MTN Money</option>
                         {% for method, label in methods %}<option value="{{ method }}" data-reference-label="{{ label }}">{{ method }}</option>{% endfor %}
                     </select>
                 </label>

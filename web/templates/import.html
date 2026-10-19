@@ -25,7 +25,7 @@
             <li><strong>Required:</strong> Item Code, Quantity, Unit Cost. Name is required when the item code is new.</li>
             <li><strong>Optional:</strong> Category, Department, Selling Price, Supplier, Invoice No, Purchase Date, Batch No, Date Planted, Expiry Date, Payment Status, Amount Paid.</li>
             <li>Payment Status is Paid (default), Unpaid or Partial Payment. Partial Payment needs an Amount Paid.</li>
-            <li><strong>Suppliers:</strong> the Supplier named on a row gets a supplier account (Supplier Phone is optional) and the purchase appears on its statement. For a row that was paid, add <strong>Payment Method</strong> (Cash, Bank transfer, Mobile money, Cheque, Card or Other) and <strong>Payment Reference</strong>, which every method needs: the receipt number for cash, the cheque number, the transaction ID and so on. Without them the payment is kept as "Not recorded". A paid row with no supplier can carry a Payment Method too (its reference is optional); every payment is recorded in Accounts as money out.</li>
+            <li><strong>Suppliers:</strong> the Supplier named on a row gets a supplier account (Supplier Phone is optional) and the purchase appears on its statement. For a row that was paid, add <strong>Payment Method</strong> (Cash, Bank transfer, Airtel Money, MTN Money, Cheque, Card or Other) and <strong>Payment Reference</strong>, which every method needs: the receipt number for cash, the cheque number, the transaction ID and so on. Without them the payment is kept as "Not recorded". A paid row with no supplier can carry a Payment Method too (its reference is optional); every payment is recorded in Accounts as money out.</li>
             <li><strong>Seed items:</strong> when the Category is Seeds (or contains the word "seed"), add a <strong>Seeds Per Pack</strong> column. It is required for new seed items; Quantity is then counted in packs. A seed item already in stock keeps its pack size, and a different size for the same code is rejected.</li>
             <li><strong>Unit</strong> (optional): what the quantity is counted in, such as bag, box, kg or litre. Seed items are always packs. An item already in stock keeps its unit.</li>
             <li><strong>In Inventory</strong> (optional): Yes or No. Blank means Yes, so existing files work unchanged. A <strong>No</strong> row is an expense (fuel, repairs, services) logged in Procurements only: it needs a Name but not an Item Code, and its Seeds Per Pack, Unit, Selling Price, Batch No and Date Planted are ignored. An Item Code that is already an inventory item cannot be used on a No row.</li>
@@ -38,6 +38,14 @@
         <form method="post" action="{{ url_for('import_purchases') }}" enctype="multipart/form-data" data-full-reload>
             {{ csrf_field() }}
             <label>CSV file <input type="file" name="file" accept=".csv,text/csv" required></label>
+            <label>Money paid on this file's purchases went out by
+                <select name="default_method" required>
+                    <option value="">Choose: cash, bank, Airtel Money or MTN Money</option>
+                    {% for method, label in methods %}<option value="{{ method }}">{{ method }}</option>{% endfor %}
+                    <option value="not_recorded">Not recorded (old records, from before the balances were counted)</option>
+                </select>
+            </label>
+            <p class="muted hint">Recorded in Accounts and its balances. A row's own Payment Method column, when it has one, counts instead.</p>
             <button class="btn success">Import Purchases</button>
         </form>
     </section>
@@ -50,7 +58,7 @@
             <li><strong>Optional:</strong> Invoice No, Date, Customer, Phone, Unit Price, Payment Status, Amount Paid, Payment Method, Payment Reference.</li>
             <li>A blank Unit Price uses the item's POS price. A blank Date uses today.</li>
             <li>Payment Status is Paid (default), Unpaid or Partial Payment. Partial Payment needs an Amount Paid.</li>
-            <li>What was paid is recorded in Accounts as money in. <strong>Payment Method</strong> (Cash, Bank transfer, Mobile money, Cheque, Card or Other) and <strong>Payment Reference</strong> say how; without them it is kept as "Not recorded".</li>
+            <li>What was paid is recorded in Accounts as money in. <strong>Payment Method</strong> (Cash, Bank transfer, Airtel Money, MTN Money, Cheque, Card or Other) and <strong>Payment Reference</strong> say how; without them it is kept as "Not recorded".</li>
             <li>For a multi-row invoice, the customer, date and payment details are read from its first row.</li>
             <li>An Invoice No that already exists is rejected, which protects against importing a file twice.</li>
         </ul>
@@ -60,6 +68,14 @@
             <label>CSV file <input type="file" name="file" accept=".csv,text/csv" required></label>
             <label class="check"><input type="checkbox" name="deduct_stock"> Also deduct these quantities from current POS stock</label>
             <p class="muted">Leave unticked for past sales whose stock is already gone. Tick it only if these items are still counted in your POS stock.</p>
+            <label>Money received on this file's sales came in by
+                <select name="default_method" required>
+                    <option value="">Choose: cash, bank, Airtel Money or MTN Money</option>
+                    {% for method, label in methods %}<option value="{{ method }}">{{ method }}</option>{% endfor %}
+                    <option value="not_recorded">Not recorded (old records, from before the balances were counted)</option>
+                </select>
+            </label>
+            <p class="muted hint">Recorded in Accounts and its balances. A row's own Payment Method column, when it has one, counts instead.</p>
             <button class="btn success">Import Sales</button>
         </form>
     </section>
@@ -118,6 +134,14 @@
             <label>CSV file <input type="file" name="file" accept=".csv,text/csv" required></label>
             <label class="check"><input type="checkbox" name="allow_repeats"> Allow extra payslips for a month that already has one</label>
             <p class="muted">Tick this for weekly or fortnightly wages, where one employee has several payslips in the same month.</p>
+            <label>This file's pay was paid by
+                <select name="default_method" required>
+                    <option value="">Choose: cash, bank, Airtel Money or MTN Money</option>
+                    {% for method, label in methods %}<option value="{{ method }}">{{ method }}</option>{% endfor %}
+                    <option value="not_recorded">Not recorded (old records, from before the balances were counted)</option>
+                </select>
+            </label>
+            <p class="muted hint">Recorded in Accounts and its balances. A row's own Payment Method column, when it has one, counts instead.</p>
             <button class="btn success">Import Salaries &amp; Wages</button>
         </form>
     </section>

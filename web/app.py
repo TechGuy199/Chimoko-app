@@ -2192,11 +2192,11 @@ def invoice_payment(invoice_id):
         flash(f"Enter an amount between 0 and the invoice total ({money(inv['total'])}).", "error")
         return redirect(url_for("invoice", invoice_id=invoice_id))
 
-    # More paid is money received, with how it came in; less paid corrects an earlier entry
+    # More paid is money received, with how it came in; less paid is taken back out of the account it is said to come from
     change = round(new_paid - inv["amount_paid"], 2)
     method, reference = CORRECTION, ""
-    if change > 0.005:
-        method, reference, problem = read_money_method()
+    if abs(change) > 0.005:
+        method, reference, problem = read_money_method() if change > 0 else read_correction_method()
         if problem:
             db.rollback()
             flash(problem, "error")
@@ -2276,12 +2276,11 @@ def procurement_payment(purchase_id):
         if abs(change) < 0.005:
             flash("The amount paid is unchanged.", "ok")
             return here
-        method, reference, paid_on = "Correction", "", today_str()
-        if change > 0:
-            method, reference, problem = read_payment_details(strict=False)
-            if problem:
-                flash(problem, "error")
-                return here
+        paid_on = today_str()
+        method, reference, problem = read_payment_details(strict=False) if change > 0 else read_correction_method()
+        if problem:
+            flash(problem, "error")
+            return here
         try:
             add_supplier_payment(db, g.user["business_id"], p["supplier_id"], change, method, reference, paid_on, text("note")[:150], [(purchase_id, change)])
             db.commit()
@@ -2299,11 +2298,11 @@ def procurement_payment(purchase_id):
         flash(f"Enter an amount between 0 and the purchase total ({money(p['total_cost'])}).", "error")
         return redirect(url_for("procurement", purchase_id=purchase_id))
 
-    # No supplier account: the payment goes to Accounts on its own, with how it was paid (a reduction is a correction)
+    # No supplier account: the payment goes to Accounts on its own, with how it was paid (or, lowered, the account it goes back to)
     change = round(new_paid - p["amount_paid"], 2)
     method, reference = CORRECTION, ""
-    if change > 0.005:
-        method, reference, problem = read_money_method()
+    if abs(change) > 0.005:
+        method, reference, problem = read_money_method() if change > 0 else read_correction_method()
         if problem:
             db.rollback()
             flash(problem, "error")
@@ -3536,15 +3535,21 @@ link_existing_customers()
 # A supplier account is opened from the supplier named on a purchase, the way a customer account is opened from a sale. Every
 # payment to a supplier is kept with how it was paid and the receipt or reference number. A payment entered on a statement is
 # spread over the supplier's unpaid purchases, oldest first.
+# The ways money is paid, offered wherever a payment is entered: each one lands in one of the balances kept in Accounts (cash at
+# hand, the bank, the Airtel Money and MTN Money wallets), except Other.
 PAYMENT_METHODS = (
-    ("Cash", "Receipt number"), ("Bank transfer", "Transaction reference"), ("Mobile money", "Transaction ID"),
+    ("Cash", "Receipt number"), ("Bank transfer", "Transaction reference"), ("Airtel Money", "Transaction ID"), ("MTN Money", "Transaction ID"),
     ("Cheque", "Cheque number"), ("Card", "Card slip number"), ("Other", "Reference number"),
 )
-METHOD_LABELS = dict(PAYMENT_METHODS)
+# Before the two wallets were told apart, mobile money was one method. Records that say so stay valid, but it is no longer offered.
+LEGACY_MOBILE = "Mobile money"
+METHOD_LABELS = dict(PAYMENT_METHODS + ((LEGACY_MOBILE, "Transaction ID"),))
+METHOD_NAMES = [method for method, _ in PAYMENT_METHODS]
 NOT_RECORDED = "Not recorded"
 METHOD_ALIASES = {
-    "bank": "Bank transfer", "transfer": "Bank transfer", "eft": "Bank transfer", "bank deposit": "Bank transfer", "momo": "Mobile money",
-    "mobile": "Mobile money", "airtel money": "Mobile money", "mtn money": "Mobile money", "check": "Cheque", "credit card": "Card", "debit card": "Card",
+    "bank": "Bank transfer", "transfer": "Bank transfer", "eft": "Bank transfer", "bank deposit": "Bank transfer",
+    "airtel": "Airtel Money", "airtel mobile money": "Airtel Money", "mtn": "MTN Money", "momo": "MTN Money", "mtn momo": "MTN Money",
+    "mtn mobile money": "MTN Money", "mobile": LEGACY_MOBILE, "check": "Cheque", "credit card": "Card", "debit card": "Card",
 }
 
 
@@ -3601,7 +3606,7 @@ def read_payment_details(strict):
         return NOT_RECORDED, "", None
     method = method_from_text(text("payment_method"))
     if method is None:
-        return None, None, "Choose how it was paid: " + ", ".join(m.lower() for m in METHOD_LABELS) + "."
+        return None, None, "Choose how it was paid: " + ", ".join(METHOD_NAMES) + "."
     reference = " ".join(text("payment_reference").split())[:60]
     if not reference:
         label = METHOD_LABELS[method]
@@ -3684,10 +3689,16 @@ MANUAL_OUT = ("rent", "utilities", "transport", "repairs", "charges", "tax", "lo
 CATEGORY_LABELS = dict(MONEY_IN + MONEY_OUT)
 # Where money is held: cash, the bank (cheques and card slips are paid through it) or mobile money
 CHANNELS = (
-    ("Cash", ("Cash",)), ("Bank", ("Bank transfer", "Cheque", "Card")), ("Mobile money", ("Mobile money",)),
-    ("Other", ("Other",)), (NOT_RECORDED, (NOT_RECORDED,)), ("Corrections", (CORRECTION,)),
+    ("Cash", ("Cash",)), ("Bank", ("Bank transfer", "Cheque", "Card")), ("Airtel Money", ("Airtel Money",)), ("MTN Money", ("MTN Money",)),
+    ("Mobile money (wallet not said)", (LEGACY_MOBILE,)), ("Other", ("Other",)), (NOT_RECORDED, (NOT_RECORDED,)), ("Corrections", (CORRECTION,)),
 )
 CHANNEL_OF = {method: channel for channel, methods in CHANNELS for method in methods}
+# The balances kept: (channel, what it is called). Money through Other, or that does not say where it went, is in none of them.
+BALANCE_ACCOUNTS = (("Cash", "Cash at hand"), ("Bank", "Bank"), ("Airtel Money", "Airtel Money"), ("MTN Money", "MTN Money"))
+BALANCE_FIELDS = {"Cash": "balance_cash", "Bank": "balance_bank", "Airtel Money": "balance_airtel", "MTN Money": "balance_mtn"}
+BALANCE_METHODS = [method for channel, _ in BALANCE_ACCOUNTS for method in dict(CHANNELS)[channel]]
+# Entries that do not say which balance they belong to, and can be assigned to one in Accounts
+UNASSIGNED_METHODS = (NOT_RECORDED, LEGACY_MOBILE, CORRECTION)
 
 
 def stamp_for_day(day):
@@ -3726,8 +3737,19 @@ def read_money_method(required=True):
         return NOT_RECORDED, "", None
     method = method_from_text(text("payment_method"))
     if method is None:
-        return None, None, "Choose how the money was paid: " + ", ".join(m.lower() for m in METHOD_LABELS) + "."
+        return None, None, "Choose how the money was paid: " + ", ".join(METHOD_NAMES) + "."
     return method, " ".join(text("payment_reference").split())[:60], None
+
+
+def read_correction_method():
+    """Which balance a lowered payment is taken back from: (method, reference, problem). An older page without the field gives
+    'Correction', which belongs to no balance until it is assigned in Accounts."""
+    if "payment_method" not in request.form:
+        return CORRECTION, "", None
+    method, reference, problem = read_money_method()
+    if problem:
+        return None, None, "Choose the account the money is taken back from: " + ", ".join(METHOD_NAMES) + "."
+    return method, reference, None
 
 
 def money_lines(db, biz, source, source_id):
@@ -4742,7 +4764,7 @@ IMPORT_TEMPLATES = {
     ),
     "sales": (
         ["Invoice No", "Date", "Customer", "Phone", "Item Code", "Item Name", "Quantity", "Unit Price", "Payment Status", "Amount Paid", "Payment Method", "Payment Reference"],
-        ["", "2026-10-01 09:30", "Jane Banda", "0977123456", "SEED-001", "Maize Seed 10kg", 2, 600, "Paid", "", "Mobile money", "MP261001.0930"],
+        ["", "2026-10-01 09:30", "Jane Banda", "0977123456", "SEED-001", "Maize Seed 10kg", 2, 600, "Paid", "", "Airtel Money", "MP261001.0930"],
     ),
     "payroll": (
         ["Employee Name", "NRC Number", "Employment Type", "Pay Month", "Basic Salary", "Expected Days", "Worked Days", "Bonus: Transport", "Deduction: Advance", "Employee NAPSA", "Employee NHIMA", "Employer NAPSA", "Employer NHIMA", "Net Pay"],
@@ -4855,14 +4877,14 @@ def parse_date(raw):
 
 def import_errors(kind, errors):
     return render_template(
-        "import.html", max_rows=IMPORT_MAX_ROWS, error_kind=kind, errors=errors[:IMPORT_MAX_ERRORS_SHOWN], error_count=len(errors),
+        "import.html", max_rows=IMPORT_MAX_ROWS, error_kind=kind, errors=errors[:IMPORT_MAX_ERRORS_SHOWN], error_count=len(errors), methods=PAYMENT_METHODS,
     )
 
 
 @app.get("/import")
 @need("admin")
 def import_data():
-    return render_template("import.html", max_rows=IMPORT_MAX_ROWS)
+    return render_template("import.html", max_rows=IMPORT_MAX_ROWS, methods=PAYMENT_METHODS)
 
 
 @app.get("/import/template/<kind>.csv")
@@ -4882,6 +4904,10 @@ def import_purchases():
         records = read_csv_upload(PURCHASE_COLUMNS, ("item_code", "quantity", "unit_cost"))
     except ImportProblem as e:
         flash(str(e), "error")
+        return redirect(url_for("import_data"))
+    default_method, problem = import_default_method()
+    if problem:
+        flash(problem, "error")
         return redirect(url_for("import_data"))
 
     known_names = {r["item_code"]: r["name"] for r in db.all("SELECT item_code, name FROM products WHERE business_id=?", (biz,))}
@@ -4948,11 +4974,11 @@ def import_purchases():
                 problems.append(str(e))
 
         # How it was paid. Optional in a file (older records have none). Paid to a named supplier, a method given needs its reference number.
-        pay_method, pay_ref = NOT_RECORDED, ""
+        pay_method, pay_ref = default_method, ""
         if not problems and amount_paid and amount_paid > 0.005 and (rec["payment_method"] or rec["payment_reference"]):
             found_method = method_from_text(rec["payment_method"])
             if found_method is None:
-                problems.append(f"payment method '{rec['payment_method']}' must be one of: " + ", ".join(METHOD_LABELS))
+                problems.append(f"payment method '{rec['payment_method']}' must be one of: " + ", ".join(METHOD_NAMES))
             elif rec["supplier_name"] and not rec["payment_reference"]:
                 problems.append(f"a {found_method.lower()} payment needs its {METHOD_LABELS[found_method].lower()}")
             else:
@@ -5036,6 +5062,10 @@ def import_sales():
         records = read_csv_upload(SALES_COLUMNS, ("quantity",))
     except ImportProblem as e:
         flash(str(e), "error")
+        return redirect(url_for("import_data"))
+    default_method, problem = import_default_method()
+    if problem:
+        flash(problem, "error")
         return redirect(url_for("import_data"))
 
     deduct = bool(request.form.get("deduct_stock"))
@@ -5127,11 +5157,11 @@ def import_sales():
             problems.append(f"payment status '{first['payment_status']}' must be Paid, Partial Payment or Unpaid")
 
         # How it was paid, for Accounts. Optional (older records have none); a method given must be one the app knows.
-        pay_method = NOT_RECORDED
+        pay_method = default_method
         if first.get("payment_method"):
             pay_method = method_from_text(first["payment_method"])
             if pay_method is None:
-                problems.append(f"payment method '{first['payment_method']}' must be one of: " + ", ".join(METHOD_LABELS))
+                problems.append(f"payment method '{first['payment_method']}' must be one of: " + ", ".join(METHOD_NAMES))
         first["pay_method"] = pay_method or NOT_RECORDED
 
         if problems:
@@ -5199,6 +5229,20 @@ def import_sales():
     return redirect(url_for("history"))
 
 
+def import_default_method():
+    """How the money in an imported file was paid, chosen on the upload form: (method, problem). A row's own Payment Method
+    column overrides it. 'Not recorded' suits records from before the balances were counted, which never move them anyway."""
+    if "default_method" not in request.form:
+        return NOT_RECORDED, None
+    raw = text("default_method")
+    if raw == "not_recorded":
+        return NOT_RECORDED, None
+    method = method_from_text(raw)
+    if method not in METHOD_NAMES:
+        return None, "Choose how the money in this file was paid (a row's own Payment Method still counts first), or Not recorded for old records."
+    return method, None
+
+
 def parse_pay_month(raw):
     for fmt in PAY_MONTH_FORMATS:
         try:
@@ -5216,6 +5260,10 @@ def import_payroll():
         records = read_csv_upload(PAYROLL_COLUMNS, ("employee", "pay_month", "basic_salary"))
     except ImportProblem as e:
         flash(str(e), "error")
+        return redirect(url_for("import_data"))
+    default_method, problem = import_default_method()
+    if problem:
+        flash(problem, "error")
         return redirect(url_for("import_data"))
 
     allow_repeats = bool(request.form.get("allow_repeats"))
@@ -5352,10 +5400,10 @@ def import_payroll():
                     json.dumps(s["bonuses"]), json.dumps(s["deductions"]), s["napsa"], s["nhima"], s["employer_napsa"], s["employer_nhima"], s["net"], stamp,
                 ),
             )
-            # Imported pay was paid out at the time, dated here at the end of its pay month; the file does not say how it was paid
+            # Imported pay was paid out at the time, dated here at the end of its pay month, by the method chosen for the file
             year, month = int(s["month"][:4]), int(s["month"][5:7])
             record_payslip_money(
-                db, biz, slip_id, s["name"], s["month"], s["net"], s["napsa"] + s["nhima"] + s["employer_napsa"] + s["employer_nhima"], NOT_RECORDED,
+                db, biz, slip_id, s["name"], s["month"], s["net"], s["napsa"] + s["nhima"] + s["employer_napsa"] + s["employer_nhima"], default_method,
                 f"{s['month']}-{calendar.monthrange(year, month)[1]:02d} 00:00:00",
             )
         db.commit()
@@ -6272,13 +6320,19 @@ ACCOUNT_PARAMS = ("period", "from", "to", "direction", "channel", "category", "q
 ACCOUNT_LIST_LIMIT = 500
 
 
-def account_filters():
-    """What the Accounts page shows: a date range for everything, and the narrowing of its list of entries."""
+def account_filters(db=None, biz=None):
+    """What the Accounts page shows: a date range for everything, and the narrowing of its list of entries. "Not in any balance
+    yet" lists only what came after the balances were counted (what came before is part of the counts)."""
     period, start, end = invoice_period(default="this_month")
     pick = lambda key, allowed: request.args.get(key, "") if request.args.get(key, "") in allowed else ""  # noqa: E731
+    since = None
+    if db is not None and request.args.get("channel") == "Unassigned":
+        counts = balance_counts(db, biz)
+        since = min(boundary_of(c) for c in counts.values()) if counts else None
     return {
+        "since": since,
         "period": period, "start": start, "end": end,
-        "direction": pick("direction", ("in", "out")), "channel": pick("channel", dict(CHANNELS)),
+        "direction": pick("direction", ("in", "out")), "channel": pick("channel", list(dict(CHANNELS)) + ["Unassigned"]),
         "category": pick("category", CATEGORY_LABELS), "q": " ".join(request.args.get("q", "").split())[:100],
     }
 
@@ -6301,8 +6355,11 @@ def entries_where(biz, f):
     if f["direction"]:
         where += " AND c.direction=?"
         params.append(f["direction"])
+    if f.get("since"):
+        clause, values = after(f["since"], "c.")
+        where, params = where + " AND " + clause, params + values
     if f["channel"]:
-        methods = dict(CHANNELS)[f["channel"]]
+        methods = UNASSIGNED_METHODS if f["channel"] == "Unassigned" else dict(CHANNELS)[f["channel"]]
         where += f" AND c.method IN ({', '.join('?' for _ in methods)})"
         params += list(methods)
     if f["category"]:
@@ -6349,23 +6406,13 @@ def account_entries(db, biz, f, limit):
 
 
 def account_summary(db, biz, start, end):
-    """Totals for the period: in, out, by channel and method (with what is held in each up to the end of the period),
-    and by where money came from and what it went on."""
+    """Totals for the period: in, out, by channel and method, and by where money came from and what it went on."""
     where, params = days_where(start, end)
     groups = db.all(
         f"""SELECT direction, method, category, COALESCE(SUM(amount), 0) AS total FROM cashbook
             WHERE business_id=?{where} GROUP BY direction, method, category""",
         [biz] + params,
     )
-    up_to, up_params = days_where(None, end)
-    held_rows = db.all(
-        f"SELECT direction, method, COALESCE(SUM(amount), 0) AS total FROM cashbook WHERE business_id=?{up_to} GROUP BY direction, method",
-        [biz] + up_params,
-    )
-    sign = {"in": 1, "out": -1}
-    held = {}
-    for r in held_rows:
-        held[r["method"]] = held.get(r["method"], 0.0) + sign.get(r["direction"], 0) * r["total"]
     flows = {}
     for r in groups:
         flows.setdefault(r["method"], {"in": 0.0, "out": 0.0})[r["direction"]] += r["total"]
@@ -6373,17 +6420,16 @@ def account_summary(db, biz, start, end):
     channels, known = [], set(CHANNEL_OF)
     for name, methods in CHANNELS:
         # A method the app no longer knows (from an old record) is shown with Other
-        members = list(methods) + ([m for m in set(flows) | set(held) if m not in known] if name == "Other" else [])
+        members = list(methods) + ([m for m in flows if m not in known] if name == "Other" else [])
         rows = []
         for m in members:
             fin, fout = flows.get(m, {}).get("in", 0.0), flows.get(m, {}).get("out", 0.0)
-            if abs(fin) > 0.005 or abs(fout) > 0.005 or abs(held.get(m, 0.0)) > 0.005:
-                rows.append({"name": m, "in": fin, "out": fout, "net": fin - fout, "held": held.get(m, 0.0)})
+            if abs(fin) > 0.005 or abs(fout) > 0.005:
+                rows.append({"name": m, "in": fin, "out": fout, "net": fin - fout})
         if rows:
             channels.append({
                 "name": name, "methods": rows if len(rows) > 1 else [],
-                "in": sum(r["in"] for r in rows), "out": sum(r["out"] for r in rows),
-                "net": sum(r["net"] for r in rows), "held": sum(r["held"] for r in rows),
+                "in": sum(r["in"] for r in rows), "out": sum(r["out"] for r in rows), "net": sum(r["net"] for r in rows),
             })
 
     def ranked(direction, categories):
@@ -6403,20 +6449,28 @@ def account_summary(db, biz, start, end):
     money_out = sum(r["total"] for r in groups if r["direction"] == "out")
     return {
         "in": money_in, "out": money_out, "net": money_in - money_out, "channels": channels,
-        "held": sum(held.values()), "sources": ranked("in", MONEY_IN), "purposes": ranked("out", MONEY_OUT),
+        "sources": ranked("in", MONEY_IN), "purposes": ranked("out", MONEY_OUT),
     }
 
 
 def account_flow(db, biz, start, end):
-    """Money in and out per day (a period up to two months) or per month, with the balance carried from before the period."""
+    """Money in and out per day (a period up to two months) or per month, with a running balance. Once the balances are counted,
+    that is what is held in them (worked out from each count, so it is right before the count as well as after); until then,
+    everything ever recorded in less everything out."""
     by_day = bool(start and end and (end - start).days <= 62)
     width = 10 if by_day else 7
     where, params = days_where(start, end)
     rows = db.all(
-        f"""SELECT SUBSTR(occurred_at, 1, {width}) AS bucket, direction, COALESCE(SUM(amount), 0) AS total FROM cashbook
-            WHERE business_id=?{where} GROUP BY bucket, direction ORDER BY bucket""",
+        f"""SELECT SUBSTR(occurred_at, 1, {width}) AS bucket, direction, method, COALESCE(SUM(amount), 0) AS total FROM cashbook
+            WHERE business_id=?{where} GROUP BY bucket, direction, method ORDER BY bucket""",
         [biz] + params,
     )
+    counts = balance_counts(db, biz)
+    if counts:
+        tracked = {m for key in counts for m in dict(CHANNELS)[key]}
+        first = start.isoformat() if start else (min((r["bucket"] for r in rows), default=today_str()) + "-01")[:10]
+        opening, lines = flow_lines(rows, by_day, sum(balance_at(db, biz, key, count, first) for key, count in counts.items()), tracked)
+        return {"by_day": by_day, "opening": opening, "lines": lines, "has_start": bool(start), "counted": True}
     opening = 0.0
     if start:
         before = db.one(
@@ -6426,26 +6480,127 @@ def account_flow(db, biz, start, end):
             (biz, start.isoformat()),
         )
         opening = before["cin"] - before["cout"]
+    opening, lines = flow_lines(rows, by_day, opening, None)
+    return {"by_day": by_day, "opening": opening, "lines": lines, "has_start": bool(start), "counted": False}
+
+
+def flow_lines(rows, by_day, opening, tracked):
+    """The cash flow table's lines from (bucket, direction, method, total) rows. The balance moves with the entries through the
+    tracked methods only (every method when tracked is None)."""
     buckets = {}
     for r in rows:
-        buckets.setdefault(r["bucket"], {"in": 0.0, "out": 0.0})[r["direction"]] = r["total"]
+        b = buckets.setdefault(r["bucket"], {"in": 0.0, "out": 0.0, "moved": 0.0})
+        b[r["direction"]] += r["total"]
+        if tracked is None or r["method"] in tracked:
+            b["moved"] += r["total"] if r["direction"] == "in" else -r["total"]
     lines, balance = [], opening
     for bucket in sorted(buckets):
         b = buckets[bucket]
-        balance += b["in"] - b["out"]
+        balance += b["moved"]
         if by_day:
             label = datetime.date.fromisoformat(bucket).strftime("%a %d %b %Y")
         else:
             label = datetime.date(int(bucket[:4]), int(bucket[5:7]), 1).strftime("%B %Y")
         lines.append({"label": label, "in": b["in"], "out": b["out"], "net": b["in"] - b["out"], "balance": balance})
-    return {"by_day": by_day, "opening": opening, "lines": lines, "has_start": bool(start)}
+    return opening, lines
+
+
+# --- Balances: what is really held in cash, at the bank and in each mobile money wallet ---
+# The owner counts each balance at a moment; from then on every entry paid through it moves it (cash for Cash, the bank for bank
+# transfers, cheques and cards, each wallet for its own mobile money). Entries dated before the moment are already part of the count,
+# so earlier records never change a balance. Counting again later starts afresh from the new count, and keeps what the app expected
+# at that moment, so a shortfall or surplus shows.
+# Times are kept to the second, so a count also keeps the last entry that existed when it was saved: an entry dated in that same
+# second is after the count only if it was recorded after it. Every entry is then on exactly one side of every count.
+def balance_counts(db, biz):
+    """The latest count of each balance: {channel: row}."""
+    rows = db.all(
+        """SELECT account, amount, as_of, last_id, expected, set_by, set_at FROM money_balances
+           WHERE id IN (SELECT MAX(id) FROM money_balances WHERE business_id=? GROUP BY account)""",
+        (biz,),
+    )
+    return {r["account"]: r for r in rows if r["account"] in dict(BALANCE_ACCOUNTS)}
+
+
+def boundary_of(count):
+    return (count["as_of"], count["last_id"] or 0)
+
+
+def after(point, prefix=""):
+    """SQL for the entries after a point in time: (timestamp, last entry already there). A plain moment is (timestamp, 0)."""
+    return f"({prefix}occurred_at > ? OR ({prefix}occurred_at = ? AND {prefix}id > ?))", [point[0], point[0], point[1]]
+
+
+def moved_through(db, biz, channel, low=None, high=None):
+    """Money in less money out through one balance, for the entries after the point low and not after the point high."""
+    methods = dict(CHANNELS)[channel]
+    where, params = "", []
+    if low:
+        clause, values = after(low)
+        where, params = where + " AND " + clause, params + values
+    if high:
+        clause, values = after(high)
+        where, params = where + " AND NOT " + clause, params + values
+    return db.one(
+        f"""SELECT COALESCE(SUM(CASE WHEN direction='in' THEN amount ELSE -amount END), 0) AS net FROM cashbook
+            WHERE business_id=? AND method IN ({', '.join('?' for _ in methods)}){where}""",
+        [biz, *methods, *params],
+    )["net"]
+
+
+def balance_at(db, biz, channel, count, point=None):
+    """One balance at a point in time (now, when None), worked forwards or backwards from its count. A point is
+    (timestamp, last entry) or just a timestamp (the start of that moment)."""
+    base = boundary_of(count)
+    if point is not None and not isinstance(point, tuple):
+        point = (point, 0)
+    if point is None or point >= base:
+        return count["amount"] + moved_through(db, biz, channel, base, point)
+    return count["amount"] - moved_through(db, biz, channel, point, base)
+
+
+def balances_now(db, biz):
+    """Each balance as it stands now, their total, and the entries since the counts that belong to none of them."""
+    counts = balance_counts(db, biz)
+    if not counts:
+        return None
+    accounts = [
+        {"key": key, "label": label, "amount": round(balance_at(db, biz, key, counts[key]), 2), "count": counts[key]}
+        for key, label in BALANCE_ACCOUNTS if key in counts
+    ]
+    earliest = min(boundary_of(c) for c in counts.values())
+    since = earliest[0]
+    clause, values = after(earliest)
+    loose = db.one(
+        f"""SELECT COUNT(*) AS n, COALESCE(SUM(CASE WHEN direction='in' THEN amount ELSE 0 END), 0) AS cin,
+                   COALESCE(SUM(CASE WHEN direction='out' THEN amount ELSE 0 END), 0) AS cout
+            FROM cashbook WHERE business_id=? AND method IN ({', '.join('?' for _ in UNASSIGNED_METHODS)}) AND {clause}""",
+        [biz, *UNASSIGNED_METHODS, *values],
+    )
+    return {
+        "accounts": accounts, "total": round(sum(a["amount"] for a in accounts), 2), "since": since,
+        "counted": max(c["as_of"] for c in counts.values()), "loose": loose,
+    }
+
+
+def balance_history(db, biz):
+    """Every time the balances were counted, newest first: [{"as_of", "set_by", "rows": [(label, counted, expected)]}]."""
+    labels = dict(BALANCE_ACCOUNTS)
+    history = []
+    for r in db.all("SELECT account, amount, expected, as_of, set_by, set_at FROM money_balances WHERE business_id=? ORDER BY id DESC LIMIT 80", (biz,)):
+        label = labels.get(r["account"], r["account"])
+        # One count saves every balance together; a balance seen again is the count before it
+        if not history or history[-1]["set_at"] != r["set_at"] or history[-1]["as_of"] != r["as_of"] or label in [x[0] for x in history[-1]["rows"]]:
+            history.append({"as_of": r["as_of"], "set_at": r["set_at"], "set_by": r["set_by"], "rows": []})
+        history[-1]["rows"].append((label, r["amount"], r["expected"]))
+    return history[:12]
 
 
 @app.get("/accounts")
 @need("admin")
 def accounts():
     db, biz = get_db(), g.user["business_id"]
-    f = account_filters()
+    f = account_filters(db, biz)
     where, params = entries_where(biz, f)
     listed = db.one(
         f"""SELECT COUNT(*) AS n, COALESCE(SUM(CASE WHEN c.direction='in' THEN c.amount ELSE 0 END), 0) AS cin,
@@ -6459,13 +6614,17 @@ def accounts():
     we_owe = db.one("SELECT COALESCE(SUM(total_cost - COALESCE(amount_paid, total_cost)), 0) AS owed FROM procurements WHERE business_id=?", (biz,))["owed"]
     args = {key: request.args.get(key) for key in ACCOUNT_PARAMS if request.args.get(key)}
     period_args = {key: value for key, value in args.items() if key in ("period", "from", "to")}
+    balances = balances_now(db, biz)
     return render_template(
         "accounts.html", f=f, periods=INVOICE_PERIODS, summary=account_summary(db, biz, f["start"], f["end"]),
         flow=account_flow(db, biz, f["start"], f["end"]), entries=account_entries(db, biz, f, ACCOUNT_LIST_LIMIT), listed=listed,
         owed_to_us=owed_to_us, we_owe=we_owe, channels=[name for name, _ in CHANNELS], money_in=MONEY_IN, money_out=MONEY_OUT,
         manual_in=[(k, CATEGORY_LABELS[k]) for k in MANUAL_IN], manual_out=[(k, CATEGORY_LABELS[k]) for k in MANUAL_OUT],
-        methods=PAYMENT_METHODS, csv_url=url_for("accounts_csv", **args), here=url_for("accounts", **args), today=today_str(),
+        methods=PAYMENT_METHODS, csv_url=url_for("accounts_csv", **args), return_to=url_for("accounts", **args), today=today_str(),
         list_filtered=bool(f["direction"] or f["channel"] or f["category"] or f["q"]),
+        balances=balances, balance_accounts=BALANCE_ACCOUNTS, balance_fields=BALANCE_FIELDS, history=balance_history(db, biz),
+        assign_url=url_for("accounts", period="all", channel="Unassigned") + "#transactions" if balances else None,
+        moment=now().strftime("%Y-%m-%dT%H:%M"), unassigned=UNASSIGNED_METHODS, method_names=METHOD_NAMES,
         # The list of entries showing just one channel or category of the period (from the totals above it), or all of it again
         narrow=lambda key, value: url_for("accounts", **{**period_args, key: value}) + "#transactions",
         clear_url=url_for("accounts", **period_args) + "#transactions",
@@ -6476,7 +6635,7 @@ def accounts():
 @need("admin")
 def accounts_csv():
     db, biz = get_db(), g.user["business_id"]
-    rows = account_entries(db, biz, account_filters(), 100000)
+    rows = account_entries(db, biz, account_filters(db, biz), 100000)
     return csv_response(
         "accounts.csv",
         ["Date", "In / Out", "Category", "From / To", "Details", "Method", "Channel", "Reference", "Amount", "Recorded by"],
@@ -6514,7 +6673,7 @@ def record_account_entry():
     elif amount <= 0:
         flash("Enter the amount, above zero.", "error")
     elif method is None:
-        flash("Choose how the money was paid: " + ", ".join(m.lower() for m in METHOD_LABELS) + ".", "error")
+        flash("Choose how the money was paid: " + ", ".join(METHOD_NAMES) + ".", "error")
     elif day is None or day > today_str():
         flash("Enter the date the money moved (today or earlier).", "error")
     else:
@@ -6524,6 +6683,87 @@ def record_account_entry():
         )
         db.commit()
         flash(f"Recorded {money(amount)} {'in' if direction == 'in' else 'out'}: {CATEGORY_LABELS[category]}, by {method.lower()}.", "ok")
+    return back
+
+
+@app.post("/accounts/balances")
+@need("admin")
+def set_balances():
+    """What is held in cash, at the bank and in each mobile money wallet at a moment (now, unless another time is given).
+    From then on every payment in or out through each of them moves it."""
+    db, biz = get_db(), g.user["business_id"]
+    back = accounts_back()
+    raw = text("as_of")
+    current = now().replace(tzinfo=None)
+    try:
+        moment = datetime.datetime.strptime(raw, "%Y-%m-%dT%H:%M") if raw else current
+    except ValueError:
+        flash("Enter the date and time the balances were counted.", "error")
+        return back
+    if moment > current + datetime.timedelta(minutes=1):
+        flash("The balances cannot be counted at a time that has not come yet.", "error")
+        return back
+    # The form gives minutes only: counted "now" means this very second, so nothing recorded earlier this minute is counted twice
+    if moment.replace(second=0, microsecond=0) == current.replace(second=0, microsecond=0):
+        moment = current
+    amounts = {}
+    for key, label in BALANCE_ACCOUNTS:
+        try:
+            amounts[key] = round(number(BALANCE_FIELDS[key]), 2)
+        except ValueError:
+            flash(f"Enter what is held in {label} (0 if there is nothing). Nothing was changed.", "error")
+            return back
+    as_of = moment.strftime("%Y-%m-%d %H:%M:%S")
+    stamp = current.strftime("%Y-%m-%d %H:%M:%S")
+    counts = balance_counts(db, biz)
+    # Everything already recorded and dated up to the count is part of it
+    last_id = db.one("SELECT COALESCE(MAX(id), 0) AS n FROM cashbook WHERE business_id=?", (biz,))["n"]
+    differences = []
+    try:
+        for key, label in BALANCE_ACCOUNTS:
+            expected = round(balance_at(db, biz, key, counts[key], (as_of, last_id)), 2) if key in counts else None
+            db.execute(
+                "INSERT INTO money_balances (business_id, account, amount, as_of, last_id, expected, set_by, set_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (biz, key, amounts[key], as_of, last_id, expected, g.user["username"], stamp),
+            )
+            if expected is not None and abs(amounts[key] - expected) > 0.005:
+                gap = amounts[key] - expected
+                differences.append(f"{label} is {money(abs(gap))} {'more' if gap > 0 else 'less'} than the app expected ({money(expected)})")
+        db.commit()
+    except DB_ERRORS:
+        db.rollback()
+        flash("The balances could not be saved. Please try again.", "error")
+        return back
+    flash(
+        f"Balances counted at {moment.strftime('%d %b %Y %H:%M')}: {money(sum(amounts.values()))} in all. From now on every payment in or out "
+        "through cash, the bank, Airtel Money or MTN Money moves its balance." + (" " + "; ".join(differences) + "." if differences else ""),
+        "ok",
+    )
+    return back
+
+
+@app.post("/accounts/<int:entry_id>/assign")
+@need("admin")
+def assign_account_entry(entry_id):
+    """Says how an entry was paid when it did not (an older record, or a correction from an older page), so its balance includes it."""
+    db, biz = get_db(), g.user["business_id"]
+    back = accounts_back()
+    method = method_from_text(text("payment_method"))
+    entry = db.one("SELECT id, method, source, source_id FROM cashbook WHERE id=? AND business_id=?", (entry_id, biz))
+    if entry is None:
+        abort(404)
+    if method not in METHOD_NAMES:
+        flash("Choose how the money was paid: " + ", ".join(METHOD_NAMES) + ".", "error")
+        return back
+    if entry["method"] not in UNASSIGNED_METHODS:
+        flash("That entry already says how it was paid. Change it where it came from.", "error")
+        return back
+    db.execute("UPDATE cashbook SET method=? WHERE id=?", (method, entry_id))
+    # A supplier payment keeps its method on the supplier's statement too
+    if entry["source"] == "supplier_payment" and entry["source_id"]:
+        db.execute("UPDATE supplier_payments SET method=? WHERE id=? AND business_id=? AND method=?", (method, entry["source_id"], biz, entry["method"]))
+    db.commit()
+    flash(f"Entry assigned to {method}" + (f"; the {CHANNEL_OF[method]} balance now includes it." if CHANNEL_OF.get(method) in dict(BALANCE_ACCOUNTS) else "."), "ok")
     return back
 
 
@@ -6662,7 +6902,7 @@ BACKUP_TABLES = (
     "invoices", "invoice_items", "payment_log", "deleted_invoices", "customers", "customer_aliases", "customer_distinct",
     "procurements", "suppliers", "supplier_aliases", "supplier_distinct", "supplier_payments", "supplier_payment_allocations",
     "products", "pos_products", "categories", "departments", "stock_adjustments", "plantings", "preorders", "seedling_batches",
-    "cashbook", "employees", "payroll", "hr_settings", "notifications", "permission_requests",
+    "cashbook", "money_balances", "employees", "payroll", "hr_settings", "notifications", "permission_requests",
 )
 TEXT, MONEY, WHOLE, NUMBER = "text", "money", "whole", "number"
 
@@ -6833,6 +7073,12 @@ def accounts_book(db, biz):
         [(r["occurred_at"], "In" if r["direction"] == "in" else "Out", CATEGORY_LABELS.get(r["category"], r["category"]), r["party"], r["description"],
           r["method"], CHANNEL_OF.get(r["method"], "Other"), r["reference"], r["amount"] if r["direction"] == "in" else None,
           r["amount"] if r["direction"] == "out" else None, r["recorded_by"]) for r in rows],
+    ), (
+        "Balance counts",
+        [("Counted at", TEXT), ("Balance", TEXT), ("Counted", MONEY), ("The app expected", MONEY), ("Difference", MONEY), ("By", TEXT)],
+        [(c["as_of"], dict(BALANCE_ACCOUNTS).get(c["account"], c["account"]), c["amount"], c["expected"],
+          None if c["expected"] is None else round(c["amount"] - c["expected"], 2), c["set_by"])
+         for c in db.all("SELECT account, amount, expected, as_of, set_by FROM money_balances WHERE business_id=? ORDER BY id", (biz,))],
     )]
 
 
@@ -7136,7 +7382,7 @@ RESET_GROUPS = (
     ("Customer accounts", ("customers", "customer_aliases", "customer_distinct")),
     ("Supplier accounts", ("suppliers", "supplier_aliases", "supplier_distinct")),
     ("Supplier payments", ("supplier_payments", "supplier_payment_allocations")),
-    ("Accounts: money in and out", ("cashbook",)),
+    ("Accounts: money in and out, and the balances counted", ("cashbook", "money_balances")),
     ("Employees", ("employees",)),
     ("Payslips", ("payroll",)),
     ("Sowing batches", ("seedling_batches",)),

@@ -192,6 +192,12 @@ SCHEMA = [
         source TEXT DEFAULT '', source_id INTEGER, occurred_at TEXT NOT NULL, recorded_by TEXT, recorded_at TEXT
     )""",
     "CREATE INDEX IF NOT EXISTS cashbook_by_date ON cashbook (business_id, occurred_at)",
+    # Accounts: what was really held in each balance (Cash, Bank, Airtel Money, MTN Money) when the owner counted it, and what the
+    # app expected it to be at that moment (NULL the first time). The latest count of each is where its balance starts from.
+    """CREATE TABLE IF NOT EXISTS money_balances (
+        id {pk}, business_id INTEGER NOT NULL, account TEXT NOT NULL, amount DOUBLE PRECISION NOT NULL, as_of TEXT NOT NULL,
+        last_id INTEGER, expected DOUBLE PRECISION, set_by TEXT, set_at TEXT
+    )""",
     "CREATE INDEX IF NOT EXISTS cashbook_by_source ON cashbook (business_id, source, source_id)",
 ]
 
@@ -280,6 +286,8 @@ def init_schema():
         add_column(db, "businesses", "cashbook_ready", "INTEGER")
         # Backups: the hour the end-of-day reminder appears (NULL = the default, -1 = off), and the last backup made
         add_column(db, "businesses", "backup_hour", "INTEGER")
+        # The last cashbook entry already recorded when a balance was counted (see balance_counts in app.py)
+        add_column(db, "money_balances", "last_id", "INTEGER")
         add_column(db, "businesses", "last_backup_at", "TEXT")
         add_column(db, "businesses", "last_backup_by", "TEXT")
         add_column(db, "businesses", "alert_phone", "TEXT")

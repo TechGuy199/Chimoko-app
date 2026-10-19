@@ -97,7 +97,7 @@
                                     <label>Amount paid (for a partial payment) <input name="amount_paid" inputmode="decimal"></label>
                                     <label>How it was paid (unless unpaid)
                                         <select name="payment_method">
-                                            <option value="">Choose: cash, bank or mobile money</option>
+                                            <option value="">Choose: cash, bank, Airtel Money or MTN Money</option>
                                             {% for method, label in methods %}<option value="{{ method }}">{{ method }}</option>{% endfor %}
                                         </select>
                                     </label>

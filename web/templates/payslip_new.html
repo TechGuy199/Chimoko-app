@@ -36,7 +36,7 @@
         <h2 class="spaced">Paying it</h2>
         <label>How the pay is paid
             <select name="payment_method" required>
-                <option value="">Choose: cash, bank or mobile money</option>
+                <option value="">Choose: cash, bank, Airtel Money or MTN Money</option>
                 {% for method, label in methods %}<option value="{{ method }}">{{ method }}</option>{% endfor %}
             </select>
         </label>
