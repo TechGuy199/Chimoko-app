@@ -1,7 +1,7 @@
 {% extends "base.html" %}
-{% block title %}Appearance — {% endblock %}
+{% block title %}My Account — {% endblock %}
 {% block content %}
-<h1>Appearance</h1>
+<h1>My Account</h1>
 <section class="card narrow-form">
     <p class="muted">These choices are yours alone. Other users keep their own, and yours follow you to any device you sign in on.</p>
     {% include "_appearance.html" %}
@@ -21,4 +21,33 @@
         <button class="btn primary">Change Password</button>
     </form>
 </section>
+
+<section class="card narrow-form block">
+    <h2>Delete My Login</h2>
+    {% if last_admin %}
+    <p class="muted">You are the only admin of {{ user.business_name }}, so your login cannot be deleted on its own: the business would have nobody
+        to run it. Make another user an admin under Operators &amp; Admins first, or delete the whole business below.</p>
+    {% else %}
+    <p class="muted">Removes your login only. {{ user.business_name }} and everything recorded in it stay as they are.</p>
+    <form method="post" action="{{ url_for('delete_my_login') }}" data-confirm="Delete your login? You will be signed out and cannot sign in again with it.">
+        {{ csrf_field() }}
+        <label>Your password <input name="password" type="password" required autocomplete="current-password"></label>
+        <button class="btn danger">Delete My Login</button>
+    </form>
+    {% endif %}
+</section>
+
+{% if user.role == 'admin' %}
+<section class="card narrow-form block">
+    <h2>Delete This Business</h2>
+    <p class="muted">Deletes {{ user.business_name }} for good: every sale, purchase, customer, supplier, employee and record in it, and every login,
+        yours included. This cannot be undone, so make a backup first if you may want the records later.</p>
+    <form method="post" action="{{ url_for('delete_my_business') }}" data-confirm="Delete {{ user.business_name }} and everything in it for good?">
+        {{ csrf_field() }}
+        <label>Type {{ delete_phrase }} to confirm <input name="phrase" required autocomplete="off"></label>
+        <label>Your password <input name="password" type="password" required autocomplete="current-password"></label>
+        <button class="btn danger">Delete This Business</button>
+    </form>
+</section>
+{% endif %}
 {% endblock %}

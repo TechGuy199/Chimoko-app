@@ -2,9 +2,14 @@
 <html lang="en" data-theme="{{ look.theme }}" style="--glass: {{ look.glass / 100 }}">
 <head>
     <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <title>{% block title %}{% endblock %}{{ user.business_name if user else "Inventory & POS" }}</title>
     <link rel="stylesheet" href="{{ asset('styles.css') }}">
+    {# Phones get their own look on top: a bottom tab bar, bigger touch targets and the Inter typeface #}
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" media="(max-width: 760px)">
+    <link rel="stylesheet" href="{{ asset('mobile.css') }}" media="(max-width: 760px)">
 
     {# Installable app (PWA): lets Windows, Android and desktop Chrome/Edge offer "Install" so it opens like its own app #}
     <link rel="manifest" href="{{ url_for('pwa_manifest') }}">
@@ -66,7 +71,7 @@
         </div>
     </details>
 
-    <details class="menu">
+    <details class="menu" id="main-menu">
         <summary class="btn">Menu</summary>
         <nav class="menu-panel menu-groups">
             {% for group, links in nav %}
@@ -88,7 +93,7 @@
         <summary class="btn ghost" title="{{ user.username }}"><span class="who">{{ user.username }}</span></summary>
         <div class="menu-panel">
             <span class="menu-heading">Signed in as {{ user.role }}</span>
-            <a class="menu-item {{ 'active' if request.endpoint == 'appearance' }}" href="{{ url_for('appearance') }}">Appearance</a>
+            <a class="menu-item {{ 'active' if request.endpoint == 'appearance' }}" href="{{ url_for('appearance') }}">My Account &amp; Appearance</a>
             <form method="post" action="{{ url_for('logout') }}">
                 {{ csrf_field() }}
                 <button class="menu-item danger">Logout</button>
@@ -96,6 +101,26 @@
         </div>
     </details>
 </header>
+
+{# Phones only: the pages used most, one tap away at the bottom of the screen. More opens the full menu as a sheet. #}
+{% set tabs = [
+    ('Sell', 'pos', ['pos'], 'M3 4h2l2.4 10.2a1 1 0 0 0 1 .8h8.9a1 1 0 0 0 1-.8L20 8H6.2M9 20a1 1 0 1 0 0-2 1 1 0 0 0 0 2Zm9 0a1 1 0 1 0 0-2 1 1 0 0 0 0 2Z'),
+    ('Sales', 'history', ['history', 'invoice'], 'M7 3h10a1 1 0 0 1 1 1v17l-3-2-3 2-3-2-3 2V4a1 1 0 0 1 1-1Zm2 5h6m-6 4h6m-6 4h3'),
+    ('Stock', 'inventory', ['inventory', 'item', 'inventory_new', 'categories_page'], 'M4 7.5 12 3l8 4.5v9L12 21l-8-4.5v-9Zm0 0 8 4.5m0 0 8-4.5M12 12v9'),
+    ('Reports', 'reports', ['reports', 'report_department'], 'M4 20h16M7 16v-5m5 5V7m5 9v-3'),
+] %}
+<nav class="tabbar no-print" aria-label="Main">
+    {% for label, endpoint, active, icon in tabs %}
+    <a class="tab {{ 'active' if request.endpoint in active }}" href="{{ url_for(endpoint) }}">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="{{ icon }}"/></svg><span>{{ label }}</span>
+    </a>
+    {% endfor %}
+    {% set on_tab = namespace(found=false) %}
+    {% for tab in tabs if request.endpoint in tab[2] %}{% set on_tab.found = true %}{% endfor %}
+    <button type="button" class="tab {{ 'active' if here.label and not on_tab.found }}" data-open-menu aria-controls="main-menu">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 6h14M5 12h14M5 18h14"/></svg><span>More</span>
+    </button>
+</nav>
 {% endif %}
 
 <main id="page-main">
@@ -124,7 +149,15 @@
             menu.addEventListener("toggle", function () { if (menu.open) closeAll(menu); });
         });
         document.addEventListener("click", function (e) {
-            if (!e.target.closest("details.menu")) closeAll(null);
+            if (!e.target.closest("details.menu, [data-open-menu]")) closeAll(null);
+        });
+        // The tab bar's More button (phones) opens and closes the main menu, shown there as a sheet from the bottom.
+        // Looked up on every click, since in-place navigation replaces the page's elements.
+        document.addEventListener("click", function (e) {
+            const menu = document.getElementById("main-menu");
+            if (!menu) return;
+            if (e.target.closest("[data-open-menu]")) menu.open = !menu.open;
+            else if (e.target === menu) menu.open = false;   // a tap on the dimmed page behind the sheet
         });
         document.addEventListener("keydown", function (e) {
             if (e.key === "Escape") closeAll(null);

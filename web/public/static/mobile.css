@@ -1,0 +1,197 @@
+/* ---------- Phones (loaded only below 760px wide, on top of styles.css) ----------
+   A modern mobile web app look: the Inter typeface, bigger touch targets (44px and up), pill buttons, softer rounder
+   cards, a compact header and a bottom tab bar for the pages used most. The full menu opens from the bar's More button
+   as a sheet from the bottom. Fields use 16px text, the size below which iPhones zoom the page in on focus. */
+:root {
+    --font-family: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --radius: 18px;
+    --radius-small: 12px;
+    --tabbar-height: 64px;
+    --safe-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+html { -webkit-text-size-adjust: 100%; }
+body {
+    font-size: 15px;
+    line-height: 1.55;
+    letter-spacing: -0.005em;
+    -webkit-tap-highlight-color: transparent;
+}
+h1 { font-size: 24px; font-weight: 700; letter-spacing: -0.02em; line-height: 1.2; }
+h2 { font-size: 12px; letter-spacing: 0.08em; }
+small { font-size: 12px; }
+
+/* Room under the content for the tab bar, so the last row is never hidden behind it */
+main { padding: 16px 16px calc(var(--tabbar-height) + var(--safe-bottom) + 28px); }
+
+/* ---------- Header: just the business name, alerts and the user menu ---------- */
+.topbar {
+    min-height: 56px;
+    padding: 8px 12px 8px 16px;
+    padding-top: max(8px, env(safe-area-inset-top, 0px));
+    gap: 4px;
+}
+.brand { font-size: 17px; font-weight: 700; letter-spacing: -0.02em; }
+#main-menu > summary { display: none; }   /* the tab bar's More button opens it instead */
+.topbar .menu > summary.btn { min-height: 40px; padding: 8px 12px; border-radius: 999px; }
+
+/* ---------- Bottom tab bar ---------- */
+.tabbar {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 25;
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    height: calc(var(--tabbar-height) + var(--safe-bottom));
+    padding: 6px 6px var(--safe-bottom);
+    border-top: 1px solid var(--line-strong);
+    background: var(--surface);
+    background: var(--bar-bg);
+    -webkit-backdrop-filter: blur(calc(var(--blur) + 8px)) saturate(160%);
+    backdrop-filter: blur(calc(var(--blur) + 8px)) saturate(160%);
+}
+.tab {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 3px;
+    margin: 0 2px;
+    padding: 4px 0;
+    border: 0;
+    border-radius: 14px;
+    background: none;
+    color: var(--text-muted);
+    font: inherit;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+    cursor: pointer;
+    transition: color 0.18s var(--ease), background 0.18s var(--ease), transform 0.12s var(--ease);
+}
+.tab svg {
+    width: 24px;
+    height: 24px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.8;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+.tab:active { transform: scale(0.94); }
+.tab.active { color: var(--text-bright); }
+.tab svg { box-sizing: content-box; padding: 3px 16px; border-radius: 999px; transition: background 0.18s var(--ease); }
+.tab.active svg { background: rgba(59, 130, 246, 0.24); color: var(--accent); }
+.tab:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
+
+/* ---------- The main menu as a bottom sheet ---------- */
+#main-menu { position: static; }
+/* A blurred header would make the sheet and its dimmed backdrop position against the header instead of the screen,
+   so the blur is switched off while the sheet is open (the backdrop covers the header then anyway) */
+.topbar:has(#main-menu[open]) { -webkit-backdrop-filter: none; backdrop-filter: none; background: var(--bg); view-transition-name: none; }
+#main-menu[open]::before {
+    /* dims the page behind the sheet; a tap on it closes the menu (the page's "click elsewhere" rule) */
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: 26;
+    background: rgba(0, 0, 0, 0.45);
+    animation: fade-in 0.2s var(--ease) both;
+}
+#main-menu .menu-panel {
+    position: fixed;
+    left: 0;
+    right: 0;
+    top: auto;
+    bottom: calc(var(--tabbar-height) + var(--safe-bottom));
+    z-index: 27;
+    width: auto;
+    max-width: none;
+    max-height: 72vh;
+    padding: 10px 12px 14px;
+    border-width: 1px 0 0;
+    border-radius: 24px 24px 0 0;
+    transform-origin: bottom center;
+    animation: sheet-in 0.26s var(--ease) both;
+}
+#main-menu .menu-panel::before {
+    content: "";
+    display: block;
+    grid-column: 1 / -1;   /* the panel is a grid: the handle gets a row of its own */
+    width: 40px;
+    height: 4px;
+    margin: 0 auto 8px;
+    border-radius: 999px;
+    background: var(--line-strong);
+}
+#main-menu .menu-groups { grid-template-columns: 1fr 1fr; gap: 2px 8px; }
+.menu-item { min-height: 44px; padding: 11px 12px; border-radius: 12px; font-size: 15px; }
+.menu-heading { padding: 12px 12px 4px; }
+@keyframes sheet-in { from { transform: translateY(100%); } }
+@keyframes fade-in { from { opacity: 0; } }
+
+/* ---------- Cards and tiles ---------- */
+.card { padding: 16px; }
+.card.narrow { margin-top: 4vh; }
+.card.narrow p.center a { display: block; padding: 8px 0; }   /* each link its own easy tap target */
+.card.narrow p.center .sep { display: none; }
+.card.block { margin-top: 14px; }
+.split { gap: 14px; }
+.page-head { gap: 10px; }
+.stats { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-bottom: 14px; }
+.stat { padding: 14px; }
+.stat strong { font-size: 17px; white-space: nowrap; letter-spacing: -0.02em; }
+.stats .stat:last-child:nth-child(odd) { grid-column: 1 / -1; }   /* an odd one out takes the full row */
+.stat span { font-size: 10.5px; }
+.dept-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.dept-tile { padding: 14px; }
+.dept-tile strong { font-size: 14px; }
+.dept-tile:hover { transform: none; }   /* no hover lift on touch screens */
+.grid { grid-template-columns: 1fr; }
+
+/* ---------- Forms and buttons ---------- */
+label { font-size: 13px; font-weight: 500; }
+input, select, textarea { min-height: 48px; padding: 12px 14px; font-size: 16px; border-radius: var(--radius-small); }
+textarea { min-height: 96px; }
+input[type="checkbox"], input[type="radio"] { min-height: 0; width: 20px; height: 20px; }
+input[type="range"] { min-height: 0; }
+input.qty { width: 72px; min-height: 40px; padding: 8px; }
+label.check { min-height: 44px; font-size: 15px; }
+
+.btn {
+    min-height: 46px;
+    padding: 12px 20px;
+    border-radius: 999px;
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: 0;
+}
+.btn.small { min-height: 36px; padding: 8px 14px; font-size: 13px; }
+.btn.wide { padding-top: 14px; padding-bottom: 14px; font-size: 16px; }
+.btn.primary, .btn.success { box-shadow: 0 6px 18px rgba(59, 130, 246, 0.25); }
+.btn.success { box-shadow: 0 6px 18px rgba(31, 157, 85, 0.28); }
+.btn.wide + .btn.wide { margin-top: 10px; }
+.toolbar { gap: 8px; }
+.toolbar > * { flex: 1 1 auto; }
+.toolbar select { width: 100%; }
+.segmented { width: 100%; padding: 4px; border-radius: 999px; }
+.segmented a, .segmented label { flex: 1; padding: 9px 12px; border-radius: 999px; text-align: center; font-size: 14px; }
+
+/* ---------- Tables: wide ones scroll sideways under a finger, edge to edge ---------- */
+.table-wrap { margin: 0 -16px; padding: 0 16px; overflow-x: auto; -webkit-overflow-scrolling: touch; overscroll-behavior-x: contain; }
+table { font-size: 14px; }
+table:has(thead th:nth-child(5)) { min-width: 620px; }
+/* Wide tables keep each value on one line (invoice numbers, dates, amounts) and scroll sideways instead of wrapping */
+table:has(thead th:nth-child(5)) td { white-space: nowrap; word-break: normal; }
+th, td { padding: 12px 10px; }
+th { font-size: 10.5px; }
+td.actions { gap: 8px; }
+
+/* ---------- Messages, dialogs and alerts ---------- */
+.flash { padding: 12px 14px; border-radius: 14px; font-size: 14px; font-weight: 500; }
+.total { padding: 14px; border-radius: 14px; font-size: 18px; }
+dialog.modal { width: 100%; max-width: none; margin: auto 0 0; max-height: 90vh; border-radius: 24px 24px 0 0; }
+.toasts { left: 12px; right: 12px; width: auto; bottom: calc(var(--tabbar-height) + var(--safe-bottom) + 12px); }
+.invoice, .statement { padding: 18px; }

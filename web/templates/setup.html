@@ -26,7 +26,7 @@
             login are deleted for good.</p>
     </form>
     <p class="muted center">
-        {% if demo_only and signup_open %}<a href="{{ url_for('setup') }}">Register a real business instead</a> · {% endif %}
+        {% if demo_only and signup_open %}<a href="{{ url_for('setup') }}">Register a real business instead</a><span class="sep"> · </span>{% endif %}
         <a href="{{ url_for('login') }}">Back to login</a>
     </p>
 </div>

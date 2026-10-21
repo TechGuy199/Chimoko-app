@@ -216,6 +216,8 @@ small { font-size: 11px; }
 .menu-item.active { background: rgba(59, 130, 246, 0.18); color: var(--text-bright); }
 .menu-item.danger { color: var(--warn-text); }
 .menu-panel form { margin: 0; }
+/* The bottom tab bar is for phones only (see mobile.css) */
+.tabbar { display: none; }
 
 /* A small form that opens in place inside a table cell (a menu panel would be clipped by the table's scroll area) */
 .inline-details > summary { display: inline-block; list-style: none; cursor: pointer; }

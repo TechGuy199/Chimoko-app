@@ -10,7 +10,7 @@
         <button class="btn primary wide">Login</button>
     </form>
     <p class="muted center">
-        {% if signup_open %}<a href="{{ url_for('setup') }}">Register a new business</a> · {% endif %}
+        {% if signup_open %}<a href="{{ url_for('setup') }}">Register a new business</a><span class="sep"> · </span>{% endif %}
         <a href="{{ url_for('setup', demo=1) }}">Try a free 24-hour demo</a>
     </p>
 </div>

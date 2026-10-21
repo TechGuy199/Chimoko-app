@@ -233,7 +233,70 @@ def appearance():
             flash("Choose a theme and a transparency between 0 and 100.", "error")
         back_to_settings = request.form.get("back") == "settings" and g.user["role"] == "admin"
         return redirect(url_for("settings" if back_to_settings else "appearance"))
-    return render_template("appearance.html")
+    return render_template("appearance.html", last_admin=is_last_admin(get_db()), delete_phrase=DELETE_BUSINESS_PHRASE)
+
+
+# --- DELETING AN ACCOUNT ---
+# Anyone can delete their own login, except the last admin of a business (it would be left with nobody to run it).
+# An admin can instead delete the whole business: every record and every login in it, for good.
+DELETE_BUSINESS_PHRASE = "DELETE BUSINESS"
+
+
+def is_last_admin(db):
+    if g.user["role"] != "admin":
+        return False
+    return db.one("SELECT COUNT(*) AS n FROM users WHERE business_id=? AND role='admin'", (g.user["business_id"],))["n"] <= 1
+
+
+def password_confirmed(db):
+    me = db.one("SELECT password_hash FROM users WHERE id=?", (g.user["id"],))
+    return bool(me) and check_password_hash(me["password_hash"], request.form.get("password", ""))
+
+
+@app.post("/account/delete")
+@need(None)
+def delete_my_login():
+    db = get_db()
+    if is_last_admin(db):
+        flash("You are the only admin, so your login cannot be deleted on its own. Make another user an admin first, or delete the whole business.", "error")
+        return redirect(url_for("appearance"))
+    if not password_confirmed(db):
+        flash("That password is not correct. Nothing was deleted.", "error")
+        return redirect(url_for("appearance"))
+    try:
+        notify(db, "account", "A login was deleted", f"{g.user['username']} deleted their own login.", url_for("operators"))
+        db.execute("DELETE FROM users WHERE id=? AND business_id=?", (g.user["id"], g.user["business_id"]))
+        db.commit()
+    except DB_ERRORS:
+        db.rollback()
+        flash("Your login could not be deleted. Please try again.", "error")
+        return redirect(url_for("appearance"))
+    session.clear()
+    flash("Your login has been deleted.", "ok")
+    return redirect(url_for("login"))
+
+
+@app.post("/account/delete-business")
+@need("admin")
+def delete_my_business():
+    db = get_db()
+    if request.form.get("phrase", "").strip() != DELETE_BUSINESS_PHRASE:
+        flash(f"Type {DELETE_BUSINESS_PHRASE} exactly to confirm. Nothing was deleted.", "error")
+        return redirect(url_for("appearance"))
+    if not password_confirmed(db):
+        flash("That password is not correct. Nothing was deleted.", "error")
+        return redirect(url_for("appearance"))
+    name = g.user["business_name"]
+    try:
+        delete_business(db, g.user["business_id"])
+        db.commit()
+    except DB_ERRORS:
+        db.rollback()
+        flash("The business could not be deleted, so nothing was removed. Please try again.", "error")
+        return redirect(url_for("appearance"))
+    session.clear()
+    flash(f"'{name}' has been deleted, with all its records and logins.", "ok")
+    return redirect(url_for("login"))
 
 
 @app.post("/account/password")
@@ -535,9 +598,9 @@ def next_invoice_no(db, biz):
 
 # --- ACCOUNTS ---
 def signup_open(db):
-    # Only the first account can be created freely; set ALLOW_SIGNUP=1 to let further businesses register.
-    # Demo companies do not count, so trying the demo first never locks the real owner out.
-    if os.environ.get("ALLOW_SIGNUP") == "1":
+    # Any number of businesses can register, each seeing only its own records. Set ALLOW_SIGNUP=0 to close registration
+    # once the first business exists (demo companies do not count, so trying the demo first never locks the owner out).
+    if os.environ.get("ALLOW_SIGNUP") != "0":
         return True
     return db.one(
         "SELECT COUNT(*) AS n FROM users u JOIN businesses b ON b.id = u.business_id WHERE b.demo_expires_at IS NULL"
