@@ -1,0 +1,42 @@
+{# A day's activities in report form, by worker. Expects: groups (from by_worker), with_plot (show each entry's plot), return_to. #}
+{% if groups %}
+{% for g in groups %}
+<div class="worker-report">
+    <h3>
+        {{ g.worker }}
+        <small class="muted">
+            {{ g.entries|length }} activit{{ 'y' if g.entries|length == 1 else 'ies' }}: {{ g.morning }} in the morning, {{ g.afternoon }} in the afternoon
+            {% if with_plot %}&middot; {{ g.plots|join(', ') }}{% endif %}
+        </small>
+    </h3>
+    <div class="table-wrap">
+        <table>
+            <thead><tr><th>Time</th>{% if with_plot %}<th>Plot</th>{% endif %}<th>What was done</th><th>Tools used</th><th>Product used</th><th>Work done</th><th>Logged by</th><th class="no-print"></th></tr></thead>
+            <tbody>
+            {% for e in g.entries %}
+                <tr>
+                    <td class="nowrap">{{ e.period_label }}</td>
+                    {% if with_plot %}<td>{{ e.plot_name }}<br><small class="muted">{{ e.department }}</small></td>{% endif %}
+                    <td>{{ e.description }}</td>
+                    <td>{{ e.tools or '—' }}</td>
+                    <td>{% if e.product %}{{ e.product }}{% if e.product_qty is not none %}<br><small class="muted">{{ '%g'|format(e.product_qty) }} {{ e.product_unit }}</small>{% endif %}{% else %}—{% endif %}</td>
+                    <td>{{ e.work_done or '—' }}</td>
+                    <td>{{ e.recorded_by }}<br><small class="muted">{{ e.recorded_at[11:16] }}</small></td>
+                    <td class="num no-print">
+                        {% if user.role == 'admin' or e.recorded_by == user.username %}
+                        <form method="post" action="{{ url_for('delete_activity', entry_id=e.id) }}" data-confirm="Remove this activity ({{ e.worker_name }}, {{ e.period_label|lower }})?">
+                            {{ csrf_field() }}<input type="hidden" name="back" value="{{ return_to }}">
+                            <button class="btn danger small">Remove</button>
+                        </form>
+                        {% endif %}
+                    </td>
+                </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endfor %}
+{% else %}
+<p class="muted">Nothing has been logged for this day yet.</p>
+{% endif %}

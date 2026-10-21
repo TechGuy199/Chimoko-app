@@ -60,7 +60,7 @@
                 <tr><td><strong>Master Backup.xlsx</strong></td><td>All the books in one workbook, with a contents sheet</td>
                     <td class="num"><a class="btn small" href="{{ url_for('backup_master') }}">Download</a></td></tr>
                 {% for key, title in books[priority:] %}
-                <tr><td><strong>{{ title }}.xlsx</strong></td><td>{{ {'accounts': 'Every movement of money in and out', 'customers': "Every customer account and what they owe", 'suppliers': 'Every supplier account and what is owed to them', 'payroll': 'Every payslip and every employee'}[key] }}</td>
+                <tr><td><strong>{{ title }}.xlsx</strong></td><td>{{ {'accounts': 'Every movement of money in and out', 'customers': "Every customer account and what they owe", 'suppliers': 'Every supplier account and what is owed to them', 'payroll': 'Every payslip and every employee', 'activities': 'Every activity logged on every plot, by day and worker'}[key] }}</td>
                     <td class="num"><a class="btn small" href="{{ url_for('backup_book', key=key) }}">Download</a></td></tr>
                 {% endfor %}
                 <tr><td><strong>Everything (ZIP)</strong></td><td>All of the above and every table as CSV, in one file</td>

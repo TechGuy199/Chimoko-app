@@ -459,6 +459,19 @@ a.rank-name { color: var(--text); }
 a.rank-name:hover { color: var(--accent); }
 .rank-track i.out { background: var(--series-2); }
 
+/* Daily activities */
+.day-picker input[type="date"] { width: auto; margin: 0; }
+.plot-tile .tile-badge.done { color: var(--ok-text); }
+.worker-picks { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 2px 12px; margin: 10px 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius-small); }
+.worker-picks legend { padding: 0 6px; color: var(--text-muted); font-size: 12px; }
+.activity-row { margin: 0 0 12px; padding: 12px 14px; border: 1px solid var(--line-strong); border-radius: var(--radius-small); }
+.activity-row legend { padding: 0 6px; font-weight: 650; }
+.activity-row .row-actions { margin: 4px 0 0; text-align: right; }
+.worker-report + .worker-report { margin-top: 18px; }
+.worker-report h3 { margin: 0 0 6px; }
+.worker-report h3 small { font-weight: 400; }
+.day-report .page-head h2 { margin: 0; }
+
 /* Supplier payment overlay: which purchases a payment will pay off */
 .pay-preview { margin: 12px 0; padding: 10px 12px; border: 1px dashed var(--line-strong); border-radius: var(--radius-small); }
 .pay-preview h3 { margin: 0 0 6px; font-size: 12px; color: var(--text-muted); }

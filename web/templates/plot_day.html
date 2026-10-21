@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+{% block title %}{{ plot.name }}: activities — {% endblock %}
+{% block content %}
+{% macro activity_row(number) %}
+<fieldset class="activity-row">
+    <legend>Activity <span data-row-number>{{ number }}</span></legend>
+    <div class="grid">
+        <label>Worker
+            <select name="worker" required>
+                {% if plot.workers|length > 1 %}<option value="all">Everyone on this plot</option>{% endif %}
+                {% for w in plot.workers %}<option value="{{ w.id }}">{{ w.name }}</option>{% endfor %}
+            </select>
+        </label>
+        <label>Time
+            <select name="period" required>
+                {% for value, label in periods %}<option value="{{ value }}" {{ 'selected' if value == default_period }}>{{ label }}</option>{% endfor %}
+            </select>
+        </label>
+    </div>
+    <label>What was done <input name="description" maxlength="300" placeholder="e.g. Weeded and watered the tomato beds" required></label>
+    <div class="grid">
+        <label>Tools used <input name="tools" maxlength="200" list="activity-items" placeholder="e.g. Hoe, watering can" autocomplete="off"></label>
+        <label>Product used <input name="product" maxlength="120" list="activity-items" placeholder="e.g. Urea 50kg" autocomplete="off" data-product></label>
+        <label>Quantity of the product <input name="product_qty" type="number" min="0" step="any" inputmode="decimal" placeholder="e.g. 2"></label>
+        <label>Unit <input name="product_unit" maxlength="30" placeholder="kg, litres, bags" autocomplete="off" data-unit></label>
+    </div>
+    <label>Work done <input name="work_done" maxlength="120" placeholder="e.g. 3 rows, 120 trays, half the block"></label>
+    <p class="row-actions"><button type="button" class="btn ghost small" data-remove-row>Remove this activity</button></p>
+</fieldset>
+{% endmacro %}
+
+<div class="page-head">
+    <div>
+        <a class="back" href="{{ url_for('activities', date=day) }}">&larr; All plots</a>
+        <h1>{{ plot.name }}</h1>
+        <p class="muted">
+            {{ plot.department }}{% if plot.notes %} &middot; {{ plot.notes }}{% endif %}
+            &middot; {{ plot.workers|map(attribute='name')|join(', ') if plot.workers else 'no workers assigned yet' }}
+            {% if not plot.active %}&middot; <strong class="warn">no longer in use</strong>{% endif %}
+        </p>
+    </div>
+</div>
+
+<form method="get" class="toolbar day-picker no-print">
+    <a class="btn" href="{{ url_for('plot_day', plot_id=plot.id, date=prev_day) }}">&larr; Previous day</a>
+    <input type="date" name="date" value="{{ day }}" max="{{ today }}" aria-label="Day" onchange="this.form.requestSubmit()">
+    {% if day < today %}
+    <a class="btn" href="{{ url_for('plot_day', plot_id=plot.id, date=next_day) }}">Next day &rarr;</a>
+    <a class="btn ghost" href="{{ url_for('plot_day', plot_id=plot.id) }}">Today</a>
+    {% endif %}
+</form>
+<p class="muted period-line">{{ shown.strftime('%A %d %B %Y') }}{{ ' (today)' if day == today }}</p>
+
+{% if not plot.active %}
+{% elif not plot.workers %}
+<section class="card block">
+    <p class="flash notice">No workers are assigned to this plot yet, so nothing can be logged.
+        {% if user.role == 'admin' %}Assign them with <a href="{{ url_for('activities', date=day) }}">Edit plot</a> on Daily Activities.{% else %}Ask an admin to assign them.{% endif %}</p>
+</section>
+{% else %}
+<section class="card block no-print">
+    <h2>What the workers did</h2>
+    <p class="muted">Add as many activities as you need, then save them together. Choosing "Everyone on this plot" logs the activity for each of its workers.</p>
+    <form method="post" action="{{ url_for('log_activities', plot_id=plot.id) }}" id="activity-form">
+        {{ csrf_field() }}
+        <input type="hidden" name="date" value="{{ day }}">
+        <div id="activity-rows">{{ activity_row(1) }}</div>
+        <template id="activity-row-template">{{ activity_row(1) }}</template>
+        <p class="toolbar"><button type="button" class="btn" id="add-activity">+ Add another activity</button></p>
+        <button class="btn success wide">Save activities</button>
+    </form>
+    <datalist id="activity-items">
+        {% for i in items %}<option value="{{ i.name }}" data-unit="{{ i.unit or '' }}">{{ i.category }}</option>{% endfor %}
+    </datalist>
+</section>
+{% endif %}
+
+<section class="card block day-report" id="day-report">
+    <div class="page-head">
+        <h2>{{ plot.name }} on {{ shown.strftime('%d %b %Y') }} <small class="muted">({{ total }} activit{{ 'y' if total == 1 else 'ies' }})</small></h2>
+        <div class="head-actions no-print">
+            <a class="btn" href="{{ url_for('activities_report', date=day, plot=plot.id) }}">Download Excel</a>
+            <button type="button" class="btn" onclick="window.print()">Print / Save as PDF</button>
+        </div>
+    </div>
+    {% with with_plot=false %}{% include "_activity_report.html" %}{% endwith %}
+</section>
+{% endblock %}
+{% block scripts %}<script src="{{ asset('activities.js') }}"></script>{% endblock %}

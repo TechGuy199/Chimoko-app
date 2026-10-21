@@ -1,0 +1,115 @@
+{% extends "base.html" %}
+{% block title %}Daily Activities — {% endblock %}
+{% block content %}
+{# The same plot form adds a plot and edits one #}
+{% macro plot_form(p) %}
+<form method="post" action="{{ url_for('update_plot', plot_id=p.id) if p else url_for('add_plot') }}">
+    {{ csrf_field() }}
+    <input type="hidden" name="back" value="{{ return_to }}">
+    <div class="grid">
+        <label>Department
+            <select name="department" required>
+                {% for d in departments %}<option {{ 'selected' if p and p.department == d }}>{{ d }}</option>{% endfor %}
+            </select>
+        </label>
+        <label>Plot or station <input name="name" maxlength="80" value="{{ p.name if p }}" placeholder="e.g. Greenhouse 2, Block A" required></label>
+    </div>
+    <label>Notes (optional) <input name="notes" maxlength="200" value="{{ p.notes if p }}" placeholder="e.g. Tomatoes, drip irrigation"></label>
+    <fieldset class="worker-picks">
+        <legend>Workers on this plot (from HR &amp; Payroll)</legend>
+        {% set mine = p.workers|map(attribute='id')|list if p else [] %}
+        {% for e in employees %}
+        <label class="check"><input type="checkbox" name="workers" value="{{ e.id }}" {{ 'checked' if e.id in mine }}> {{ e.full_name }}</label>
+        {% else %}
+        <p class="muted">No employees yet. Register them in <a href="{{ url_for('hr') }}">HR &amp; Payroll</a> first.</p>
+        {% endfor %}
+    </fieldset>
+    <button class="btn primary wide">{{ 'Save plot' if p else 'Add plot' }}</button>
+</form>
+{% endmacro %}
+
+<div class="page-head">
+    <div>
+        <h1>Daily Activities</h1>
+        <p class="muted">Choose a plot to write down what its workers did. The day's report, by worker, is at the bottom of the page.</p>
+    </div>
+    {% if user.role == 'admin' %}
+    <div class="head-actions no-print"><button type="button" class="btn success" data-modal-open="plot-new">Add a plot</button></div>
+    {% endif %}
+</div>
+
+<form method="get" class="toolbar day-picker no-print" id="day-picker">
+    <a class="btn" href="{{ url_for('activities', date=prev_day) }}">&larr; Previous day</a>
+    <input type="date" name="date" value="{{ day }}" max="{{ today }}" aria-label="Day" onchange="this.form.requestSubmit()">
+    {% if day < today %}
+    <a class="btn" href="{{ url_for('activities', date=next_day) }}">Next day &rarr;</a>
+    <a class="btn ghost" href="{{ url_for('activities') }}">Today</a>
+    {% endif %}
+</form>
+<p class="muted period-line">{{ shown.strftime('%A %d %B %Y') }}{{ ' (today)' if day == today }}</p>
+
+{% if plots %}
+{% for group in plots|groupby('department') %}
+<section class="card block">
+    <h2>{{ group.grouper }}</h2>
+    <div class="dept-tiles plot-tiles">
+        {% for p in group.list %}
+        <div class="dept-tile plot-tile">
+            <a class="tile-link" href="{{ url_for('plot_day', plot_id=p.id, date=day) }}">
+                <span class="tile-name">{{ p.name }}</span>
+                <small>{{ p.workers|map(attribute='name')|join(', ') if p.workers else 'No workers assigned yet' }}</small>
+                <small class="tile-badge {{ 'done' if logged.get(p.id) }}">{{ logged.get(p.id, 0) }} activit{{ 'y' if logged.get(p.id, 0) == 1 else 'ies' }} logged</small>
+            </a>
+            {% if user.role == 'admin' %}
+            <p class="tile-links no-print"><button type="button" class="btn small" data-modal-open="plot-edit-{{ p.id }}">Edit plot</button></p>
+            {% endif %}
+        </div>
+        {% endfor %}
+    </div>
+</section>
+{% endfor %}
+{% else %}
+<section class="card block">
+    <p class="muted">
+        No plots yet.
+        {% if user.role == 'admin' %}Use <strong>Add a plot</strong> to set up a work station in a department (a greenhouse block, a field, a nursery bench) and assign its workers.
+        {% else %}An admin sets them up, with the workers on each.{% endif %}
+    </p>
+</section>
+{% endif %}
+
+<section class="card block day-report" id="day-report">
+    <div class="page-head">
+        <h2>Day report: {{ shown.strftime('%d %b %Y') }} <small class="muted">({{ total }} activit{{ 'y' if total == 1 else 'ies' }})</small></h2>
+        <div class="head-actions no-print">
+            <a class="btn" href="{{ url_for('activities_report', date=day) }}">Download Excel</a>
+            <button type="button" class="btn" onclick="window.print()">Print / Save as PDF</button>
+        </div>
+    </div>
+    {% with with_plot=true %}{% include "_activity_report.html" %}{% endwith %}
+</section>
+
+{% if user.role == 'admin' %}
+<dialog class="modal modal-wide" id="plot-new" aria-labelledby="plot-new-title">
+    <div class="modal-body">
+        <h2 id="plot-new-title">Add a plot</h2>
+        {{ plot_form(none) }}
+        <p class="center"><button type="button" class="btn ghost" data-modal-close>Cancel</button></p>
+    </div>
+</dialog>
+{% for p in plots %}
+<dialog class="modal modal-wide" id="plot-edit-{{ p.id }}" aria-labelledby="plot-edit-title-{{ p.id }}">
+    <div class="modal-body">
+        <h2 id="plot-edit-title-{{ p.id }}">Edit {{ p.name }}</h2>
+        {{ plot_form(p) }}
+        <form method="post" action="{{ url_for('remove_plot', plot_id=p.id) }}"
+              data-confirm="Remove the plot {{ p.name }}?&#10;&#10;If activities were logged on it they stay in the reports and the plot is only taken out of use.">
+            {{ csrf_field() }}<input type="hidden" name="back" value="{{ return_to }}">
+            <button class="btn danger wide">Remove plot</button>
+        </form>
+        <p class="center"><button type="button" class="btn ghost" data-modal-close>Cancel</button></p>
+    </div>
+</dialog>
+{% endfor %}
+{% endif %}
+{% endblock %}

@@ -2755,8 +2755,9 @@ def add_employee():
 @need("admin")
 def delete_employee(employee_id):
     db = get_db()
-    # Past payslips keep the employee's name, so the payroll history stays intact
+    # Past payslips and logged activities keep the employee's name, so the history stays intact; they come off their plots
     db.execute("DELETE FROM employees WHERE id=? AND business_id=?", (employee_id, g.user["business_id"]))
+    db.execute("DELETE FROM plot_workers WHERE employee_id=? AND business_id=?", (employee_id, g.user["business_id"]))
     db.commit()
     flash("Employee removed. Their past payslips are kept.", "ok")
     return redirect(url_for("hr"))
@@ -7200,6 +7201,335 @@ def backfill_cashbook():
 backfill_cashbook()
 
 
+# --- DAILY ACTIVITIES ---
+# Work stations (plots) belong to a department and have workers from the payroll assigned to them (admins set these up). For a plot
+# and a day, whoever is logging writes what its workers did: for each activity the worker (or everyone on the plot), morning or
+# afternoon, what was done, the tools used, any product used with its quantity, and how much work was done. Products are recorded,
+# not taken out of stock (stock used on the farm goes out through Transfer / Use). The day's report gathers it all by worker, and
+# downloads as Excel.
+ACTIVITY_PERIODS = (("morning", "Morning"), ("afternoon", "Afternoon"))
+
+
+def activity_day():
+    """The day being looked at (?date=), today by default and never later than today."""
+    raw = request.args.get("date", "")
+    day = day_or_none(raw) if raw else None
+    return day if day and day <= today_str() else today_str()
+
+
+def plots_with_workers(db, biz, include_retired=False):
+    plots = db.all("SELECT id, department, name, notes, active FROM plots WHERE business_id=? ORDER BY department, name", (biz,))
+    assigned = {}
+    for w in db.all(
+        """SELECT pw.plot_id, e.id, e.full_name FROM plot_workers pw JOIN employees e ON e.id = pw.employee_id
+           WHERE pw.business_id=? ORDER BY e.full_name""",
+        (biz,),
+    ):
+        assigned.setdefault(w["plot_id"], []).append({"id": w["id"], "name": w["full_name"]})
+    for p in plots:
+        p["workers"] = assigned.get(p["id"], [])
+    return [p for p in plots if include_retired or p["active"]]
+
+
+def get_plot(db, biz, plot_id):
+    plot = next((p for p in plots_with_workers(db, biz, include_retired=True) if p["id"] == plot_id), None)
+    if plot is None:
+        abort(404)
+    return plot
+
+
+def day_activities(db, biz, day, plot_id=None):
+    sql = """SELECT id, plot_id, plot_name, department, employee_id, worker_name, period, description, tools, product, product_qty, product_unit,
+                    work_done, recorded_by, recorded_at
+             FROM activities WHERE business_id=? AND work_date=?"""
+    params = [biz, day]
+    if plot_id:
+        sql += " AND plot_id=?"
+        params.append(plot_id)
+    return db.all(sql + " ORDER BY worker_name, CASE period WHEN 'morning' THEN 0 ELSE 1 END, plot_name, id", params)
+
+
+def by_worker(rows):
+    """A day's activities grouped by worker, each with how many were in the morning and the afternoon, and where."""
+    groups = []
+    for r in rows:
+        r["period_label"] = dict(ACTIVITY_PERIODS).get(r["period"], r["period"])
+        if not groups or groups[-1]["worker"] != r["worker_name"]:
+            groups.append({"worker": r["worker_name"], "entries": [], "morning": 0, "afternoon": 0, "plots": []})
+        group = groups[-1]
+        group["entries"].append(r)
+        group[r["period"] if r["period"] in ("morning", "afternoon") else "morning"] += 1
+        if r["plot_name"] not in group["plots"]:
+            group["plots"].append(r["plot_name"])
+    return groups
+
+
+def activity_back(default):
+    """Back to the activities page the form came from (never anywhere else)."""
+    back = text("back")
+    return redirect(back if back.startswith("/activities") and not back.startswith("//") else default)
+
+
+def read_plot_form(db, biz):
+    """The department, name, notes and workers of a plot from its form: (values, problem)."""
+    department = text("department")
+    name = clean_name(text("name"), 80)
+    notes = " ".join(text("notes").split())[:200]
+    staff = {e["id"] for e in db.all("SELECT id FROM employees WHERE business_id=?", (biz,))}
+    workers = sorted({i for i in (request.form.getlist("workers", type=int)) if i in staff})
+    if department not in department_names(db, biz):
+        return None, "Choose the plot's department."
+    if not name:
+        return None, "Write the plot's name (for example Greenhouse 2, Block A)."
+    return {"department": department, "name": name, "notes": notes, "workers": workers}, None
+
+
+def plot_name_taken(db, biz, department, name, plot_id=None):
+    return any(
+        norm(r["name"]) == norm(name) and r["id"] != plot_id
+        for r in db.all("SELECT id, name FROM plots WHERE business_id=? AND department=? AND active=1", (biz, department))
+    )
+
+
+def save_plot_workers(db, biz, plot_id, workers):
+    db.execute("DELETE FROM plot_workers WHERE plot_id=? AND business_id=?", (plot_id, biz))
+    for employee_id in workers:
+        db.execute("INSERT INTO plot_workers (business_id, plot_id, employee_id) VALUES (?, ?, ?)", (biz, plot_id, employee_id))
+
+
+@app.get("/activities")
+@need(None)
+def activities():
+    db, biz = get_db(), g.user["business_id"]
+    day = activity_day()
+    rows = day_activities(db, biz, day)
+    logged = {}
+    for r in rows:
+        logged[r["plot_id"]] = logged.get(r["plot_id"], 0) + 1
+    shown = datetime.date.fromisoformat(day)
+    return render_template(
+        "activities.html", day=day, today=today_str(), shown=shown, plots=plots_with_workers(db, biz), logged=logged, groups=by_worker(rows),
+        total=len(rows), prev_day=(shown - datetime.timedelta(days=1)).isoformat(), next_day=(shown + datetime.timedelta(days=1)).isoformat(),
+        departments=department_names(db, biz), employees=db.all("SELECT id, full_name FROM employees WHERE business_id=? ORDER BY full_name", (biz,)),
+        return_to=url_for("activities", date=day),
+    )
+
+
+@app.post("/activities/plots")
+@need("admin")
+def add_plot():
+    db, biz = get_db(), g.user["business_id"]
+    back = activity_back(url_for("activities"))
+    plot, problem = read_plot_form(db, biz)
+    if problem:
+        flash(problem, "error")
+        return back
+    if plot_name_taken(db, biz, plot["department"], plot["name"]):
+        flash(f"{plot['department']} already has a plot called '{plot['name']}'.", "error")
+        return back
+    plot_id = db.insert(
+        "INSERT INTO plots (business_id, department, name, notes, active, created_at) VALUES (?, ?, ?, ?, 1, ?)",
+        (biz, plot["department"], plot["name"], plot["notes"], now().strftime("%Y-%m-%d %H:%M:%S")),
+    )
+    save_plot_workers(db, biz, plot_id, plot["workers"])
+    db.commit()
+    flash(f"Plot '{plot['name']}' added to {plot['department']} with {len(plot['workers'])} worker(s).", "ok")
+    return back
+
+
+@app.post("/activities/plots/<int:plot_id>/update")
+@need("admin")
+def update_plot(plot_id):
+    db, biz = get_db(), g.user["business_id"]
+    back = activity_back(url_for("activities"))
+    get_plot(db, biz, plot_id)
+    plot, problem = read_plot_form(db, biz)
+    if problem:
+        flash(problem, "error")
+        return back
+    if plot_name_taken(db, biz, plot["department"], plot["name"], plot_id):
+        flash(f"{plot['department']} already has a plot called '{plot['name']}'.", "error")
+        return back
+    db.execute(
+        "UPDATE plots SET department=?, name=?, notes=? WHERE id=? AND business_id=?",
+        (plot["department"], plot["name"], plot["notes"], plot_id, biz),
+    )
+    save_plot_workers(db, biz, plot_id, plot["workers"])
+    db.commit()
+    flash(f"Plot '{plot['name']}' saved, with {len(plot['workers'])} worker(s). Activities already logged keep the names they were logged under.", "ok")
+    return back
+
+
+@app.post("/activities/plots/<int:plot_id>/delete")
+@need("admin")
+def remove_plot(plot_id):
+    """A plot with activities on record is taken out of use (its records stay in the reports); one without any is deleted."""
+    db, biz = get_db(), g.user["business_id"]
+    plot = get_plot(db, biz, plot_id)
+    used = db.one("SELECT COUNT(*) AS n FROM activities WHERE plot_id=? AND business_id=?", (plot_id, biz))["n"]
+    db.execute("DELETE FROM plot_workers WHERE plot_id=? AND business_id=?", (plot_id, biz))
+    if used:
+        db.execute("UPDATE plots SET active=0 WHERE id=? AND business_id=?", (plot_id, biz))
+        flash(f"Plot '{plot['name']}' is no longer in use. Its {used} logged activities stay in the reports.", "ok")
+    else:
+        db.execute("DELETE FROM plots WHERE id=? AND business_id=?", (plot_id, biz))
+        flash(f"Plot '{plot['name']}' removed.", "ok")
+    db.commit()
+    return activity_back(url_for("activities"))
+
+
+@app.get("/activities/plots/<int:plot_id>")
+@need(None)
+def plot_day(plot_id):
+    db, biz = get_db(), g.user["business_id"]
+    plot = get_plot(db, biz, plot_id)
+    day = activity_day()
+    rows = day_activities(db, biz, day, plot_id)
+    shown = datetime.date.fromisoformat(day)
+    return render_template(
+        "plot_day.html", plot=plot, day=day, today=today_str(), shown=shown, groups=by_worker(rows), total=len(rows),
+        prev_day=(shown - datetime.timedelta(days=1)).isoformat(), next_day=(shown + datetime.timedelta(days=1)).isoformat(),
+        periods=ACTIVITY_PERIODS, default_period="morning" if now().hour < 12 else "afternoon",
+        items=db.all("SELECT name, category, unit FROM products WHERE business_id=? ORDER BY name", (biz,)),
+        return_to=url_for("plot_day", plot_id=plot_id, date=day),
+    )
+
+
+@app.post("/activities/plots/<int:plot_id>/log")
+@need(None)
+def log_activities(plot_id):
+    """Saves every activity written in the plot's form at once. "Everyone on this plot" is one entry for each of its workers."""
+    db, biz = get_db(), g.user["business_id"]
+    plot = get_plot(db, biz, plot_id)
+    day = day_or_none(text("date")) if text("date") else None
+    back = redirect(url_for("plot_day", plot_id=plot_id, date=day or today_str()))
+    if day is None or day > today_str():
+        flash("Choose the day the work was done (today or earlier).", "error")
+        return back
+    if not plot["active"]:
+        flash("This plot is no longer in use, so nothing more can be logged on it.", "error")
+        return back
+    if not plot["workers"]:
+        flash("No workers are assigned to this plot yet. An admin can assign them from Daily Activities.", "error")
+        return back
+    names = {w["id"]: w["name"] for w in plot["workers"]}
+    form = {key: request.form.getlist(key) for key in ("worker", "period", "description", "tools", "product", "product_qty", "product_unit", "work_done")}
+    rows, problems = [], []
+    for i in range(len(form["description"])):
+        value = lambda key: " ".join((form[key][i] if i < len(form[key]) else "").split())  # noqa: E731
+        if not any(value(key) for key in ("description", "tools", "product", "product_qty", "work_done")):
+            continue   # a row left empty
+        number_of = f"Activity {i + 1}"
+        if not value("description"):
+            problems.append(f"{number_of}: say what was done")
+        worker = value("worker")
+        if worker != "all" and not (worker.isdigit() and int(worker) in names):
+            problems.append(f"{number_of}: choose a worker on this plot")
+        if value("period") not in dict(ACTIVITY_PERIODS):
+            problems.append(f"{number_of}: choose morning or afternoon")
+        quantity = None
+        if value("product_qty"):
+            try:
+                quantity = float(value("product_qty").replace(",", ""))
+                if quantity < 0 or not math.isfinite(quantity):
+                    raise ValueError
+            except ValueError:
+                problems.append(f"{number_of}: the quantity of product must be a number")
+            if not value("product"):
+                problems.append(f"{number_of}: say which product the quantity is of")
+        rows.append({
+            "workers": list(names.items()) if worker == "all" else [(int(worker), names.get(int(worker), ""))] if worker.isdigit() else [],
+            "period": value("period"), "description": value("description")[:300], "tools": value("tools")[:200], "product": value("product")[:120],
+            "qty": quantity, "unit": value("product_unit")[:30], "work_done": value("work_done")[:120],
+        })
+    if problems:
+        flash("Nothing was saved. " + "; ".join(problems) + ".", "error")
+        return back
+    if not rows:
+        flash("Write at least one activity.", "error")
+        return back
+    stamp = now().strftime("%Y-%m-%d %H:%M:%S")
+    saved = 0
+    try:
+        for r in rows:
+            for employee_id, worker_name in r["workers"]:
+                db.execute(
+                    """INSERT INTO activities (business_id, plot_id, plot_name, department, work_date, employee_id, worker_name, period, description, tools,
+                                               product, product_qty, product_unit, work_done, recorded_by, recorded_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (biz, plot_id, plot["name"], plot["department"], day, employee_id, worker_name, r["period"], r["description"], r["tools"],
+                     r["product"], r["qty"], r["unit"], r["work_done"], g.user["username"], stamp),
+                )
+                saved += 1
+        db.commit()
+    except DB_ERRORS:
+        db.rollback()
+        flash("The activities could not be saved. Please try again.", "error")
+        return back
+    flash(f"Saved {len(rows)} activit{'y' if len(rows) == 1 else 'ies'} on {plot['name']} for {datetime.date.fromisoformat(day).strftime('%d %b %Y')}"
+          + (f" ({saved} entries, one for each worker)." if saved != len(rows) else "."), "ok")
+    return back
+
+
+@app.post("/activities/<int:entry_id>/delete")
+@need(None)
+def delete_activity(entry_id):
+    """Removes one logged activity: the person who logged it, or an admin."""
+    db, biz = get_db(), g.user["business_id"]
+    entry = db.one("SELECT id, recorded_by FROM activities WHERE id=? AND business_id=?", (entry_id, biz))
+    if entry is None:
+        abort(404)
+    if g.user["role"] != "admin" and entry["recorded_by"] != g.user["username"]:
+        flash("Only the person who logged an activity, or an admin, can remove it.", "error")
+    else:
+        db.execute("DELETE FROM activities WHERE id=? AND business_id=?", (entry_id, biz))
+        db.commit()
+        flash("Activity removed.", "ok")
+    return activity_back(url_for("activities"))
+
+
+def activity_sheets(rows):
+    """A day's (or a plot's day's) activities as Excel sheets: every entry, and a summary by worker."""
+    return [
+        ("Activities",
+         [("Date", TEXT), ("Worker", TEXT), ("Time", TEXT), ("Department", TEXT), ("Plot", TEXT), ("Activity", TEXT), ("Tools used", TEXT),
+          ("Product used", TEXT), ("Quantity", NUMBER), ("Unit", TEXT), ("Work done", TEXT), ("Recorded by", TEXT)],
+         [(r["work_date"], r["worker_name"], dict(ACTIVITY_PERIODS).get(r["period"], r["period"]), r["department"], r["plot_name"], r["description"],
+           r["tools"], r["product"], r["product_qty"], r["product_unit"], r["work_done"], r["recorded_by"]) for r in rows]),
+        ("By worker",
+         [("Worker", TEXT), ("Activities", WHOLE), ("Morning", WHOLE), ("Afternoon", WHOLE), ("Plots", TEXT)],
+         [(grp["worker"], len(grp["entries"]), grp["morning"], grp["afternoon"], ", ".join(grp["plots"])) for grp in by_worker(list(rows))]),
+    ]
+
+
+@app.get("/activities/report.xlsx")
+@need(None)
+def activities_report():
+    db, biz = get_db(), g.user["business_id"]
+    day = activity_day()
+    plot = get_plot(db, biz, request.args.get("plot", type=int)) if request.args.get("plot") else None
+    rows = [dict(r, work_date=day) for r in day_activities(db, biz, day, plot["id"] if plot else None)]
+    title = f"Daily Activities {day}" + (f" - {plot['name']}" if plot else "")
+    contents = {
+        "title": f"{g.user['business_name']}: daily activities, {datetime.date.fromisoformat(day).strftime('%A %d %B %Y')}" + (f", {plot['name']}" if plot else ""),
+        "facts": [("Day", day), ("Plot", f"{plot['department']} / {plot['name']}" if plot else "Every plot"), ("Activities", str(len(rows))),
+                  ("Downloaded", now().strftime("%d %b %Y %H:%M")), ("By", g.user["username"])],
+        "sheets": [("Daily activities", "Activities", len(rows))],
+    }
+    safe = re.sub(r'[\\/:*?"<>|]+', "-", title)
+    return xlsx_response(f"{safe}.xlsx", workbook_bytes(activity_sheets(rows), contents))
+
+
+def activities_book(db, biz):
+    """Every logged activity, for the backups."""
+    rows = db.all(
+        """SELECT work_date, worker_name, period, department, plot_name, description, tools, product, product_qty, product_unit, work_done, recorded_by
+           FROM activities WHERE business_id=? ORDER BY work_date, worker_name, id""",
+        (biz,),
+    )
+    return activity_sheets(rows)[:1]
+
+
 # --- BACKUPS (ADMIN) ---
 # A backup is the business's records as Excel books - a master workbook holding every book, and each book on its own - and every
 # table as a CSV file. backup.js saves them into a folder the admin chose once on their computer, replacing the files from the last
@@ -7212,7 +7542,7 @@ BACKUP_TABLES = (
     "invoices", "invoice_items", "payment_log", "deleted_invoices", "customers", "customer_aliases", "customer_distinct",
     "procurements", "suppliers", "supplier_aliases", "supplier_distinct", "supplier_payments", "supplier_payment_allocations",
     "products", "pos_products", "categories", "departments", "stock_adjustments", "plantings", "preorders", "seedling_batches",
-    "cashbook", "money_balances", "employees", "payroll", "hr_settings", "notifications", "permission_requests",
+    "cashbook", "money_balances", "employees", "payroll", "hr_settings", "plots", "plot_workers", "activities", "notifications", "permission_requests",
 )
 TEXT, MONEY, WHOLE, NUMBER = "text", "money", "whole", "number"
 
@@ -7457,6 +7787,7 @@ BACKUP_BOOKS = (
     ("customers", "Customers", customers_book),
     ("suppliers", "Suppliers", suppliers_book),
     ("payroll", "Payroll", payroll_book),
+    ("activities", "Daily Activities", activities_book),
 )
 PRIORITY_BOOKS = 4
 
@@ -7694,6 +8025,7 @@ RESET_GROUPS = (
     ("Supplier payments", ("supplier_payments", "supplier_payment_allocations")),
     ("Accounts: money in and out, and the balances counted", ("cashbook", "money_balances")),
     ("Employees", ("employees",)),
+    ("Daily activities, plots and who works on them", ("activities", "plots", "plot_workers")),
     ("Payslips", ("payroll",)),
     ("Sowing batches", ("seedling_batches",)),
     ("Planting records", ("plantings",)),

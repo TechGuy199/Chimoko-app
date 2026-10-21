@@ -193,6 +193,23 @@ SCHEMA = [
         source TEXT DEFAULT '', source_id INTEGER, occurred_at TEXT NOT NULL, recorded_by TEXT, recorded_at TEXT
     )""",
     "CREATE INDEX IF NOT EXISTS cashbook_by_date ON cashbook (business_id, occurred_at)",
+    # Daily activities. A plot is a work station (a greenhouse block, a field, a nursery bench) in a department, with workers from the
+    # payroll assigned to it. An activity is one thing a worker did there on a day; the plot's and worker's names are kept with it,
+    # so the record still reads right after a plot is renamed or a worker leaves. active = 0 is a plot taken out of use.
+    """CREATE TABLE IF NOT EXISTS plots (
+        id {pk}, business_id INTEGER NOT NULL, department TEXT NOT NULL, name TEXT NOT NULL, notes TEXT DEFAULT '',
+        active INTEGER NOT NULL DEFAULT 1, created_at TEXT
+    )""",
+    """CREATE TABLE IF NOT EXISTS plot_workers (
+        id {pk}, business_id INTEGER NOT NULL, plot_id INTEGER NOT NULL, employee_id INTEGER NOT NULL, UNIQUE (plot_id, employee_id)
+    )""",
+    """CREATE TABLE IF NOT EXISTS activities (
+        id {pk}, business_id INTEGER NOT NULL, plot_id INTEGER, plot_name TEXT NOT NULL, department TEXT DEFAULT '', work_date TEXT NOT NULL,
+        employee_id INTEGER, worker_name TEXT NOT NULL, period TEXT NOT NULL, description TEXT NOT NULL, tools TEXT DEFAULT '',
+        product TEXT DEFAULT '', product_qty DOUBLE PRECISION, product_unit TEXT DEFAULT '', work_done TEXT DEFAULT '',
+        recorded_by TEXT, recorded_at TEXT
+    )""",
+    "CREATE INDEX IF NOT EXISTS activities_by_day ON activities (business_id, work_date)",
     # Accounts: what was really held in each balance (Cash, Bank, Airtel Money, MTN Money) when the owner counted it, and what the
     # app expected it to be at that moment (NULL the first time). The latest count of each is where its balance starts from.
     """CREATE TABLE IF NOT EXISTS money_balances (
