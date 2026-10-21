@@ -125,15 +125,18 @@
         e.preventDefault();
         const method = (form.getAttribute("method") || "GET").toUpperCase();
         const scrollBefore = window.scrollY;
+        // The button that was clicked is sent too (its name and value), as a normal submit would, so a form with
+        // several buttons - like Create Account / Start Demo - knows which one was chosen
+        const data = new FormData(form, e.submitter || null);
         let init;
         if (method === "GET") {
             // Empty fields are left out of the address (the server reads a missing field and an empty one alike)
             const query = new URLSearchParams();
-            new FormData(form).forEach(function (value, key) { if (value !== "") query.append(key, value); });
+            data.forEach(function (value, key) { if (value !== "") query.append(key, value); });
             url.search = query.toString();
             init = { method: "GET" };
         } else {
-            init = { method: method, body: new FormData(form) };
+            init = { method: method, body: data };
         }
         navigate(url.toString(), init, true, scrollBefore, method === "GET").catch(function () {
             form.submit();   // a real submit, which this listener cannot intercept a second time

@@ -9,8 +9,9 @@
         <label>Password <input name="password" type="password" required autocomplete="current-password"></label>
         <button class="btn primary wide">Login</button>
     </form>
-    {% if signup_open %}
-    <p class="muted center"><a href="{{ url_for('setup') }}">Register a new business</a></p>
-    {% endif %}
+    <p class="muted center">
+        {% if signup_open %}<a href="{{ url_for('setup') }}">Register a new business</a> · {% endif %}
+        <a href="{{ url_for('setup', demo=1) }}">Try a free 24-hour demo</a>
+    </p>
 </div>
 {% endblock %}

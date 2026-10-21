@@ -99,6 +99,9 @@
 {% endif %}
 
 <main id="page-main">
+    {% if user and user.demo_expires_at %}
+    <div class="flash notice no-print">Demo company: it is deleted with all its data and your login on {{ user.demo_expires_at[:16] }}.</div>
+    {% endif %}
     {% for category, message in get_flashed_messages(with_categories=true) %}
     <div class="flash {{ category }} no-print">{{ message }}</div>
     {% endfor %}
@@ -131,7 +134,7 @@
 {% if user %}
 <div id="toasts" class="toasts no-print" aria-live="polite"></div>
 <script src="{{ asset('notify.js') }}" data-poll="{{ url_for('notifications_poll') }}"></script>
-{% if user.role == 'admin' %}
+{% if user.role == 'admin' and not user.demo_expires_at %}
 {# Backups and the end-of-day reminder; read again from each page, so a newer backup or a changed reminder time is seen #}
 <script src="{{ asset('backup.js') }}" data-biz="{{ user.business_id }}" data-hour="{{ 17 if user.backup_hour is none else user.backup_hour }}"
         data-last="{{ user.last_backup_at or '' }}" data-csrf="{{ csrf_token() }}" data-backup-files="{{ url_for('backup_manifest') }}"

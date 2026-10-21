@@ -4,6 +4,7 @@ Queries are written once with ? placeholders and must work on both engines, so k
 them to plain SQL: no literal % or ? characters, and always alias aggregates.
 """
 import os
+import re
 import sqlite3
 
 DATABASE_URL = os.environ.get("DATABASE_URL") or os.environ.get("POSTGRES_URL")
@@ -202,6 +203,13 @@ SCHEMA = [
 ]
 
 
+# Every table holding one business's records, read from the schema above so a table added later is never missed
+BUSINESS_TABLES = [
+    re.search(r"CREATE TABLE IF NOT EXISTS (\w+)", statement).group(1)
+    for statement in SCHEMA if "CREATE TABLE" in statement and "business_id INTEGER" in statement
+]
+
+
 class Database:
     def __init__(self):
         if IS_POSTGRES:
@@ -239,6 +247,13 @@ class Database:
 
     def close(self):
         self.conn.close()
+
+
+def delete_business(db, biz):
+    """Deletes one business with every record and user account it has. The caller commits."""
+    for table in BUSINESS_TABLES:
+        db.execute(f"DELETE FROM {table} WHERE business_id=?", (biz,))
+    db.execute("DELETE FROM businesses WHERE id=?", (biz,))
 
 
 def add_column(db, table, column, definition):
@@ -293,6 +308,8 @@ def init_schema():
         add_column(db, "businesses", "alert_phone", "TEXT")
         add_column(db, "businesses", "alert_low_stock", "INTEGER")
         add_column(db, "businesses", "alert_permission", "INTEGER")
+        # A demo company: when it ends (local time). At that moment it is deleted with all its records and logins. NULL = a real business.
+        add_column(db, "businesses", "demo_expires_at", "TEXT")
         # Statutory rules became separate employee and employer rates. Settings saved under the old
         # "one rate, paid by one side" rule keep exactly the same effect.
         for column in ("napsa_employee_pct", "napsa_employer_pct", "nhima_employee_pct", "nhima_employer_pct"):

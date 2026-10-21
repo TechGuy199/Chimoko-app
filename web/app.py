@@ -9,8 +9,10 @@ import json
 import math
 import numbers
 import os
+import random
 import re
 import secrets
+import time
 import zipfile
 from zoneinfo import ZoneInfo
 
@@ -19,7 +21,7 @@ from markupsafe import Markup
 from werkzeug.security import check_password_hash, generate_password_hash
 import xlsxwriter
 
-from db import DB_ERRORS, IS_POSTGRES, Database, init_schema
+from db import DB_ERRORS, IS_POSTGRES, Database, delete_business, init_schema
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ON_VERCEL = bool(os.environ.get("VERCEL"))
@@ -114,17 +116,23 @@ def load_user_and_check_csrf():
         if not expected or not hmac.compare_digest(expected.encode("utf-8"), supplied.encode("utf-8")):
             abort(400, "This form has expired. Go back, refresh the page and try again.")
 
+    sweep_expired_demos()
     uid = session.get("uid")
     if uid:
         g.user = get_db().one(
             """SELECT u.id, u.business_id, u.username, u.role, u.can_sell, u.can_procure, u.can_transfer, u.can_delete, u.theme, u.glass,
                       b.name AS business_name, b.subtitle, b.contact, b.currency, b.low_stock_threshold,
-                      b.alert_phone, b.alert_low_stock, b.alert_permission, b.backup_hour, b.last_backup_at, b.last_backup_by
+                      b.alert_phone, b.alert_low_stock, b.alert_permission, b.backup_hour, b.last_backup_at, b.last_backup_by, b.demo_expires_at
                FROM users u JOIN businesses b ON b.id = u.business_id WHERE u.id=?""",
             (uid,),
         )
         if g.user is None:
             session.clear()
+        elif g.user["demo_expires_at"] and g.user["demo_expires_at"] <= now().strftime("%Y-%m-%d %H:%M:%S"):
+            purge_expired_demos(get_db())
+            session.clear()
+            g.user = None
+            flash("Your 24-hour demo has ended. The demo company, its sample data and its login have been deleted.", "notice")
 
 
 def can(perm):
@@ -527,22 +535,33 @@ def next_invoice_no(db, biz):
 
 # --- ACCOUNTS ---
 def signup_open(db):
-    # Only the first account can be created freely; set ALLOW_SIGNUP=1 to let further businesses register
+    # Only the first account can be created freely; set ALLOW_SIGNUP=1 to let further businesses register.
+    # Demo companies do not count, so trying the demo first never locks the real owner out.
     if os.environ.get("ALLOW_SIGNUP") == "1":
         return True
-    return db.one("SELECT COUNT(*) AS n FROM users")["n"] == 0
+    return db.one(
+        "SELECT COUNT(*) AS n FROM users u JOIN businesses b ON b.id = u.business_id WHERE b.demo_expires_at IS NULL"
+    )["n"] == 0
 
 
 @app.route("/setup", methods=["GET", "POST"])
 def setup():
     db = get_db()
-    if not signup_open(db):
-        flash("Registration is closed. Ask your admin for an operator account.", "error")
-        return redirect(url_for("login"))
+    open_ = signup_open(db)
+    # A demo can always be started; a real business only while registration is open
+    demo_only = not open_ or request.args.get("demo") == "1"
 
     if request.method == "POST":
+        # The demo-only page has one button, so a browser that does not send which button was pressed still means a demo
+        demo = request.form.get("mode", "demo" if demo_only else "real") == "demo"
+        if not demo and not open_:
+            flash("Registration is closed. Ask your admin for an operator account.", "error")
+            return redirect(url_for("login"))
+        purge_expired_demos(db)
         business, username, password = text("business_name"), text("username"), request.form.get("password", "")
-        if not business or not username:
+        if demo and db.one("SELECT COUNT(*) AS n FROM businesses WHERE demo_expires_at IS NOT NULL")["n"] >= DEMO_LIMIT:
+            flash("Too many demos are running right now. Please try again later.", "error")
+        elif not business or not username:
             flash("Business name and username are required.", "error")
         elif len(password) < 8:
             flash("Choose a password of at least 8 characters.", "error")
@@ -551,10 +570,11 @@ def setup():
         elif db.one("SELECT id FROM users WHERE username=?", (username,)):
             flash("That username is already taken.", "error")
         else:
+            ends = (now() + datetime.timedelta(hours=DEMO_HOURS)).strftime("%Y-%m-%d %H:%M:%S") if demo else None
             try:
                 biz = db.insert(
-                    "INSERT INTO businesses (name, subtitle, contact, cashbook_ready) VALUES (?, ?, ?, 1)",
-                    (business, text("subtitle"), text("contact")),
+                    "INSERT INTO businesses (name, subtitle, contact, cashbook_ready, demo_expires_at) VALUES (?, ?, ?, 1, ?)",
+                    (business, text("subtitle"), text("contact"), ends),
                 )
                 db.execute("INSERT INTO departments (business_id, name) VALUES (?, 'General')", (biz,))
                 db.execute("INSERT INTO categories (business_id, name) VALUES (?, 'General')", (biz,))
@@ -563,17 +583,33 @@ def setup():
                        VALUES (?, ?, ?, 'admin', 1, 1, 1, 1)""",
                     (biz, username, generate_password_hash(password)),
                 )
+                if demo:
+                    # The helpers that record money and stock sign each record with the user making it
+                    signed_in, g.user = g.user, {"id": uid, "business_id": biz, "username": username, "role": "admin"}
+                    try:
+                        fill_demo_data(db, biz)
+                    finally:
+                        g.user = signed_in
                 db.commit()
             except DB_ERRORS:
                 db.rollback()
                 flash("The account could not be created. Please try again.", "error")
             else:
+                if demo:
+                    # Batches due within the release window go on the POS, as they would on any page load of the greenhouse
+                    release_plantings(db, biz)
                 session.clear()
                 session["uid"] = uid
                 session.permanent = True
+                if demo:
+                    flash(
+                        f"Your demo company is ready, filled with sample data. Explore freely: after {DEMO_HOURS} hours it is deleted, "
+                        "together with your login.",
+                        "ok",
+                    )
                 return redirect(url_for("pos"))
 
-    return render_template("setup.html")
+    return render_template("setup.html", demo_only=demo_only, signup_open=open_, demo_hours=DEMO_HOURS)
 
 
 @app.route("/login", methods=["GET", "POST"])
@@ -583,6 +619,8 @@ def login():
         return redirect(url_for("pos"))
 
     if request.method == "POST":
+        # An ended demo's login is gone before anyone can sign in with it
+        purge_expired_demos(db)
         found = db.one("SELECT id, password_hash FROM users WHERE username=?", (text("username"),))
         if found and check_password_hash(found["password_hash"], request.form.get("password", "")):
             session.clear()
@@ -600,6 +638,215 @@ def login():
 def logout():
     session.clear()
     return redirect(url_for("login"))
+
+
+# --- DEMO COMPANIES ---
+# Anyone can start a demo from the registration page, even when registration is closed. The demo company starts filled
+# with sample data and lasts DEMO_HOURS; then the company, every record in it and all its logins are deleted for good.
+DEMO_HOURS = 24
+# Demo companies that may exist at once, so the database cannot be filled up by people starting demo after demo
+DEMO_LIMIT = 50
+# How often (at most) a page load also deletes other people's ended demos
+DEMO_SWEEP_SECONDS = 300
+demo_sweep = {"last": None}
+
+
+def purge_expired_demos(db):
+    """Deletes every demo company whose time is up, with all its records and logins. Returns how many were deleted."""
+    ended = db.all(
+        "SELECT id FROM businesses WHERE demo_expires_at IS NOT NULL AND demo_expires_at <= ?", (now().strftime("%Y-%m-%d %H:%M:%S"),)
+    )
+    try:
+        for row in ended:
+            delete_business(db, row["id"])
+        db.commit()
+    except DB_ERRORS:
+        db.rollback()
+        return 0
+    return len(ended)
+
+
+def sweep_expired_demos():
+    if demo_sweep["last"] is not None and time.monotonic() - demo_sweep["last"] < DEMO_SWEEP_SECONDS:
+        return
+    demo_sweep["last"] = time.monotonic()
+    purge_expired_demos(get_db())
+
+
+DEMO_SUPPLIERS = {
+    "farm": ("Kafue Agro Supplies", "0971 234 567"),
+    "tools": ("Chongwe Hardware & Tools", "0966 345 678"),
+    "seed": ("Lusaka Seed Centre", "0977 456 789"),
+}
+# (code, name, category, department, unit, quantity bought, unit cost, selling price, supplier, share put on the POS)
+DEMO_ITEMS = (
+    ("FERT-DC50", "D-Compound Fertiliser 50kg", "Fertilisers", "Agro Shop", "bag", 40, 780, 950, "farm", 0.6),
+    ("FERT-UREA50", "Urea Fertiliser 50kg", "Fertilisers", "Agro Shop", "bag", 30, 820, 990, "farm", 0.6),
+    ("FERT-COMP25", "Organic Compost 25kg", "Fertilisers", "Agro Shop", "bag", 50, 120, 180, "farm", 0.7),
+    ("CHEM-CYP1L", "Cypermethrin 1L", "Chemicals", "Agro Shop", "bottle", 24, 145, 210, "farm", 0.5),
+    ("CHEM-MANC1", "Mancozeb 1kg", "Chemicals", "Agro Shop", "pack", 30, 95, 150, "farm", 0.5),
+    ("CHEM-GLY5L", "Glyphosate 5L", "Chemicals", "Agro Shop", "bottle", 12, 380, 520, "farm", 0.5),
+    ("TOOL-SPR16", "Knapsack Sprayer 16L", "Tools", "Agro Shop", "piece", 8, 450, 650, "tools", 0.5),
+    ("TOOL-HOE", "Garden Hoe", "Tools", "Agro Shop", "piece", 20, 85, 130, "tools", 0.6),
+    ("TOOL-CAN10", "Watering Can 10L", "Tools", "Agro Shop", "piece", 15, 70, 110, "tools", 0.6),
+    ("TOOL-TRAY128", "Seedling Tray (128 cells)", "Tools", "Greenhouse", "tray", 60, 25, 45, "tools", 0.5),
+    ("SEED-TOM", "Tomato Seeds (Rodade)", "Vegetable Seeds", "Greenhouse", "pack", 10, 180, 250, "seed", 0),
+    ("SEED-CAB", "Cabbage Seeds (Star 3301)", "Vegetable Seeds", "Greenhouse", "pack", 8, 220, 300, "seed", 0),
+    ("SEED-RAPE", "Rape Seeds (English Giant)", "Vegetable Seeds", "Greenhouse", "pack", 15, 60, 95, "seed", 0),
+)
+# Purchases left owing, so supplier statements have balances: code -> share of the cost paid when logged
+DEMO_OWING = {"FERT-UREA50": 0.5, "CHEM-GLY5L": 0.0}
+DEMO_CUSTOMERS = (
+    ("Mwila Banda", "0971 112 233"), ("Chileshe Mulenga", "0966 223 344"), ("Natasha Phiri", "0977 334 455"),
+    ("Joseph Tembo", "0955 445 566"), ("Kalaba Farms", "0976 556 677"), ("Grace Zulu", "0965 667 788"),
+)
+# (name, NRC, basic salary, employment type, address, age, days per week, days missed last month)
+DEMO_EMPLOYEES = (
+    ("Bwalya Mwansa", "112233/10/1", 4500, "Permanent", "Chilenje, Lusaka", 34, 5, 0),
+    ("Esther Lungu", "223344/11/1", 3800, "Permanent", "Kabwata, Lusaka", 28, 5, 0),
+    ("Peter Sakala", "334455/12/1", 2500, "Casual Worker", "Chawama, Lusaka", 41, 5, 2),
+)
+# (name, batch, seeds, mortality %, cost of one seed, price, planted days ago, ready in days, marked ready)
+DEMO_PLANTINGS = (
+    ("Tomato Seedlings", "GH-T1", 1000, 12, 0.18, 2.0, 40, -5, True),
+    ("Rape Seedlings", "GH-R1", 2000, 10, 0.06, 1.0, 25, 4, False),
+    ("Cabbage Seedlings", "GH-C1", 1000, 15, 0.22, 2.5, 6, 30, False),
+)
+# (days ago, amount, method, category, party, description)
+DEMO_EXPENSES = (
+    (30, 3500, "Bank transfer", "rent", "Landlord", "Shop rent"),
+    (25, 400, "Cash", "transport", "", "Fuel for deliveries"),
+    (20, 850, "Airtel Money", "utilities", "ZESCO", "Electricity tokens"),
+    (15, 45, "Airtel Money", "charges", "", "Mobile money charges"),
+    (8, 350, "Cash", "transport", "", "Fuel for deliveries"),
+)
+
+
+def fill_demo_data(db, biz):
+    """Fills a new demo company with a month and a half of sample records, made through the same helpers the pages use so every
+    page (stock, suppliers, customers, accounts, payroll, greenhouse, reports) agrees. Runs as the demo's admin (g.user); the caller commits."""
+    username = g.user["username"]
+    rng = random.Random(biz)
+    current = now().replace(tzinfo=None)
+    today = current.date()
+    stamp = current.strftime("%Y-%m-%d %H:%M:%S")
+
+    def day(days_ago):
+        return (today - datetime.timedelta(days=days_ago)).strftime("%Y-%m-%d")
+
+    for name in ("Agro Shop", "Greenhouse"):
+        db.execute("INSERT INTO departments (business_id, name) VALUES (?, ?)", (biz, name))
+    for name in ("Fertilisers", "Chemicals", "Tools", "Vegetable Seeds", "Seedlings"):
+        db.execute("INSERT INTO categories (business_id, name) VALUES (?, ?)", (biz, name))
+
+    # What was held in cash, at the bank and in each wallet before the first record
+    for account, amount in (("Cash", 3000), ("Bank", 120000), ("Airtel Money", 1500), ("MTN Money", 1000)):
+        db.execute(
+            "INSERT INTO money_balances (business_id, account, amount, as_of, last_id, expected, set_by, set_at) VALUES (?, ?, ?, ?, 0, NULL, ?, ?)",
+            (biz, account, amount, f"{day(46)} 07:00:00", username, stamp),
+        )
+
+    # Stock bought from the three suppliers, then part of each item put on the POS
+    pos = []
+    for i, (code, name, category, dept, unit, qty, cost, price, supplier, on_pos) in enumerate(DEMO_ITEMS):
+        bought = day(45 - i // 4)
+        share = DEMO_OWING.get(code, 1.0)
+        supplier_name, supplier_phone = DEMO_SUPPLIERS[supplier]
+        record_purchase(db, biz, {
+            "item_code": code, "name": name, "category": category, "department": dept, "batch_no": f"B{bought.replace('-', '')[2:]}",
+            "date_planted": "", "quantity": qty, "unit_cost": float(cost), "price": float(price), "unit": unit,
+            "supplier_name": supplier_name, "supplier_phone": supplier_phone, "invoice_no": f"SUP-{101 + i}", "purchase_date": bought,
+            "expiry_date": "", "seeds_per_pack": 1000 if is_seed_category(category) else None,
+            "amount_paid": round(qty * cost * share, 2), "payment_method": "Bank transfer", "payment_reference": f"TRF{4100 + i}",
+        })
+        listed = int(qty * on_pos)
+        if listed:
+            item = db.one("SELECT id, batch_no FROM products WHERE business_id=? AND item_code=?", (biz, code))
+            db.execute("UPDATE products SET quantity = quantity - ? WHERE id=?", (listed, item["id"]))
+            pos_id = db.insert(
+                """INSERT INTO pos_products (business_id, item_code, name, category, department, batch_no, date_planted, quantity, price)
+                   VALUES (?, ?, ?, ?, ?, ?, '', ?, ?)""",
+                (biz, code, name, category, dept, item["batch_no"], listed, float(price)),
+            )
+            # keep: what the sample sales leave on the shelf, so the demo's POS still has every item to sell
+            pos.append({"id": pos_id, "item_code": code, "name": name, "department": dept, "batch_no": item["batch_no"], "quantity": listed,
+                        "price": float(price), "keep": max(2, listed // 3)})
+
+    # A month of sales: walk-ins pay at once, named customers sometimes buy on credit
+    for days_ago in range(30, -1, -1):
+        times = sorted(f"{rng.randint(8, 16):02d}:{rng.randint(0, 59):02d}:00" for _ in range(rng.choice((0, 1, 1, 2, 2, 3))))
+        for clock in times:
+            sold_at = f"{day(days_ago)} {clock}"
+            if sold_at > stamp:
+                continue
+            stock = [p for p in pos if p["quantity"] > p["keep"]]
+            if not stock:
+                break
+            lines = []
+            for p in rng.sample(stock, min(len(stock), rng.choice((1, 1, 2, 3)))):
+                qty = min(p["quantity"] - p["keep"], rng.choice((1, 1, 2, 3)))
+                p["quantity"] -= qty
+                lines.append((p, qty, round(qty * p["price"], 2)))
+            total = round(sum(line_total for _, _, line_total in lines), 2)
+            customer, phone = rng.choice(DEMO_CUSTOMERS) if rng.random() < 0.55 else ("", "")
+            roll = rng.random()
+            status = "Paid" if not customer or roll < 0.7 else ("Partial Payment" if roll < 0.88 else "Unpaid")
+            paid = {"Paid": total, "Partial Payment": round(total / 2, 2), "Unpaid": 0.0}[status]
+            method = rng.choice(("Cash", "Cash", "Cash", "Airtel Money", "Airtel Money", "MTN Money", "Bank transfer")) if paid else NOT_RECORDED
+            invoice_no = next_invoice_no(db, biz)
+            invoice_id = db.insert(
+                """INSERT INTO invoices (business_id, invoice_no, kind, customer_name, customer_phone, payment_status, total, amount_paid, balance_due, created_by, created_at, customer_id)
+                   VALUES (?, ?, 'SALE', ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (biz, invoice_no, customer or WALK_IN, phone, status, total, paid, round(total - paid, 2), username, sold_at,
+                 customer_for(db, biz, customer, phone, sold_at)),
+            )
+            record_money(db, biz, "in", paid, method, "sale", "", customer or WALK_IN, f"Invoice {invoice_no}", "invoice", invoice_id, sold_at)
+            for p, qty, line_total in lines:
+                db.execute(
+                    """INSERT INTO invoice_items (invoice_id, business_id, item_code, item_name, department, batch_no, qty, unit_price, line_total)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (invoice_id, biz, p["item_code"], p["name"], p["department"], p["batch_no"], qty, p["price"], line_total),
+                )
+    for p in pos:
+        db.execute("UPDATE pos_products SET quantity=? WHERE id=?", (p["quantity"], p["id"]))
+
+    for days_ago, amount, method, category, party, description in DEMO_EXPENSES:
+        record_money(db, biz, "out", amount, method, category, "", party, description, "manual", None, f"{day(days_ago)} 10:00:00")
+
+    # Three employees, each paid for last month on the first of this month
+    rules = hr_settings_for(db, biz)
+    last_month = (today.replace(day=1) - datetime.timedelta(days=1)).replace(day=1)
+    expected = float(expected_work_days(last_month.year, last_month.month, rules["non_working_days"].split(",")))
+    paid_at = min(f"{today.replace(day=1)} 09:00:00", stamp)
+    for name, nrc, salary, kind, address, age, days_week, missed in DEMO_EMPLOYEES:
+        employee_id = db.insert(
+            """INSERT INTO employees (business_id, full_name, nrc_number, basic_salary, employment_type, address, age, start_date, expected_days_week)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (biz, name, nrc, float(salary), kind, address, age, day(400 + age), days_week),
+        )
+        worked = expected - missed
+        calculated_basic = round(salary / expected * worked, 2)
+        share = statutory_amounts(rules, calculated_basic, 0.0)
+        net = round(calculated_basic - share["napsa_employee"] - share["nhima_employee"], 2)
+        month = last_month.strftime("%Y-%m")
+        slip_id = db.insert(
+            """INSERT INTO payroll (business_id, employee_id, employee_name, pay_month, basic_salary, expected_days, worked_days, calculated_basic,
+                                    bonuses_json, deductions_json, napsa_amt, nhima_amt, employer_napsa, employer_nhima, net_payable, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, '{}', '{}', ?, ?, ?, ?, ?, ?)""",
+            (biz, employee_id, name, month, float(salary), expected, worked, calculated_basic, share["napsa_employee"], share["nhima_employee"],
+             share["napsa_employer"], share["nhima_employer"], net, paid_at),
+        )
+        record_payslip_money(db, biz, slip_id, name, month, net, sum(share.values()), "Bank transfer", paid_at, username)
+
+    # Greenhouse: one batch ready and selling, one about to be listed, one still growing
+    for name, batch, seeds, mortality, seed_cost, price, planted, ready_in, ready in DEMO_PLANTINGS:
+        ready_on = (today + datetime.timedelta(days=ready_in)).strftime("%Y-%m-%d")
+        insert_planting(db, biz, {
+            "seed_code": seed_code_for(name.split()[0]), "seed_name": name.split()[0] + " seeds", "name": name, "department": "Greenhouse",
+            "batch_no": batch, "source": "manual", "seeds": seeds, "mortality": mortality, "seedlings": seedlings_from(seeds, mortality),
+            "seed_cost": seed_cost, "cost_per_seedling": seed_cost / (1 - mortality / 100), "price": price, "planted_on": day(planted),
+            "ready_on": ready_on, "actual_ready_on": ready_on if ready else None, "notes": "Sample batch",
+        })
 
 
 # --- SALES & POS ---
