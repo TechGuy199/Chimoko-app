@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- MS-POS: a tomato with its seedling. The PNG icons are drawn from these same shapes. -->
+  <rect width="512" height="512" rx="112" fill="#12372a"/>
+  <ellipse cx="256" cy="324" rx="122" ry="104" fill="#e8484d"/>
+  <line x1="256" y1="214" x2="256" y2="148" stroke="#7fd66b" stroke-width="24" stroke-linecap="round"/>
+  <polygon points="256,194 263.6,217.5 288.3,217.5 268.4,232 276,255.5 256,241 236,255.5 243.6,232 223.7,217.5 248.4,217.5" fill="#4fae5a" stroke="#4fae5a" stroke-width="6" stroke-linejoin="round"/>
+  <ellipse cx="200" cy="120" rx="62" ry="28" fill="#7fd66b" transform="rotate(30 200 120)"/>
+  <ellipse cx="312" cy="120" rx="62" ry="28" fill="#7fd66b" transform="rotate(-30 312 120)"/>
+</svg>

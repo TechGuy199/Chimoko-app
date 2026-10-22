@@ -2,6 +2,7 @@
 {% block title %}{{ "Try the Demo" if demo_only else "Register" }} — {% endblock %}
 {% block content %}
 <div class="card narrow">
+    <img class="brand-mark" src="{{ asset('icons/icon.svg') }}" alt="" width="56" height="56">
     {% if demo_only %}
     <h1>Try the App Free for {{ demo_hours }} Hours</h1>
     <p class="muted">Enter your company details and choose a login. You get a demo company already filled with sample stock, sales,

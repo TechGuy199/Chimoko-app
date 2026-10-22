@@ -8,7 +8,8 @@
 //
 // Bump CACHE_NAME when the shell's own caching behaviour changes (not for every CSS/JS edit - those are
 // already cache-busted by the app's own ?v= on each asset() URL).
-const CACHE_NAME = "chimoko-shell-v1";
+// v2: the MS-POS name and tomato seedling icons replaced the old ones under the same addresses
+const CACHE_NAME = "ms-pos-shell-v2";
 const OFFLINE_URL = "/static/offline.html";
 const PRECACHE = [OFFLINE_URL, "/static/icons/icon-192.png", "/static/icons/icon-512.png"];
 

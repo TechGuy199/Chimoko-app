@@ -58,14 +58,47 @@ PUBLIC_DIR = os.path.join(BASE_DIR, "public")
 
 
 # --- INSTALLABLE APP (PWA) ---
-# manifest.json and sw.js live at the project root (public/), not under public/static/, so they are served
-# at "/manifest.json" and "/sw.js" - a service worker's scope is the folder it is served from, and both need
-# to be at the site root to cover the whole app. On Vercel these two routes are never actually reached: Vercel
-# serves everything under public/** straight from its CDN, before a request would reach this Flask app. They
-# exist so the same URLs work the same way in local development, where Flask serves public/ itself.
+# sw.js lives at the project root (public/), not under public/static/, so it is served at "/sw.js": a service worker's
+# scope is the folder it is served from, and it must cover the whole app. On Vercel that route is never actually reached
+# (Vercel serves public/** straight from its CDN); it exists so the same URL works in local development.
+#
+# The manifest is made here instead of being a file, so an installed app is named after the business signed in when it was
+# installed, and MS-POS before anyone signs in. The page links it with crossorigin="use-credentials", without which
+# browsers fetch it signed out. Its id stays "/", so it is the same app whichever name it was installed under.
+APP_NAME = "MS-POS"
+APP_BACKGROUND = "#12372a"
+
+
 @app.get("/manifest.json")
 def pwa_manifest():
-    return send_from_directory(PUBLIC_DIR, "manifest.json", mimetype="application/manifest+json")
+    user = g.get("user")
+    name = user["business_name"] if user else APP_NAME
+    # Shown under the icon on a phone's home screen, where only about 12 characters fit: as many whole words as fit
+    short = ""
+    for word in name.split():
+        if len(f"{short} {word}".strip()) > 12:
+            break
+        short = f"{short} {word}".strip()
+    icons = [
+        {"src": asset(f"icons/{file}.png"), "sizes": f"{size}x{size}", "type": "image/png", "purpose": purpose}
+        for file, size, purpose in (("icon-192", 192, "any"), ("icon-512", 512, "any"),
+                                    ("icon-maskable-192", 192, "maskable"), ("icon-maskable-512", 512, "maskable"))
+    ]
+    manifest = {
+        "name": name,
+        "short_name": short or name[:12],
+        "description": f"{APP_NAME}: inventory, point of sale, procurement, HR and greenhouse management" + (f" for {name}." if user else "."),
+        "id": "/",
+        "start_url": "/?source=pwa",
+        "scope": "/",
+        "display": "standalone",
+        "display_override": ["window-controls-overlay", "standalone"],
+        "orientation": "any",
+        "background_color": APP_BACKGROUND,
+        "theme_color": "#2563eb",
+        "icons": icons,
+    }
+    return Response(json.dumps(manifest), mimetype="application/manifest+json", headers={"Cache-Control": "no-store", "Vary": "Cookie"})
 
 
 @app.get("/sw.js")

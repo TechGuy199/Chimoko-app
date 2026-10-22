@@ -2,7 +2,8 @@
 {% block title %}Login — {% endblock %}
 {% block content %}
 <div class="card narrow">
-    <h1>Secure POS Login</h1>
+    <img class="brand-mark" src="{{ asset('icons/icon.svg') }}" alt="" width="56" height="56">
+    <h1>Sign in to MS-POS</h1>
     <form method="post">
         {{ csrf_field() }}
         <label>Username <input name="username" required autofocus autocomplete="username"></label>
