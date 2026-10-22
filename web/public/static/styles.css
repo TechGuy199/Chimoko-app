@@ -745,3 +745,99 @@ tr.unread td:first-child { box-shadow: inset 3px 0 0 var(--primary); }
     .split { flex-direction: column; }
     .split > .grow, .split > .side { flex-basis: auto; width: 100%; }
 }
+
+/* ---------- Launch screen (splash.js): the book and pen, then the infinity loop ---------- */
+html.splash-on body { overflow: hidden; }
+/* Covers the page from the first paint, until the launch screen itself is in place */
+html.splash-on::after { content: ""; position: fixed; inset: 0; z-index: 9998; background: var(--bg); }
+.splash {
+    position: fixed; inset: 0; z-index: 9999; display: grid; place-items: center; padding: 24px 16px;
+    background: radial-gradient(circle at 50% 30%, color-mix(in srgb, var(--primary) 22%, var(--bg)) 0%, var(--bg) 62%);
+    color: var(--text); text-align: center; transition: opacity 0.5s var(--ease), visibility 0.5s;
+}
+.splash.done { opacity: 0; visibility: hidden; }
+.splash-skip {
+    position: absolute; top: 14px; right: 14px; padding: 6px 12px; border: 1px solid var(--line-strong); border-radius: 999px;
+    background: transparent; color: var(--text-muted); font: inherit; font-size: 12px; cursor: pointer;
+}
+.splash-skip:hover, .splash-skip:focus-visible { color: var(--text); border-color: var(--accent); outline: none; }
+.splash-inner { width: min(460px, 100%); display: grid; justify-items: center; gap: 10px; }
+.splash-stage { position: relative; width: 240px; height: 160px; margin-bottom: 8px; }
+.splash-stage svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+
+/* The book: the cover, then both pages opening out from the spine */
+.book-cover { fill: color-mix(in srgb, var(--primary) 55%, var(--bg)); opacity: 0; }
+.book-page { fill: url(#splash-page); stroke: var(--line-strong); stroke-width: 1; }
+.book-line { fill: none; stroke: rgba(var(--ink), 0.16); stroke-width: 2; stroke-linecap: round; opacity: 0; }
+.book-spine { stroke: color-mix(in srgb, var(--primary) 60%, var(--text)); stroke-width: 2; opacity: 0; }
+.book-left, .book-right { transform-box: fill-box; transform: scaleX(0.04); }
+.book-left { transform-origin: right center; }
+.book-right { transform-origin: left center; }
+.splash.play .book-cover { animation: splash-fade 0.3s var(--ease) forwards; }
+.splash.play .book-spine { animation: splash-fade 0.3s 0.25s var(--ease) forwards; }
+.splash.play .book-left { animation: book-open 0.65s 0.1s var(--ease) forwards; }
+.splash.play .book-right { animation: book-open 0.65s 0.18s var(--ease) forwards; }
+.splash.play .book-line { animation: splash-fade 0.4s 0.6s var(--ease) forwards; }
+
+/* The pen writing three lines on the right-hand page */
+.ink { fill: none; stroke: var(--accent); stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; stroke-dasharray: 1; stroke-dashoffset: 1; }
+.splash.play .ink-1 { animation: ink-write 0.42s 0.78s linear forwards; }
+.splash.play .ink-2 { animation: ink-write 0.36s 1.24s linear forwards; }
+.splash.play .ink-3 { animation: ink-write 0.28s 1.64s linear forwards; }
+.pen { opacity: 0; transform: translate(122px, 56px); }
+.pen-body { fill: color-mix(in srgb, var(--text) 85%, var(--primary)); }
+.pen-band { fill: var(--gold-text); }
+.pen-nib { fill: var(--accent); }
+.splash.play .pen { animation: splash-fade 0.2s 0.6s forwards, pen-write 1.14s 0.78s linear forwards; }
+
+/* Then the book gives way to the infinity loop, with a light running round it */
+.splash-book, .splash-infinity { transition: opacity 0.45s var(--ease), transform 0.45s var(--ease); }
+.splash-infinity { opacity: 0; transform: scale(0.88); }
+.splash.loop .splash-book { opacity: 0; transform: scale(0.84) translateY(-6px); }
+.splash.loop .splash-infinity { opacity: 1; transform: none; transition-delay: 0.12s; }
+.inf-track { fill: none; stroke: rgba(var(--ink), 0.12); stroke-width: 7; }
+.inf-run { fill: none; stroke: url(#splash-run); stroke-width: 7; stroke-linecap: round; stroke-dasharray: 0.22 0.78; animation: inf-run 1.6s linear infinite; }
+.inf-dot { fill: var(--text); filter: drop-shadow(0 0 6px var(--accent)); }
+
+.splash-brand {
+    margin: 0; font-size: clamp(30px, 8vw, 46px); font-weight: 800; letter-spacing: 0.08em;
+    background: linear-gradient(90deg, var(--text), var(--accent), var(--text)); background-size: 200% 100%;
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+    opacity: 0; transform: translateY(8px);
+}
+.splash-tagline { margin: 0; max-width: 46ch; color: var(--text-muted); font-size: 12px; font-weight: 650; letter-spacing: 0.16em; text-transform: uppercase; opacity: 0; }
+.splash.play .splash-brand { animation: brand-in 0.6s 0.15s var(--ease) forwards, brand-shine 3s 0.8s linear infinite; }
+.splash.play .splash-tagline { animation: splash-fade 0.6s 0.45s var(--ease) forwards; }
+.splash-bar { width: min(240px, 70%); height: 3px; margin-top: 14px; border-radius: 3px; background: rgba(var(--ink), 0.1); overflow: hidden; }
+.splash-bar i { display: block; width: 100%; height: 100%; background: linear-gradient(90deg, var(--primary), var(--accent)); transform: scaleX(0); transform-origin: left; }
+.splash.play .splash-bar i { animation: bar-fill var(--splash-total, 6s) linear forwards; }
+.splash-tip { min-height: 3.2em; margin: 6px 0 0; max-width: 40ch; color: var(--text-muted); font-size: 13px; line-height: 1.5; }
+.splash-tip span { display: inline-block; margin-right: 8px; padding: 1px 7px; border-radius: 4px; background: rgba(var(--ink), 0.08); color: var(--accent); font-size: 10.5px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; }
+.splash-tip em { font-style: normal; opacity: 0; transition: opacity 0.22s; }
+.splash-tip em.in { opacity: 1; }
+
+@keyframes splash-fade { to { opacity: 1; } }
+@keyframes book-open { from { transform: scaleX(0.04); } to { transform: scaleX(1); } }
+@keyframes ink-write { to { stroke-dashoffset: 0; } }
+@keyframes pen-write {
+    0% { transform: translate(122px, 56px); }
+    10% { transform: translate(134px, 53px); }
+    20% { transform: translate(148px, 57px); }
+    30% { transform: translate(170px, 55px); }
+    37% { transform: translate(182px, 56px); }
+    41% { transform: translate(122px, 72px); }
+    52% { transform: translate(140px, 69px); }
+    64% { transform: translate(158px, 73px); }
+    73% { transform: translate(170px, 72px); }
+    77% { transform: translate(122px, 88px); }
+    88% { transform: translate(140px, 85px); }
+    100% { transform: translate(158px, 88px); }
+}
+@keyframes inf-run { from { stroke-dashoffset: 0; } to { stroke-dashoffset: -1; } }
+@keyframes brand-in { to { opacity: 1; transform: none; } }
+@keyframes brand-shine { from { background-position: 200% 0; } to { background-position: 0 0; } }
+@keyframes bar-fill { to { transform: scaleX(1); } }
+
+/* Reduced motion: no movement, just the finished picture for a moment */
+.splash.calm *, .splash.calm { animation-duration: 0.01ms !important; animation-delay: 0s !important; transition-duration: 0.2s !important; }
+@media print { .splash { display: none !important; } html.splash-on::after { display: none; } }

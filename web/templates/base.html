@@ -10,6 +10,8 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" media="(max-width: 760px)">
     <link rel="stylesheet" href="{{ asset('mobile.css') }}" media="(max-width: 760px)">
+    {# The launch screen covers the page from its first paint, so it runs here rather than at the end of the body #}
+    <script src="{{ asset('splash.js') }}"></script>
 
     {# Installable app (PWA): lets Windows, Android and desktop Chrome/Edge offer "Install" so it opens like its own app #}
     {# Fetched signed in (use-credentials), so the installed app is named after this business #}
