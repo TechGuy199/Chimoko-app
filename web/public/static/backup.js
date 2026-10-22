@@ -180,7 +180,7 @@
         failure: failure,
     };
 
-    setTimeout(remind, 7000);   // after the launch screen
+    setTimeout(remind, 9000);   // after the launch screen
     setInterval(remind, 5 * 60 * 1000);
     document.addEventListener("visibilitychange", function () { if (!document.hidden) remind(); });
 })();

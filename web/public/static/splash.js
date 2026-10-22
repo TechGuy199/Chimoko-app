@@ -1,23 +1,20 @@
 // Launch screen: "MS-FINTECH - Building custom specialised software for every business". A book opens and a pen writes in it
-// (2 seconds), then an infinity loop runs (4 seconds), with tips about the app underneath; the page loads behind it meanwhile.
-// It shows when the app is opened, not on every page: at most once every 30 minutes on a device. Skip (or Esc) ends it at once.
+// (3 seconds), then an infinity loop runs (5 seconds), with tips about the app underneath; the page loads behind it meanwhile.
+// It shows every time the app is opened (once per tab or window), not on every page inside it. Skip (or Esc) ends it at once.
 // Loaded in the page head, so it can cover the page before anything is painted. Pure CSS and SVG: nothing extra to download.
 (function () {
-    const KEY = "ms-splash-at";
-    const AGAIN_AFTER = 30 * 60 * 1000;
-    let last = 0;
+    const KEY = "ms-splash-shown";
     try {
-        last = parseInt(localStorage.getItem(KEY) || "0", 10) || 0;
-        if (Date.now() - last < AGAIN_AFTER) return;
-        localStorage.setItem(KEY, String(Date.now()));
+        if (sessionStorage.getItem(KEY)) return;   // already shown since the app was opened in this tab
+        sessionStorage.setItem(KEY, "1");
     } catch (e) {
         return;   // storage blocked: better no launch screen than one on every page
     }
 
     const root = document.documentElement;
     const calm = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    const BOOK_MS = calm ? 600 : 2000;
-    const TOTAL_MS = calm ? 1500 : 6000;
+    const BOOK_MS = calm ? 600 : 3000;
+    const TOTAL_MS = calm ? 1500 : 8000;
     const TIPS = [
         "Scan a barcode into the POS search and press Enter: it goes straight into the cart.",
         "Count your cash, bank, Airtel Money and MTN Money once in Accounts; every payment keeps them up to date.",
