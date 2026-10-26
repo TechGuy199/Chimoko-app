@@ -23,6 +23,10 @@
             {% if up_next.preorders %}&middot; {{ up_next.preorders }} pre-order{{ 's' if up_next.preorders != 1 }} waiting{% endif %}
         </small>
     </a>
+    <a class="dept-tile" href="{{ url_for('deliveries') }}" id="deliveries-tile">
+        <strong>Deliveries</strong>
+        <small>{% if to_deliver %}{{ to_deliver }} sale{{ 's' if to_deliver != 1 }} to deliver{% if next_delivery %}, the next {{ 'today' if next_delivery == today else next_delivery }}{% endif %}{% else %}No delivery is waiting{% endif %}</small>
+    </a>
     <a class="dept-tile" href="{{ url_for('history', collect='waiting') }}" id="waiting-tile">
         <strong>To be collected</strong>
         <small>{% if waiting %}{{ waiting }} sale{{ 's' if waiting != 1 }} waiting{% if next_collection %}, the next {{ next_collection }}{% endif %}{% else %}No sale is waiting to be collected{% endif %}</small>
@@ -61,7 +65,7 @@
                 {% for p in products %}
                     <tr data-id="{{ p.id }}" data-code="{{ p.item_code }}" data-name="{{ p.name }}" data-dept="{{ p.department }}" data-stock="{{ p.quantity }}" data-price="{{ p.price }}">
                         <td class="c-code">{{ p.item_code }}</td>
-                        <td class="c-name">{{ p.name }}</td>
+                        <td class="c-name">{{ sold_link(p.item_code, p.name) }}</td>
                         <td class="nowrap c-planted {{ 'none' if not p.date_planted }}">{{ p.date_planted or '—' }}</td>
                         <td class="c-dept">{{ p.department }}</td>
                         <td class="num c-stock">{{ p.quantity }}</td>
@@ -133,11 +137,14 @@
                 <label><span data-reference-text>Reference number</span> (optional) <input name="payment_reference" id="pay-reference" maxlength="60" data-reference autocomplete="off"></label>
             </div>
             <fieldset class="collection">
-                <legend>Collection</legend>
+                <legend>How the customer gets the goods</legend>
                 <label class="check"><input type="radio" name="collection" value="now" checked> The customer takes the goods now</label>
                 <label class="check"><input type="radio" name="collection" value="later"> Collected on another day</label>
+                <label class="check"><input type="radio" name="collection" value="deliver"> We deliver</label>
                 <label id="collect-day-row" hidden>Collection day <input type="date" name="collect_on" id="collect-on" min="{{ tomorrow }}" disabled></label>
                 <small class="muted" id="collect-day-hint" hidden>Everyone gets a reminder the day before, and the sale is listed under To be collected until it is marked collected.</small>
+                <label id="deliver-day-row" hidden>Delivery day <input type="date" name="deliver_on" id="deliver-on" min="{{ today }}" disabled></label>
+                <small class="muted" id="deliver-day-hint" hidden>It goes on that day's delivery list, and everyone is told that morning.</small>
             </fieldset>
             <p class="total">Total: <span id="cart-total">{{ 0|money }}</span></p>
             <button class="btn success wide" {{ 'disabled' if not can('sell') }}>Complete Invoice</button>

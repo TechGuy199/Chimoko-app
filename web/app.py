@@ -235,7 +235,7 @@ def load_user_and_check_csrf():
         g.user = get_db().one(
             """SELECT u.id, u.business_id, u.username, u.role, u.can_sell, u.can_procure, u.can_transfer, u.can_delete, u.theme, u.glass,
                       b.name AS business_name, b.subtitle, b.contact, b.currency, b.low_stock_threshold,
-                      b.alert_phone, b.alert_low_stock, b.alert_permission, b.alert_preorders, b.alert_collections, b.preorder_remind_days,
+                      b.alert_phone, b.alert_low_stock, b.alert_permission, b.alert_preorders, b.alert_collections, b.alert_deliveries, b.preorder_remind_days,
                       b.backup_hour, b.last_backup_at, b.last_backup_by, b.demo_expires_at
                FROM users u JOIN businesses b ON b.id = u.business_id WHERE u.id=?""",
             (uid,),
@@ -1050,8 +1050,9 @@ def pos():
                    (SELECT COALESCE(SUM(total_cost - amount_paid), 0) FROM procurements WHERE business_id=?) AS payable,
                    (SELECT COUNT(*) FROM preorders WHERE business_id=? AND status='pending') AS preorders,
                    (SELECT COALESCE(SUM(qty), 0) FROM preorders WHERE business_id=? AND status='pending') AS preorder_qty,
-                   (SELECT COUNT(*) {WAITING_SQL}) AS waiting, (SELECT MIN(collect_on) {WAITING_SQL}) AS next_collection""",
-        (biz,) * 9,
+                   (SELECT COUNT(*) {WAITING_SQL}) AS waiting, (SELECT MIN(collect_on) {WAITING_SQL}) AS next_collection,
+                   (SELECT COUNT(*) {TO_DELIVER_SQL}) AS to_deliver, (SELECT MIN(deliver_on) {TO_DELIVER_SQL}) AS next_delivery""",
+        (biz,) * 11,
     )
     stats = {
         "listed": len(products),
@@ -1071,6 +1072,7 @@ def pos():
         "pos.html", products=products, stats=stats, departments=department_names(db, biz), statuses=PAYMENT_STATUSES, methods=PAYMENT_METHODS,
         known_customers=known_customers, up_next=up_next_summary(db, biz, growing, totals), removal_reasons=POS_REMOVAL_REASONS,
         preorder_lines=preorder_lines, waiting=totals["waiting"], next_collection=totals["next_collection"], tomorrow=add_days(today_str(), 1),
+        to_deliver=totals["to_deliver"], next_delivery=totals["next_delivery"], today=today_str(),
     )
 
 
@@ -1145,18 +1147,49 @@ def remove_from_pos(pos_id):
 
 # A sale the customer collects on a later day is "waiting" from the sale until it is marked collected (or cancelled)
 WAITING_SQL = "FROM invoices WHERE business_id=? AND kind='SALE' AND collect_on IS NOT NULL AND collected_at IS NULL AND COALESCE(payment_status, '') <> 'Cancelled'"
+# A sale we deliver is "to deliver" from the sale until it is marked delivered (or cancelled)
+TO_DELIVER_SQL = "FROM invoices WHERE business_id=? AND kind='SALE' AND deliver_on IS NOT NULL AND delivered_at IS NULL AND COALESCE(payment_status, '') <> 'Cancelled'"
 
 
-def read_collection(earliest):
-    """When the customer takes the goods, from the sale form: (day or None for now, problem). A later day is from earliest on."""
-    if text("collection") != "later":
-        return None, None
-    day = day_or_none(text("collect_on")) if text("collect_on") else None
-    if day is None:
-        return None, "Choose the day the customer will collect the goods."
-    if day < earliest:
-        return None, f"The collection day must be {earliest} or later (or choose that they take the goods now)."
-    return day, None
+def read_discount(raw, gross):
+    """Money off a sale line worth gross, typed as an amount ("5", "5.50") or a percentage ("10%"). Blank is none. Raises ValueError
+    when it is not a number, or more than the line is worth."""
+    raw = " ".join(str(raw or "").replace(",", "").split())
+    if not raw:
+        return 0.0
+    if raw.endswith("%"):
+        pct = float(raw[:-1].strip())
+        if not 0 <= pct <= 100:
+            raise ValueError(raw)
+        amount = gross * pct / 100
+    else:
+        amount = float(raw)
+    amount = round(amount, 2)
+    if amount < 0 or amount > round(gross, 2) + 0.005:
+        raise ValueError(raw)
+    return amount
+
+
+def read_handover():
+    """How the customer gets the goods, from the sale form: (collect_on, deliver_on, problem). Taken now leaves both empty; a later
+    collection is from tomorrow on, a delivery from today on."""
+    choice = text("collection")
+    if choice == "later":
+        day = day_or_none(text("collect_on")) if text("collect_on") else None
+        earliest = add_days(today_str(), 1)
+        if day is None:
+            return None, None, "Choose the day the customer will collect the goods."
+        if day < earliest:
+            return None, None, f"The collection day must be {earliest} or later (or choose that they take the goods now)."
+        return day, None, None
+    if choice == "deliver":
+        day = day_or_none(text("deliver_on")) if text("deliver_on") else None
+        if day is None:
+            return None, None, "Choose the day the goods will be delivered."
+        if day < today_str():
+            return None, None, "The delivery day cannot be in the past."
+        return None, day, None
+    return None, None, None
 
 
 @app.post("/checkout")
@@ -1164,17 +1197,19 @@ def read_collection(earliest):
 def checkout():
     db, biz = get_db(), g.user["business_id"]
 
-    # The browser only says which products and how many, and which pre-orders; names, prices and stock come from the database
-    wanted, preorder_ids = {}, []
+    # The browser only says which products and how many, any discount, and which pre-orders; names, prices and stock come from the database
+    wanted, preorder_ids, discounts = {}, [], {}
     try:
         for line in json.loads(request.form.get("cart", "[]")):
             if "preorder" in line:
                 preorder_ids.append(int(line["preorder"]))
+                discounts[("po", int(line["preorder"]))] = line.get("discount", "")
                 continue
             pid, qty = int(line["id"]), int(line["qty"])
             if qty <= 0:
                 raise ValueError("qty")
             wanted[pid] = wanted.get(pid, 0) + qty
+            discounts[("item", pid)] = line.get("discount", "")
     except (ValueError, KeyError, TypeError, AttributeError):
         wanted, preorder_ids = {}, []
     # Back to the POS with the pre-orders still in the cart, when something has to be put right
@@ -1200,9 +1235,14 @@ def checkout():
                 available = p["quantity"] if p else 0
                 flash(f"Insufficient stock for {p['name'] if p else 'an item'}. Available: {available}.", "error")
                 return back
-            line_total = round(qty * p["price"], 2)
-            lines.append((p, qty, line_total))
-            total += line_total
+            gross = round(qty * p["price"], 2)
+            try:
+                discount = read_discount(discounts.get(("item", pid)), gross)
+            except ValueError:
+                flash(f"The discount on {p['name']} must be an amount up to {money(gross)}, or a percentage like 10%.", "error")
+                return back
+            lines.append((p, qty, discount, round(gross - discount, 2)))
+            total += gross - discount
 
     # Pre-orders: at the quantity and price agreed when they were placed. Their seedlings were held from the batch then, so the
     # sale takes nothing more out of stock.
@@ -1212,7 +1252,14 @@ def checkout():
         if problem or len(preorders) != len(set(preorder_ids)):
             flash(problem or "Some of these pre-orders were already collected or cancelled. Please check the cart.", "error")
             return redirect(url_for("pos", preorder=[po["preorder"] for po in preorders]) if preorders else url_for("pos"))
-        total += sum(po["total"] for po in preorders)
+        for po in preorders:
+            try:
+                po["discount"] = read_discount(discounts.get(("po", po["preorder"])), po["total"])
+            except ValueError:
+                flash(f"The discount on {po['name']} must be an amount up to {money(po['total'])}, or a percentage like 10%.", "error")
+                return back
+            po["line_total"] = round(po["total"] - po["discount"], 2)
+            total += po["line_total"]
     total = round(total, 2)
 
     status = text("payment_status")
@@ -1238,8 +1285,8 @@ def checkout():
         if problem:
             flash(problem, "error")
             return back
-    # Taken now, or collected on a later day (reminded the day before)
-    collect_on, problem = read_collection(add_days(today_str(), 1))
+    # Taken now, collected on a later day (reminded the day before), or delivered on a day (on that day's delivery list)
+    collect_on, deliver_on, problem = read_handover()
     if problem:
         flash(problem, "error")
         return back
@@ -1249,19 +1296,19 @@ def checkout():
         invoice_no, customer = next_invoice_no(db, biz), text("customer_name") or WALK_IN
         invoice_id = db.insert(
             """INSERT INTO invoices (business_id, invoice_no, kind, customer_name, customer_phone, payment_status, total, amount_paid, balance_due, created_by, created_at,
-                                     customer_id, collect_on)
-               VALUES (?, ?, 'SALE', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                     customer_id, collect_on, deliver_on)
+               VALUES (?, ?, 'SALE', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 biz, invoice_no, customer, text("customer_phone"),
                 status, total, amount_paid, round(total - amount_paid, 2), g.user["username"], sold_at,
-                customer_for(db, biz, text("customer_name"), text("customer_phone"), sold_at), collect_on,
+                customer_for(db, biz, text("customer_name"), text("customer_phone"), sold_at), collect_on, deliver_on,
             ),
         )
         record_money(
             db, biz, "in", amount_paid, method, "sale", reference, customer, f"Invoice {invoice_no}" + (" (pre-order collected)" if preorders else ""),
             "invoice", invoice_id, sold_at,
         )
-        for p, qty, line_total in lines:
+        for p, qty, discount, line_total in lines:
             # The quantity check in the WHERE clause stops two tills selling the same last units
             moved = db.execute(
                 "UPDATE pos_products SET quantity = quantity - ? WHERE id=? AND business_id=? AND quantity >= ?",
@@ -1271,9 +1318,9 @@ def checkout():
                 raise StockError(p["name"])
             low_stock_alert(db, p["name"], p["item_code"], p["quantity"], p["quantity"] - qty, "listed for sale in the POS")
             db.execute(
-                """INSERT INTO invoice_items (invoice_id, business_id, item_code, item_name, department, batch_no, qty, unit_price, line_total)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (invoice_id, biz, p["item_code"], p["name"], p["department"], p["batch_no"], qty, p["price"], line_total),
+                """INSERT INTO invoice_items (invoice_id, business_id, item_code, item_name, department, batch_no, qty, unit_price, line_total, discount)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (invoice_id, biz, p["item_code"], p["name"], p["department"], p["batch_no"], qty, p["price"], line_total, discount or None),
             )
         for po in preorders:
             # Claimed only while still pending, so two tills cannot both sell the same pre-order
@@ -1284,9 +1331,9 @@ def checkout():
             if claimed.rowcount != 1:
                 raise PreorderGone(po["customer_name"])
             db.execute(
-                """INSERT INTO invoice_items (invoice_id, business_id, item_code, item_name, department, batch_no, qty, unit_price, line_total)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (invoice_id, biz, po["pos_code"], po["name"], po["department"], po["batch_no"], po["qty"], po["price"], po["total"]),
+                """INSERT INTO invoice_items (invoice_id, business_id, item_code, item_name, department, batch_no, qty, unit_price, line_total, discount)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (invoice_id, biz, po["pos_code"], po["name"], po["department"], po["batch_no"], po["qty"], po["price"], po["line_total"], po["discount"] or None),
             )
         db.commit()
     except PreorderGone as e:
@@ -1304,6 +1351,8 @@ def checkout():
 
     if collect_on:
         flash(f"To be collected on {collect_on}. Everyone gets a reminder the day before.", "ok")
+    if deliver_on:
+        flash(f"To be delivered on {deliver_on}: it is on that day's delivery list.", "ok")
     return redirect(url_for("invoice", invoice_id=invoice_id))
 
 
@@ -1372,6 +1421,311 @@ def remind_collections_due(db, biz):
         tell_everyone(db, biz, "collection", title, body, url_for("invoice", invoice_id=d["id"]))
     db.commit()
 
+
+
+# --- Deliveries ---
+# A sale can be delivered to the customer on a day. The deliveries of a day are that day's delivery list, compiled by itself, and on
+# the morning of the day everyone is told. A delivery list can also be made from any invoices ticked on Sales & Invoices. Either way
+# it covers several customers, laid out as a note for each customer (to sign and leave with them) or as one route sheet.
+DELIVERY_LAYOUTS = (("notes", "A note for each customer"), ("route", "One route sheet"))
+INVOICE_DELIVERY_COLUMNS = """id, invoice_no, created_at, customer_id, customer_name, customer_phone, payment_status, total, amount_paid, balance_due,
+                              collect_on, collected_at, deliver_on, delivered_at"""
+
+
+def delivery_selection(db, biz, ids=(), day=None):
+    """The invoices on a delivery list (the ticked ones, or those to be delivered on a day; sales that were not cancelled), with their
+    lines, gathered by customer in the order of the list."""
+    if day:
+        invoices = db.all(
+            f"""SELECT {INVOICE_DELIVERY_COLUMNS} FROM invoices WHERE business_id=? AND kind='SALE' AND payment_status <> 'Cancelled' AND deliver_on=?
+                ORDER BY customer_name, created_at, id""",
+            (biz, day),
+        )
+    else:
+        ids = list(dict.fromkeys(ids))[:300]
+        invoices = db.all(
+            f"""SELECT {INVOICE_DELIVERY_COLUMNS} FROM invoices WHERE business_id=? AND kind='SALE' AND payment_status <> 'Cancelled'
+                AND id IN ({', '.join('?' for _ in ids)}) ORDER BY customer_name, created_at, id""",
+            [biz] + ids,
+        ) if ids else []
+    lines_of = {}
+    if invoices:
+        for line in db.all(
+            f"""SELECT invoice_id, item_code, item_name, qty, unit_price, COALESCE(discount, 0) AS discount, line_total FROM invoice_items
+                WHERE business_id=? AND invoice_id IN ({', '.join('?' for _ in invoices)}) ORDER BY id""",
+            [biz] + [inv["id"] for inv in invoices],
+        ):
+            lines_of.setdefault(line["invoice_id"], []).append(line)
+    stops = {}
+    for inv in invoices:
+        inv["lines"] = lines_of.get(inv["id"], [])
+        inv["discount"] = round(sum(line["discount"] for line in inv["lines"]), 2)
+        inv["to_deliver"] = bool(inv["deliver_on"] and not inv["delivered_at"])
+        inv["to_collect"] = bool(inv["collect_on"] and not inv["collected_at"])
+        key = ("id", inv["customer_id"]) if inv["customer_id"] else ("name", name_key(inv["customer_name"] or ""), phone_key(inv["customer_phone"]))
+        stop = stops.setdefault(key, {"name": inv["customer_name"] or WALK_IN, "phone": inv["customer_phone"] or "", "customer_id": inv["customer_id"], "invoices": []})
+        stop["invoices"].append(inv)
+    out = []
+    for stop in stops.values():
+        stop["units"] = sum(line["qty"] for inv in stop["invoices"] for line in inv["lines"])
+        for field in ("total", "amount_paid", "balance_due", "discount"):
+            stop[field] = round(sum(inv[field] for inv in stop["invoices"]), 2)
+        out.append(stop)
+    return {
+        "stops": out, "invoices": invoices, "units": sum(s["units"] for s in out),
+        "total": round(sum(s["total"] for s in out), 2), "paid": round(sum(s["amount_paid"] for s in out), 2), "owed": round(sum(s["balance_due"] for s in out), 2),
+        "pending": [inv for inv in invoices if inv["to_deliver"] or inv["to_collect"]], "printed": now().strftime("%d %b %Y %H:%M"),
+    }
+
+
+def delivery_request_args():
+    """What a delivery list is of, from the address: (day or None, invoice ids, layout, the arguments to make the same list again)."""
+    day = day_or_none(request.args.get("day", "")) if request.args.get("day") else None
+    ids = [] if day else request.args.getlist("invoice", type=int)
+    layout = request.args.get("layout") if request.args.get("layout") in dict(DELIVERY_LAYOUTS) else "notes"
+    args = {"day": day} if day else {"invoice": ids}
+    return day, ids, layout, args
+
+
+@app.get("/deliveries")
+@need(None)
+def deliveries():
+    """The days with deliveries still to make, soonest first (overdue ones at the top), and what was delivered lately."""
+    db, biz = get_db(), g.user["business_id"]
+    days = db.all(
+        f"""SELECT deliver_on AS day, COUNT(*) AS invoices, COUNT(DISTINCT COALESCE(CAST(customer_id AS TEXT), customer_name)) AS customers,
+                   COALESCE(SUM(total), 0) AS total, COALESCE(SUM(balance_due), 0) AS owed
+            {TO_DELIVER_SQL} GROUP BY deliver_on ORDER BY deliver_on""",
+        (biz,),
+    )
+    done = db.all(
+        """SELECT deliver_on AS day, COUNT(*) AS invoices, MAX(delivered_at) AS last FROM invoices
+           WHERE business_id=? AND kind='SALE' AND delivered_at IS NOT NULL AND deliver_on >= ? GROUP BY deliver_on ORDER BY deliver_on DESC""",
+        (biz, add_days(today_str(), -30)),
+    )
+    return render_template("deliveries.html", days=days, done=done, today=today_str())
+
+
+@app.get("/deliveries/list")
+@need(None)
+def delivery_list():
+    db, biz = get_db(), g.user["business_id"]
+    day, ids, layout, args = delivery_request_args()
+    data = delivery_selection(db, biz, ids, day)
+    if not data["invoices"] and not day:
+        flash("Tick at least one invoice (not cancelled) to make a delivery list.", "error")
+        return redirect(url_for("history", pick="delivery"))
+    return render_template(
+        "delivery_list.html", d=data, day=day, layout=layout, layouts=DELIVERY_LAYOUTS, args=args, today=today_str(),
+        layout_url=lambda name: url_for("delivery_list", layout=name, **args), pdf_url=url_for("delivery_list_pdf", layout=layout, **args),
+    )
+
+
+@app.get("/deliveries/list.pdf")
+@need(None)
+def delivery_list_pdf():
+    db, biz = get_db(), g.user["business_id"]
+    day, ids, layout, _ = delivery_request_args()
+    data = delivery_selection(db, biz, ids, day)
+    if not data["invoices"]:
+        abort(404)
+    filename = f"deliveries-{day or today_str()}-{layout}.pdf"
+    return Response(delivery_list_pdf_bytes(data, day, layout), mimetype="application/pdf", headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
+@app.post("/deliveries/delivered")
+@need("sell")
+def deliveries_delivered():
+    """The goods on a delivery list have reached their customers: its deliveries are marked delivered (and any sale on it that was
+    waiting to be collected, collected)."""
+    db, biz = get_db(), g.user["business_id"]
+    ids = request.form.getlist("invoice", type=int)
+    data = delivery_selection(db, biz, ids)
+    stamp = now().strftime("%Y-%m-%d %H:%M:%S")
+    delivered = collected = 0
+    for inv in data["invoices"]:
+        if inv["to_deliver"]:
+            delivered += db.execute("UPDATE invoices SET delivered_at=?, delivered_by=? WHERE id=? AND business_id=? AND delivered_at IS NULL",
+                                    (stamp, g.user["username"], inv["id"], biz)).rowcount
+        if inv["to_collect"]:
+            collected += db.execute("UPDATE invoices SET collected_at=?, collected_by=? WHERE id=? AND business_id=? AND collected_at IS NULL",
+                                    (stamp, g.user["username"], inv["id"], biz)).rowcount
+    db.commit()
+    done = [f"{delivered} delivered"] if delivered else []
+    done += [f"{collected} collected"] if collected else []
+    flash("Marked " + " and ".join(done) + "." if done else "Nothing on this list was waiting to be delivered or collected.", "ok")
+    back = text("back")
+    return redirect(back if back.startswith("/deliveries") and not back.startswith("//") else url_for("deliveries"))
+
+
+@app.post("/invoices/<int:invoice_id>/delivered")
+@need("sell")
+def invoice_delivered(invoice_id):
+    db, biz = get_db(), g.user["business_id"]
+    inv = db.one("SELECT invoice_no, deliver_on, delivered_at, payment_status FROM invoices WHERE id=? AND business_id=? AND kind='SALE'", (invoice_id, biz))
+    if inv is None:
+        abort(404)
+    if not inv["deliver_on"] or inv["delivered_at"] or inv["payment_status"] == "Cancelled":
+        flash("This sale is not waiting to be delivered.", "error")
+    else:
+        db.execute("UPDATE invoices SET delivered_at=?, delivered_by=? WHERE id=? AND business_id=?", (now().strftime("%Y-%m-%d %H:%M:%S"), g.user["username"], invoice_id, biz))
+        db.commit()
+        flash(f"{inv['invoice_no']} marked as delivered.", "ok")
+    return redirect(url_for("invoice", invoice_id=invoice_id))
+
+
+@app.post("/invoices/<int:invoice_id>/deliver-day")
+@need("sell")
+def invoice_deliver_day(invoice_id):
+    """Moves a delivery to another day (it leaves the old day's list for the new one, and is alerted again that morning)."""
+    db, biz = get_db(), g.user["business_id"]
+    inv = db.one("SELECT deliver_on, delivered_at, payment_status FROM invoices WHERE id=? AND business_id=? AND kind='SALE'", (invoice_id, biz))
+    if inv is None:
+        abort(404)
+    day = day_or_none(text("deliver_on")) if text("deliver_on") else None
+    if not inv["deliver_on"] or inv["delivered_at"] or inv["payment_status"] == "Cancelled":
+        flash("This sale is not waiting to be delivered.", "error")
+    elif day is None or day < today_str():
+        flash("Choose the new delivery day (today or later). Nothing was changed.", "error")
+    else:
+        db.execute("UPDATE invoices SET deliver_on=?, deliver_reminded_at=NULL WHERE id=? AND business_id=?", (day, invoice_id, biz))
+        db.commit()
+        flash(f"Now to be delivered on {day}.", "ok")
+    return redirect(url_for("invoice", invoice_id=invoice_id))
+
+
+def remind_deliveries_due(db, biz):
+    """On the morning of a delivery day (or the first time the app is opened that day), everyone is told what is to be delivered,
+    once, with the day's delivery list. Deliveries still not made from earlier days are told about too."""
+    if not alert_enabled("deliveries"):
+        return
+    today = today_str()
+    due = db.all(f"SELECT id, customer_name, deliver_on {TO_DELIVER_SQL} AND deliver_reminded_at IS NULL AND deliver_on <= ? ORDER BY deliver_on, id", (biz, today))
+    if not due:
+        return
+    stamp = now().strftime("%Y-%m-%d %H:%M:%S")
+    claimed = [d for d in due if db.execute("UPDATE invoices SET deliver_reminded_at=? WHERE id=? AND deliver_reminded_at IS NULL", (stamp, d["id"])).rowcount == 1]
+    days = {}
+    for d in claimed:
+        days.setdefault(d["deliver_on"], []).append(d)
+    for day, invoices in days.items():
+        people = list(dict.fromkeys(d["customer_name"] for d in invoices))
+        n = len(invoices)
+        when = "today" if day == today else f"due since {datetime.date.fromisoformat(day).strftime('%a %d %b')}"
+        title = f"Deliveries {when}: {n} invoice{'s' if n != 1 else ''} for {len(people)} customer{'s' if len(people) != 1 else ''}"
+        tell_everyone(db, biz, "delivery", title, f"To deliver {when}: " + ", ".join(people[:12]) + (" and more" if len(people) > 12 else "") + ". The delivery list is ready.",
+                      url_for("delivery_list", day=day))
+    db.commit()
+
+
+def delivery_list_pdf_bytes(d, day, layout):
+    """A delivery list as a PDF: the stops first, then a note for each customer on its own page, or one route sheet."""
+    from xml.sax.saxutils import escape
+
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+    from reportlab.lib.units import mm
+    from reportlab.platypus import KeepTogether, PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+
+    base = getSampleStyleSheet()
+    small = ParagraphStyle("small", parent=base["Normal"], fontSize=8, leading=10)
+    centre = ParagraphStyle("centre", parent=base["Normal"], alignment=1, fontSize=9, leading=12)
+    title = ParagraphStyle("title", parent=base["Title"], fontSize=16, spaceAfter=2)
+    heading = ParagraphStyle("heading", parent=base["Heading3"], fontSize=11, spaceBefore=8, spaceAfter=3)
+    grey, line = colors.HexColor("#eeeeee"), colors.HexColor("#bbbbbb")
+    any_discount = any(inv["discount"] > 0.005 for inv in d["invoices"])
+
+    def grid(rows, widths, bold_last=False):
+        style = [
+            ("FONTSIZE", (0, 0), (-1, -1), 8), ("LEADING", (0, 0), (-1, -1), 10), ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"), ("BACKGROUND", (0, 0), (-1, 0), grey), ("LINEBELOW", (0, 0), (-1, -1), 0.4, line),
+        ]
+        if bold_last:
+            style.append(("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"))
+        return Table(rows, colWidths=[w * mm for w in widths], repeatRows=1, style=TableStyle(style))
+
+    def item_rows(inv):
+        head = ["Code", "Item", "Qty", "Price"] + (["Discount"] if any_discount else []) + ["Total"]
+        rows = [head]
+        for ln in inv["lines"]:
+            rows.append([Paragraph(escape(ln["item_code"] or "-"), small), Paragraph(escape(ln["item_name"]), small), f"{ln['qty']:,}", money(ln["unit_price"])]
+                        + ([money(ln["discount"]) if ln["discount"] else ""] if any_discount else []) + [money(ln["line_total"])])
+        widths = (36, 62, 14, 24) + ((22,) if any_discount else ()) + (24,)
+        return rows, widths
+
+    def signatures():
+        sign = [["Delivered by", "", "Received by", ""], ["Name", "", "Name", ""], ["Signature", "", "Signature", ""], ["Date", "", "Date", ""]]
+        return Table(sign, colWidths=[24 * mm, 64 * mm, 24 * mm, 68 * mm], rowHeights=[14, 22, 22, 22], style=TableStyle([
+            ("FONTSIZE", (0, 0), (-1, -1), 9), ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"), ("TEXTCOLOR", (0, 1), (0, -1), colors.grey),
+            ("TEXTCOLOR", (2, 1), (2, -1), colors.grey), ("LINEBELOW", (1, 1), (1, -1), 0.4, colors.black), ("LINEBELOW", (3, 1), (3, -1), 0.4, colors.black),
+            ("VALIGN", (0, 0), (-1, -1), "BOTTOM"),
+        ]))
+
+    def header(subtitle):
+        out = [Paragraph(escape(g.user["business_name"]), title)]
+        for extra in (g.user["subtitle"], g.user["contact"]):
+            if extra:
+                out.append(Paragraph(escape(extra), centre))
+        return out + [Spacer(1, 4), Paragraph(f"<b>{escape(subtitle)}</b>", centre), Spacer(1, 8)]
+
+    story = header(("DELIVERY LIST" if layout == "route" else "DELIVERIES") + (f" - {day}" if day else ""))
+    stops = [["Customer", "Phone", "Invoices", "Items", "Total", "Still owed"]]
+    for s in d["stops"]:
+        stops.append([Paragraph(escape(s["name"]), small), s["phone"] or "-", Paragraph(escape(", ".join(i["invoice_no"] for i in s["invoices"])), small),
+                      f"{s['units']:,}", money(s["total"]), money(s["balance_due"])])
+    stops.append(["All stops", "", f"{len(d['invoices'])}", f"{d['units']:,}", money(d["total"]), money(d["owed"])])
+    story.append(grid(stops, (42, 26, 52, 14, 24, 24), bold_last=True))
+
+    if layout == "route":
+        for s in d["stops"]:
+            block = [Paragraph(escape(f"{s['name']}" + (f" - {s['phone']}" if s["phone"] else "")), heading)]
+            for inv in s["invoices"]:
+                rows, widths = item_rows(inv)
+                rows.append(["", f"{inv['invoice_no']} total" + (f", {money(inv['balance_due'])} still owed" if inv["balance_due"] > 0.005 else ""), "", ""]
+                            + ([""] if any_discount else []) + [money(inv["total"])])
+                block.append(grid(rows, widths, bold_last=True))
+            block.append(Table([["Received by", "", "Signature", ""]], colWidths=[24 * mm, 66 * mm, 22 * mm, 68 * mm], rowHeights=[24], style=TableStyle([
+                ("FONTSIZE", (0, 0), (-1, -1), 8), ("TEXTCOLOR", (0, 0), (0, 0), colors.grey), ("TEXTCOLOR", (2, 0), (2, 0), colors.grey),
+                ("LINEBELOW", (1, 0), (1, 0), 0.4, colors.black), ("LINEBELOW", (3, 0), (3, 0), 0.4, colors.black), ("VALIGN", (0, 0), (-1, -1), "BOTTOM"),
+            ])))
+            story.append(KeepTogether(block))
+    else:
+        for s in d["stops"]:
+            story.append(PageBreak())
+            story += header("DELIVERY NOTE" + (f" - {day}" if day else ""))
+            story.append(Table(
+                [["Customer", Paragraph(escape(s["name"]), small), "Delivery date", day or d["printed"][:11]],
+                 ["Phone", s["phone"] or "-", "Invoices", Paragraph(escape(", ".join(i["invoice_no"] for i in s["invoices"])), small)]],
+                colWidths=[24 * mm, 66 * mm, 28 * mm, 62 * mm],
+                style=TableStyle([("FONTSIZE", (0, 0), (-1, -1), 9), ("VALIGN", (0, 0), (-1, -1), "TOP"), ("TEXTCOLOR", (0, 0), (0, -1), colors.grey),
+                                  ("TEXTCOLOR", (2, 0), (2, -1), colors.grey), ("BOX", (0, 0), (-1, -1), 0.4, line)]),
+            ))
+            for inv in s["invoices"]:
+                rows, widths = item_rows(inv)
+                rows.append(["", "Invoice total", "", ""] + ([""] if any_discount else []) + [money(inv["total"])])
+                head = f"{inv['invoice_no']} - {inv['created_at'][:10]} - {inv['payment_status']}" + (f" - balance due {money(inv['balance_due'])}" if inv["balance_due"] > 0.005 else "")
+                story.append(KeepTogether([Paragraph(escape(head), heading), grid(rows, widths, bold_last=True)]))
+            story.append(Spacer(1, 8))
+            story.append(Table(
+                [["Items delivered", f"{s['units']:,}"], ["Total of these invoices", money(s["total"])], ["Paid", money(s["amount_paid"])], ["Balance due", money(s["balance_due"])]],
+                colWidths=[130 * mm, 50 * mm],
+                style=TableStyle([("FONTSIZE", (0, 0), (-1, -1), 9), ("ALIGN", (1, 0), (1, -1), "RIGHT"), ("LINEABOVE", (0, 0), (-1, 0), 0.8, colors.black),
+                                  ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"), ("LINEBELOW", (0, -1), (-1, -1), 0.8, colors.black)]),
+            ))
+            story += [Spacer(1, 18), signatures()]
+
+    def footer(canvas, doc):
+        canvas.setFont("Helvetica", 7)
+        canvas.setFillColor(colors.grey)
+        canvas.drawString(15 * mm, 9 * mm, f"Deliveries{' for ' + day if day else ''} - printed {d['printed']}")
+        canvas.drawRightString(A4[0] - 15 * mm, 9 * mm, f"Page {doc.page}")
+
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=A4, leftMargin=15 * mm, rightMargin=15 * mm, topMargin=14 * mm, bottomMargin=16 * mm,
+                            title="Delivery list", author=g.user["business_name"])
+    doc.build(story, onFirstPage=footer, onLaterPages=footer)
+    return buffer.getvalue()
 
 # --- INVENTORY ---
 ITEM_COLUMNS = "id, item_code, name, category, department, batch_no, date_planted, quantity, unit_cost, price, supplier_name, invoice_no, purchase_date, expiry_date, seeds_per_pack, unit"
@@ -2451,7 +2805,8 @@ def history_filter(biz, q, start, end, waiting=False):
 def history_rows(db, where, params, limit, waiting=False):
     """The invoices, newest first; the ones waiting to be collected soonest collection first."""
     order = "collect_on, id" if waiting else "id DESC"
-    sql = f"""SELECT id, invoice_no, kind, customer_name, customer_phone, payment_status, total, amount_paid, balance_due, created_at, collect_on, collected_at
+    sql = f"""SELECT id, invoice_no, kind, customer_name, customer_phone, payment_status, total, amount_paid, balance_due, created_at, collect_on, collected_at,
+                     deliver_on, delivered_at
               FROM invoices WHERE {where} ORDER BY {order} LIMIT ?"""
     return db.all(sql, params + [limit])
 
@@ -2483,6 +2838,7 @@ def history():
         "history.html", invoices=history_rows(db, where, params, 500, waiting), totals=history_totals(db, where, params),
         q=q, periods=INVOICE_PERIODS, period=period, start=start, end=end, csv_url=url_for("history_csv", **csv_args), waiting=waiting,
         waiting_count=db.one(f"SELECT COUNT(*) AS n {WAITING_SQL}", (g.user["business_id"],))["n"], today=today_str(),
+        picking=request.args.get("pick") == "delivery",
     )
 
 
@@ -2504,13 +2860,97 @@ def history_csv():
     )
 
 
+
+# --- Who bought a product ---
+# Every product name in the app opens the list of the customers who bought it (tray.js shows it in a panel over the page; on its own
+# it is a full page, which is also where a batch's "Sold" tile on its planting record leads). A product is found by its code, as on
+# the invoice lines; a line with no code (old imported sales) by its name.
+ITEM_SALES_SHOWN = 300
+
+
+@app.template_global()
+def sold_url(code, name):
+    return url_for("item_sales", code=code) if code else url_for("item_sales", name=name or "")
+
+
+@app.template_global()
+def sold_link(code, name, label=None):
+    """A product name that opens who bought it."""
+    return Markup('<a class="sold-link" href="{}" data-tray data-no-prefetch>{}</a>').format(sold_url(code, name), label if label is not None else name)
+
+
+def item_sales_data(db, biz, code, name, limit=ITEM_SALES_SHOWN):
+    where = "ii.business_id=? AND i.kind='SALE' AND i.payment_status <> 'Cancelled'"
+    params = [biz]
+    if code:
+        where += " AND ii.item_code=?"
+        params.append(code)
+    else:
+        where += " AND (ii.item_code IS NULL OR ii.item_code='') AND ii.item_name=?"
+        params.append(name)
+    summary = db.one(
+        f"""SELECT COUNT(*) AS lines, COUNT(DISTINCT ii.invoice_id) AS invoices, COALESCE(SUM(ii.qty), 0) AS units,
+                   COALESCE(SUM(ii.line_total), 0) AS value, COALESCE(SUM(COALESCE(ii.discount, 0)), 0) AS discount,
+                   COUNT(DISTINCT COALESCE(CAST(i.customer_id AS TEXT), i.customer_name)) AS customers, MIN(i.created_at) AS first, MAX(i.created_at) AS last
+            FROM invoice_items ii JOIN invoices i ON i.id = ii.invoice_id WHERE {where}""",
+        params,
+    )
+    rows = db.all(
+        f"""SELECT i.id AS invoice_id, i.invoice_no, i.created_at, i.customer_id, i.customer_name, i.customer_phone, i.payment_status,
+                   ii.item_code, ii.item_name, ii.qty, ii.unit_price, COALESCE(ii.discount, 0) AS discount, ii.line_total
+            FROM invoice_items ii JOIN invoices i ON i.id = ii.invoice_id WHERE {where} ORDER BY i.created_at DESC, ii.id DESC LIMIT ?""",
+        params + [limit],
+    )
+    # What it is called now: the POS listing, the inventory item or the batch with this code, else the name it was last sold under
+    title = name
+    if code:
+        known = db.one(
+            """SELECT name FROM pos_products WHERE business_id=? AND item_code=?
+               UNION ALL SELECT name FROM products WHERE business_id=? AND item_code=?""",
+            (biz, code, biz, code),
+        )
+        title = known["name"] if known else (rows[0]["item_name"] if rows else code)
+    batch = db.one("SELECT id, name, batch_no, planted_on FROM plantings WHERE business_id=? AND pos_code=?", (biz, code)) if code else None
+    item = db.one("SELECT id FROM products WHERE business_id=? AND item_code=?", (biz, code)) if code else None
+    return {"code": code, "name": name, "title": planting_label(batch) if batch else title, "summary": summary, "rows": rows, "shown": len(rows),
+            "batch": batch, "item": item, "customer_links": g.user["role"] == "admin"}
+
+
+@app.get("/sales/item")
+@need(None)
+def item_sales():
+    db, biz = get_db(), g.user["business_id"]
+    code, name = request.args.get("code", "").strip(), request.args.get("name", "").strip()
+    if not code and not name:
+        abort(404)
+    data = item_sales_data(db, biz, code, name)
+    csv_url = url_for("item_sales_csv", **({"code": code} if code else {"name": name}))
+    # tray.js asks for the panel's contents only; anything else gets the full page
+    if request.headers.get("X-Tray") == "1":
+        return render_template("_item_sales.html", s=data, csv_url=csv_url, in_tray=True)
+    return render_template("item_sales.html", s=data, csv_url=csv_url, in_tray=False)
+
+
+@app.get("/sales/item.csv")
+@need(None)
+def item_sales_csv():
+    db, biz = get_db(), g.user["business_id"]
+    code, name = request.args.get("code", "").strip(), request.args.get("name", "").strip()
+    data = item_sales_data(db, biz, code, name, limit=100000)
+    filename = "sales-of-" + (re.sub(r"[^A-Za-z0-9]+", "-", data["title"] or "item").strip("-") or "item") + ".csv"
+    return csv_response(
+        filename, ["Date", "Invoice No", "Customer", "Phone", "Item Code", "Item", "Quantity", "Unit Price", "Discount", "Total", "Payment Status"],
+        [(r["created_at"], r["invoice_no"], r["customer_name"], r["customer_phone"], r["item_code"], r["item_name"], r["qty"], r["unit_price"], r["discount"],
+          r["line_total"], r["payment_status"]) for r in data["rows"]],
+    )
+
 @app.get("/invoices/<int:invoice_id>")
 @need(None)
 def invoice(invoice_id):
     db, biz = get_db(), g.user["business_id"]
     inv = db.one(
         """SELECT id, invoice_no, kind, customer_name, customer_phone, payment_status, total, amount_paid, balance_due, created_by, created_at, customer_id,
-                  cancelled_at, cancelled_by, cancel_reason, collect_on, collected_at, collected_by
+                  cancelled_at, cancelled_by, cancel_reason, collect_on, collected_at, collected_by, deliver_on, delivered_at, delivered_by
            FROM invoices WHERE id=? AND business_id=?""",
         (invoice_id, biz),
     )
@@ -2518,10 +2958,14 @@ def invoice(invoice_id):
         abort(404)
     inv["waiting"] = bool(inv["collect_on"] and not inv["collected_at"] and inv["payment_status"] != "Cancelled")
     inv["collect_when"] = when_words(inv["collect_on"], today_str(), before="due ") if inv["waiting"] else ""
+    inv["to_deliver"] = bool(inv["deliver_on"] and not inv["delivered_at"] and inv["payment_status"] != "Cancelled")
+    inv["deliver_when"] = when_words(inv["deliver_on"], today_str(), before="due ") if inv["to_deliver"] else ""
     lines = db.all(
-        "SELECT item_code, item_name, qty, unit_price, line_total FROM invoice_items WHERE invoice_id=? AND business_id=? ORDER BY id",
+        "SELECT item_code, item_name, qty, unit_price, COALESCE(discount, 0) AS discount, line_total FROM invoice_items WHERE invoice_id=? AND business_id=? ORDER BY id",
         (invoice_id, biz),
     )
+    inv["discount"] = round(sum(line["discount"] for line in lines), 2)
+    inv["subtotal"] = round(sum(line["qty"] * line["unit_price"] for line in lines), 2)
     twins = phone_twins(db, biz, inv["customer_id"]) if inv["customer_id"] and g.user["role"] == "admin" else []
     # An operator needs an admin's one-time approval; an admin only needs to confirm with their password
     asked = None if g.user["role"] == "admin" else active_request(db, invoice_id, DELETE_INVOICE)
@@ -2607,7 +3051,7 @@ def delete_invoice(invoice_id):
         grant, reason, approved_by = row, row["reason"], row["decided_by"] or ""
 
     lines = db.all(
-        "SELECT item_code, item_name, department, batch_no, qty, unit_price, line_total FROM invoice_items WHERE invoice_id=? AND business_id=? ORDER BY id",
+        "SELECT item_code, item_name, department, batch_no, qty, unit_price, COALESCE(discount, 0) AS discount, line_total FROM invoice_items WHERE invoice_id=? AND business_id=? ORDER BY id",
         (invoice_id, biz),
     )
     payments = db.all(
@@ -3174,7 +3618,7 @@ def delete_payslip(payslip_id):
 #   WHATSAPP_PROVIDER=callmebot  WHATSAPP_CALLMEBOT_KEY (the key CallMeBot issued to the alert phone number)
 # Until one is configured, alerts still appear in the app and the WhatsApp copy is recorded as skipped.
 ALERT_KINDS = (("low_stock", "Low stock"), ("permission", "Requests for admin permission"), ("preorders", "Pre-orders almost due"),
-               ("collections", "Sales to be collected"))
+               ("collections", "Sales to be collected"), ("deliveries", "Deliveries due today"))
 ITEM_ACTIONS = (("procure", "edit this item's details"), ("transfer", "transfer or use this item's stock"), ("delete", "delete this item"))
 GRANT_MINUTES = 60
 # An operator's request to delete one invoice travels through the same request/approve/spend-once flow as the item actions
@@ -3313,6 +3757,7 @@ def my_notifications_clause():
 def notifications_poll():
     remind_preorders_due(get_db(), g.user["business_id"])
     remind_collections_due(get_db(), g.user["business_id"])
+    remind_deliveries_due(get_db(), g.user["business_id"])
     where, params = my_notifications_clause()
     rows = get_db().all(
         f"SELECT id, kind, title, body, created_at FROM notifications WHERE {where} AND read_at IS NULL ORDER BY id DESC LIMIT 20", params
@@ -3362,9 +3807,10 @@ def save_alerts():
         flash("Enter the WhatsApp number with its country code, for example +260 972 047 233.", "error")
         return redirect(url_for("settings"))
     db.execute(
-        "UPDATE businesses SET alert_phone=?, alert_low_stock=?, alert_permission=?, alert_preorders=?, alert_collections=? WHERE id=?",
+        "UPDATE businesses SET alert_phone=?, alert_low_stock=?, alert_permission=?, alert_preorders=?, alert_collections=?, alert_deliveries=? WHERE id=?",
         (phone, 1 if request.form.get("alert_low_stock") else 0, 1 if request.form.get("alert_permission") else 0,
-         1 if request.form.get("alert_preorders") else 0, 1 if request.form.get("alert_collections") else 0, g.user["business_id"]),
+         1 if request.form.get("alert_preorders") else 0, 1 if request.form.get("alert_collections") else 0,
+         1 if request.form.get("alert_deliveries") else 0, g.user["business_id"]),
     )
     db.commit()
     flash("Alert settings saved.", "ok")
@@ -3653,7 +4099,7 @@ def statement_data(db, customer_id):
         (customer_id, biz),
     )
     lines = db.all(
-        """SELECT ii.invoice_id, ii.item_code, ii.item_name, ii.qty, ii.unit_price, ii.line_total
+        """SELECT ii.invoice_id, ii.item_code, ii.item_name, ii.qty, ii.unit_price, COALESCE(ii.discount, 0) AS discount, ii.line_total
            FROM invoice_items ii JOIN invoices i ON i.id = ii.invoice_id
            WHERE i.customer_id=? AND i.business_id=? AND i.kind='SALE' ORDER BY ii.id""",
         (customer_id, biz),
@@ -3756,7 +4202,7 @@ def delivery_data(db, customer, ids, day=None):
     lines_of = {}
     if invoices:
         for line in db.all(
-            f"""SELECT invoice_id, item_code, item_name, qty, unit_price, line_total FROM invoice_items
+            f"""SELECT invoice_id, item_code, item_name, qty, unit_price, COALESCE(discount, 0) AS discount, line_total FROM invoice_items
                 WHERE business_id=? AND invoice_id IN ({', '.join('?' for _ in invoices)}) ORDER BY id""",
             [biz] + [inv["id"] for inv in invoices],
         ):
@@ -3859,8 +4305,8 @@ def delivery_pdf(customer, d):
     ])
     for inv in d["invoices"]:
         rows = [["Code", "Item", "Qty", "Unit price", "Total"]]
-        rows += [[Paragraph(escape(line["item_code"] or "-"), small), Paragraph(escape(line["item_name"]), small), f"{line['qty']:,}", money(line["unit_price"]),
-                  money(line["line_total"])] for line in inv["lines"]]
+        rows += [[Paragraph(escape(line["item_code"] or "-"), small), Paragraph(escape(line["item_name"] + (f" (less {money(line['discount'])} discount)" if line["discount"] else "")), small),
+                  f"{line['qty']:,}", money(line["unit_price"]), money(line["line_total"])] for line in inv["lines"]]
         rows.append(["", "Invoice total", "", "", money(inv["total"])])
         head = f"{inv['invoice_no']} - {inv['created_at'][:10]} - {inv['payment_status']}" + (f" - balance due {money(inv['balance_due'])}" if inv["balance_due"] > 0.005 else "")
         story.append(KeepTogether([Paragraph(escape(head), heading), Table(rows, colWidths=[42 * mm, 68 * mm, 18 * mm, 26 * mm, 26 * mm], style=style)]))
@@ -3975,7 +4421,8 @@ def statement_pdf(customer, data):
     for inv in data["invoices"]:
         rows = [["Code", "Item", "Qty", "Unit price", "Total"]]
         for item in inv["lines"]:
-            rows.append([cell(item["item_code"] or "-"), cell(item["item_name"]), str(item["qty"]), money(item["unit_price"]), money(item["line_total"])])
+            rows.append([cell(item["item_code"] or "-"), cell(item["item_name"] + (f" (less {money(item['discount'])} discount)" if item.get("discount") else "")),
+                         str(item["qty"]), money(item["unit_price"]), money(item["line_total"])])
         rows += [
             ["", "", "", "Invoice total", money(inv["total"])],
             ["", "", "", "Paid so far", money(inv["amount_paid"])],
@@ -8657,7 +9104,7 @@ def sales_book(db, biz):
     )
     lines = db.all(
         """SELECT i.invoice_no, i.created_at, i.customer_name, i.payment_status, ii.item_code, ii.item_name, ii.department, ii.batch_no, ii.qty,
-                  ii.unit_price, ii.line_total
+                  ii.unit_price, COALESCE(ii.discount, 0) AS discount, ii.line_total
            FROM invoice_items ii JOIN invoices i ON i.id = ii.invoice_id WHERE ii.business_id=? ORDER BY i.created_at, i.id, ii.id""",
         (biz,),
     )
@@ -8675,9 +9122,9 @@ def sales_book(db, biz):
            f"{i['cancelled_at']} by {i['cancelled_by']}: {i['cancel_reason']}" if i["cancelled_at"] else "") for i in invoices]),
         ("Sales lines",
          [("Invoice No", TEXT), ("Date / time", TEXT), ("Customer", TEXT), ("Item code", TEXT), ("Item", TEXT), ("Department", TEXT), ("Batch", TEXT),
-          ("Qty", WHOLE), ("Unit price", MONEY), ("Line total", MONEY), ("Invoice status", TEXT)],
+          ("Qty", WHOLE), ("Unit price", MONEY), ("Discount", MONEY), ("Line total", MONEY), ("Invoice status", TEXT)],
          [(r["invoice_no"], r["created_at"], r["customer_name"], r["item_code"], r["item_name"], r["department"], r["batch_no"], r["qty"],
-           r["unit_price"], r["line_total"], r["payment_status"]) for r in lines]),
+           r["unit_price"], r["discount"] or None, r["line_total"], r["payment_status"]) for r in lines]),
         ("Deleted invoices",
          [("Invoice No", TEXT), ("Sold on", TEXT), ("Customer", TEXT), ("Total", MONEY), ("Paid", MONEY), ("Reason", TEXT), ("Deleted by", TEXT),
           ("Approved by", TEXT), ("Deleted on", TEXT)],

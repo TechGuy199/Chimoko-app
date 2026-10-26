@@ -201,3 +201,14 @@ dialog.modal { width: 100%; max-width: none; margin: auto 0 0; max-height: 90vh;
 /* The POS cart bar floats just above the tab bar */
 .cart-bar { bottom: calc(var(--tabbar-height) + var(--safe-bottom) + 10px); }
 .invoice, .statement { padding: 18px; }
+
+/* ---------- Who bought it, discounts and delivery lists ---------- */
+/* The who-bought panel rises from the bottom like the other sheets, clear of the phone's home bar */
+dialog.tray { border-radius: 24px 24px 0 0; }
+.tray-body { padding-bottom: calc(28px + var(--safe-bottom)); }
+.tray-close { width: 44px; height: 44px; }
+/* A cart line's discount at the 16px that keeps iPhones from zooming in on it */
+.cart-discount input { width: 130px; min-height: 40px; padding: 8px 10px; font-size: 16px; }
+/* Picking invoices for a delivery list: the bar sits just under the compact header, the tick boxes are easy to hit */
+#delivery-pick.picking .pick-bar { top: 64px; }
+.pick-cell input { width: 22px; height: 22px; }

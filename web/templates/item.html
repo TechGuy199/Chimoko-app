@@ -21,7 +21,7 @@
 <div class="page-head">
     <div>
         <a class="back" href="{{ url_for('inventory') }}">&larr; Back to inventory</a>
-        <h1>{{ item.name }} <span class="muted">(code {{ item.item_code }})</span></h1>
+        <h1>{{ sold_link(item.item_code, item.name) }} <span class="muted">(code {{ item.item_code }})</span></h1>
         <p class="muted item-place">
             <a href="{{ url_for('inventory', category=item.category) }}">{{ item.category }}</a> &middot;
             <a href="{{ url_for('inventory', department=item.department) }}">{{ item.department }}</a>

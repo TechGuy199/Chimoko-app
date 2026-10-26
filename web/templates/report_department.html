@@ -28,7 +28,7 @@
             {% if best %}
             <div class="rank">
                 {% for p in best %}
-                <span class="rank-name" title="{{ p.name }}">{{ p.name }}</span>
+                <span class="rank-name" title="{{ p.name }}">{{ sold_link(p.code, p.name) }}</span>
                 <span class="rank-track"><i style="width: {{ p.pct }}%" data-tip="{{ p.name }}&#10;Sales: {{ p.value|money }}&#10;Units sold: {{ p.sold }}"></i></span>
                 <span class="rank-value">{{ p.value|money }}</span>
                 {% endfor %}
@@ -49,7 +49,7 @@
             <thead><tr><th>Code</th><th>Product</th><th class="num">Units sold</th><th class="num">Sales value</th><th class="num">Units to farm use</th></tr></thead>
             <tbody>
             {% for p in products %}
-                <tr><td>{{ p.code or '—' }}</td><td>{{ p.name }}</td><td class="num">{{ p.sold }}</td><td class="num">{{ p.value|money }}</td><td class="num">{{ p.farm }}</td></tr>
+                <tr><td>{{ p.code or '—' }}</td><td>{{ sold_link(p.code, p.name) }}</td><td class="num">{{ p.sold }}</td><td class="num">{{ p.value|money }}</td><td class="num">{{ p.farm }}</td></tr>
             {% else %}
                 <tr><td colspan="5" class="muted center">Nothing sold or issued in this period.</td></tr>
             {% endfor %}
@@ -87,7 +87,7 @@
             {% for r in sale_lines %}
                 <tr>
                     <td>{{ r.created_at }}</td><td><a href="{{ url_for('invoice', invoice_id=r.invoice_id) }}">{{ r.invoice_no }}</a></td><td>{{ r.customer_name }}</td>
-                    <td>{{ r.item_code or '—' }}</td><td>{{ r.item_name }}</td>
+                    <td>{{ r.item_code or '—' }}</td><td>{{ sold_link(r.item_code, r.item_name) }}</td>
                     <td class="num">{{ r.qty }}</td><td class="num">{{ r.unit_price|money }}</td><td class="num">{{ r.line_total|money }}</td>
                 </tr>
             {% else %}
@@ -107,7 +107,7 @@
             {% for r in farm_lines %}
                 <tr>
                     <td>{{ r.created_at }}</td><td><a href="{{ url_for('invoice', invoice_id=r.invoice_id) }}">{{ r.invoice_no }}</a></td><td>{{ r.customer_name }}</td>
-                    <td>{{ r.item_code or '—' }}</td><td>{{ r.item_name }}</td><td class="num">{{ r.qty }}</td>
+                    <td>{{ r.item_code or '—' }}</td><td>{{ sold_link(r.item_code, r.item_name) }}</td><td class="num">{{ r.qty }}</td>
                 </tr>
             {% else %}
                 <tr><td colspan="6" class="muted center">Nothing issued for farm use in this period.</td></tr>

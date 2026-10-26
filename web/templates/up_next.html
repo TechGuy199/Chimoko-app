@@ -38,7 +38,7 @@
                     <td class="c-pos">{% if b.released %}<span class="ok">Yes</span>{% else %}from {{ b.goes_on_pos }}{% endif %}</td>
                     <td class="num c-seedlings">{{ '{:,}'.format(b.seedlings) }}</td>
                     <td class="num c-pending">{{ b.pending }}</td>
-                    <td class="num c-sold">{{ b.sold }}</td>
+                    <td class="num c-sold">{% if b.sold %}{{ sold_link(b.pos_code, b.label, b.sold) }}{% else %}0{% endif %}</td>
                     <td class="num c-available"><strong>{{ b.available }}</strong></td>
                     <td class="num c-price">{{ b.price|money }}</td>
                     <td class="c-actions">

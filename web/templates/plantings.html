@@ -66,7 +66,7 @@
                         <br><small class="muted">{% if r.stage == 'record' %}Not in the greenhouse{% else %}{{ 'On the POS' if r.released else 'POS from ' ~ r.goes_on_pos }}{% endif %}</small>
                     </td>
                     <td class="num">{{ r.pending }}</td>
-                    <td class="num">{{ r.sold }}</td>
+                    <td class="num">{% if r.sold %}{{ sold_link(r.pos_code, r.label, r.sold) }}{% else %}0{% endif %}</td>
                     <td class="num"><strong>{{ r.available }}</strong></td>
                     <td class="num">
                         {% if editable %}

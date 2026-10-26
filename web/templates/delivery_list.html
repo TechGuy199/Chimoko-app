@@ -1,0 +1,125 @@
+{% extends "base.html" %}
+{% block title %}{{ 'Deliveries ' ~ day if day else 'Delivery list' }} — {% endblock %}
+{% block content %}
+{% set any_discount = d.invoices|selectattr('discount')|list|length > 0 %}
+{% macro lines_table(inv) %}
+<div class="table-wrap">
+    <table>
+        <thead><tr><th>Code</th><th>Item</th><th class="num">Qty</th><th class="num">Price</th>{% if any_discount %}<th class="num">Discount</th>{% endif %}<th class="num">Total</th></tr></thead>
+        <tbody>
+        {% for line in inv.lines %}
+            <tr><td>{{ line.item_code or '—' }}</td><td>{{ sold_link(line.item_code, line.item_name) }}</td><td class="num">{{ '{:,}'.format(line.qty) }}</td>
+                <td class="num">{{ line.unit_price|money }}</td>{% if any_discount %}<td class="num">{{ ('− ' ~ (line.discount|money)) if line.discount else '' }}</td>{% endif %}
+                <td class="num">{{ line.line_total|money }}</td></tr>
+        {% endfor %}
+            <tr class="total-row"><td colspan="{{ 5 if any_discount else 4 }}">{{ inv.invoice_no }} total</td><td class="num">{{ inv.total|money }}</td></tr>
+            {% if inv.balance_due > 0.005 %}<tr><td colspan="{{ 5 if any_discount else 4 }}">Still owed on this invoice</td><td class="num">{{ inv.balance_due|money }}</td></tr>{% endif %}
+        </tbody>
+    </table>
+</div>
+{% endmacro %}
+
+<div class="page-head no-print">
+    <div>
+        <a class="back" href="{{ url_for('deliveries') if day else url_for('history', pick='delivery') }}">&larr; {{ 'Deliveries' if day else 'Sales & Invoices' }}</a>
+        <h1>{% if day %}Deliveries for {{ day }}{% if day == today %} (today){% endif %}{% else %}Delivery list{% endif %}</h1>
+        <p class="muted">{{ d.stops|length }} customer{{ 's' if d.stops|length != 1 }}, {{ d.invoices|length }} invoice{{ 's' if d.invoices|length != 1 }},
+            {{ '{:,}'.format(d.units) }} item{{ 's' if d.units != 1 }}.</p>
+    </div>
+    <div class="head-actions">
+        <span class="segmented" role="group" aria-label="Layout">
+            {% for name, label in layouts %}<a href="{{ layout_url(name) }}" class="{{ 'active' if name == layout }}">{{ label }}</a>{% endfor %}
+        </span>
+        <button type="button" class="btn" onclick="window.print()">Print</button>
+        <a class="btn primary" href="{{ pdf_url }}">Download PDF</a>
+    </div>
+</div>
+
+{% if not d.invoices %}
+<section class="card"><p class="muted center">Nothing is to be delivered on {{ day }}.</p></section>
+{% else %}
+{% if d.pending and can('sell') %}
+<section class="card no-print collect-banner">
+    <div>
+        <strong class="gold">{{ d.pending|length }} of these sale{{ 's are' if d.pending|length != 1 else ' is' }} still to be delivered or collected</strong>
+        <p class="muted">Once the goods have reached the customers, mark them done: deliveries as delivered, any collections as collected.</p>
+    </div>
+    <form method="post" action="{{ url_for('deliveries_delivered') }}" data-confirm="Mark the {{ d.pending|length }} sale{{ 's' if d.pending|length != 1 }} on this list as delivered?">
+        {{ csrf_field() }}
+        {% for inv in d.pending %}<input type="hidden" name="invoice" value="{{ inv.id }}">{% endfor %}
+        <input type="hidden" name="back" value="{{ request.full_path }}">
+        <button class="btn success">Mark all as delivered</button>
+    </form>
+</section>
+{% endif %}
+
+<article class="statement delivery-note">
+    <header>
+        <h1>{{ user.business_name }}</h1>
+        {% if user.contact %}<p class="muted">{{ user.contact }}</p>{% endif %}
+        <p class="doc-type">{{ 'Delivery list' if layout == 'route' else 'Deliveries' }}{% if day %} &middot; {{ day }}{% endif %}</p>
+    </header>
+    <h2>Stops</h2>
+    <div class="table-wrap">
+        <table>
+            <thead><tr><th>Customer</th><th>Phone</th><th>Invoices</th><th class="num">Items</th><th class="num">Total</th><th class="num">Still owed</th></tr></thead>
+            <tbody>
+            {% for s in d.stops %}
+                <tr><td>{% if s.customer_id and user.role == 'admin' %}<a href="{{ url_for('customer_statement', customer_id=s.customer_id) }}">{{ s.name }}</a>{% else %}{{ s.name }}{% endif %}</td>
+                    <td>{{ s.phone or '—' }}</td>
+                    <td>{% for inv in s.invoices %}<a href="{{ url_for('invoice', invoice_id=inv.id) }}">{{ inv.invoice_no }}</a>{% if inv.delivered_at %} <small class="ok">delivered</small>{% endif %}{{ ', ' if not loop.last }}{% endfor %}</td>
+                    <td class="num">{{ '{:,}'.format(s.units) }}</td><td class="num">{{ s.total|money }}</td><td class="num {{ 'warn' if s.balance_due > 0.005 }}">{{ s.balance_due|money }}</td></tr>
+            {% endfor %}
+                <tr class="total-row"><td colspan="3">All stops</td><td class="num">{{ '{:,}'.format(d.units) }}</td><td class="num">{{ d.total|money }}</td><td class="num">{{ d.owed|money }}</td></tr>
+            </tbody>
+        </table>
+    </div>
+
+    {% if layout == 'route' %}
+    {% for s in d.stops %}
+    <section class="route-stop">
+        <h3>{{ loop.index }}. {{ s.name }}{% if s.phone %} <span class="muted">&middot; {{ s.phone }}</span>{% endif %}</h3>
+        {% for inv in s.invoices %}{{ lines_table(inv) }}{% endfor %}
+        <div class="route-sign"><span>Received by</span><i></i><span>Signature</span><i></i></div>
+    </section>
+    {% endfor %}
+    {% endif %}
+</article>
+
+{% if layout != 'route' %}
+{% for s in d.stops %}
+<article class="statement delivery-note customer-note">
+    <header>
+        <h1>{{ user.business_name }}</h1>
+        {% if user.subtitle %}<p class="muted">{{ user.subtitle }}</p>{% endif %}
+        {% if user.contact %}<p class="muted">{{ user.contact }}</p>{% endif %}
+        <p class="doc-type">Delivery Note</p>
+    </header>
+    <dl class="facts">
+        <dt>Customer</dt><dd><strong>{{ s.name }}</strong></dd>
+        <dt>Phone</dt><dd>{{ s.phone or '—' }}</dd>
+        <dt>Delivery date</dt><dd>{{ day or today }}</dd>
+        <dt>Invoices</dt><dd>{{ s.invoices|map(attribute='invoice_no')|join(', ') }}</dd>
+    </dl>
+    {% for inv in s.invoices %}
+    <section class="statement-invoice">
+        <p class="invoice-head"><strong>{{ inv.invoice_no }}</strong> <span class="muted">{{ inv.created_at[:10] }}</span> <span class="status">{{ inv.payment_status }}</span></p>
+        {{ lines_table(inv) }}
+    </section>
+    {% endfor %}
+    <dl class="totals">
+        <dt>Items delivered</dt><dd>{{ '{:,}'.format(s.units) }}</dd>
+        <dt>Total of these invoices</dt><dd>{{ s.total|money }}</dd>
+        <dt>Paid</dt><dd>{{ s.amount_paid|money }}</dd>
+        <dt>Balance due</dt><dd><strong>{{ s.balance_due|money }}</strong></dd>
+    </dl>
+    <div class="signatures">
+        {% for who in ('Delivered by', 'Received by') %}
+        <div><strong>{{ who }}</strong><span>Name</span><i></i><span>Signature</span><i></i><span>Date</span><i></i></div>
+        {% endfor %}
+    </div>
+</article>
+{% endfor %}
+{% endif %}
+{% endif %}
+{% endblock %}

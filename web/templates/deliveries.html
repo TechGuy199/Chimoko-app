@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block title %}Deliveries — {% endblock %}
+{% block content %}
+<div class="page-head">
+    <div>
+        <h1>Deliveries</h1>
+        <p class="muted">Sales we deliver, by day. Each day's deliveries are that day's delivery list, ready to print or download, and everyone is told
+            that morning. A list can also be made from any invoices: tick them on Sales &amp; Invoices.</p>
+    </div>
+    <div class="head-actions">
+        <a class="btn" href="{{ url_for('history', pick='delivery') }}">Make a list from Sales &amp; Invoices</a>
+    </div>
+</div>
+
+<section class="card">
+    <h2>To deliver</h2>
+    <div class="table-wrap">
+        <table class="fit-rows delivery-days">
+            <thead><tr><th>Day</th><th class="num">Invoices</th><th class="num">Customers</th><th class="num">Total</th><th class="num">Still owed</th><th></th></tr></thead>
+            <tbody>
+            {% for d in days %}
+                <tr>
+                    <td class="c-title"><a href="{{ url_for('delivery_list', day=d.day) }}">{{ d.day }}</a>
+                        <small class="{{ 'warn' if d.day < today else 'ok' if d.day == today else 'muted' }}">{{ 'overdue' if d.day < today else 'today' if d.day == today else '' }}</small></td>
+                    <td class="num c-qty-invoices">{{ d.invoices }} invoice{{ 's' if d.invoices != 1 }}</td>
+                    <td class="num">{{ d.customers }} customer{{ 's' if d.customers != 1 }}</td>
+                    <td class="num c-total">{{ d.total|money }}</td>
+                    <td class="num {{ 'warn' if d.owed > 0.005 }}">{{ d.owed|money }} owed</td>
+                    <td class="num c-actions"><a class="btn small primary" href="{{ url_for('delivery_list', day=d.day) }}">Delivery list</a></td>
+                </tr>
+            {% else %}
+                <tr><td colspan="6" class="muted center">Nothing is waiting to be delivered. Choose "We deliver" with a day when completing a sale on the POS.</td></tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+
+{% if done %}
+<section class="card block">
+    <h2>Delivered in the last 30 days</h2>
+    <div class="table-wrap">
+        <table>
+            <thead><tr><th>Day</th><th class="num">Invoices delivered</th><th>Last marked</th><th></th></tr></thead>
+            <tbody>
+            {% for d in done %}
+                <tr><td><a href="{{ url_for('delivery_list', day=d.day) }}">{{ d.day }}</a></td><td class="num">{{ d.invoices }}</td><td>{{ (d.last or '')[:16] }}</td>
+                    <td class="num"><a class="btn small" href="{{ url_for('delivery_list', day=d.day) }}">List</a></td></tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endif %}
+{% endblock %}

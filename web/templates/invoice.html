@@ -16,6 +16,31 @@
     </details>
 </div>
 
+{% if inv.to_deliver %}
+<section class="card collect-banner no-print" id="delivery">
+    <div>
+        <strong class="{{ 'warn' if inv.deliver_on < today else 'gold' }}">To be delivered {{ inv.deliver_when }}</strong>
+        <p class="muted">It is on <a href="{{ url_for('delivery_list', day=inv.deliver_on) }}">the delivery list for {{ inv.deliver_on }}</a>, and everyone is told that morning.</p>
+    </div>
+    {% if can('sell') %}
+    <div class="actions">
+        <form method="post" action="{{ url_for('invoice_delivered', invoice_id=inv.id) }}" data-confirm="Mark {{ inv.invoice_no }} as delivered to {{ inv.customer_name }}?">
+            {{ csrf_field() }}
+            <button class="btn success">Mark as delivered</button>
+        </form>
+        <details class="inline-details">
+            <summary class="btn">Change day</summary>
+            <form method="post" action="{{ url_for('invoice_deliver_day', invoice_id=inv.id) }}" class="preorder-form">
+                {{ csrf_field() }}
+                <label>New delivery day <input name="deliver_on" type="date" min="{{ today }}" value="{{ inv.deliver_on }}" required></label>
+                <button class="btn primary wide">Save</button>
+            </form>
+        </details>
+    </div>
+    {% endif %}
+</section>
+{% endif %}
+
 {% if inv.waiting %}
 <section class="card collect-banner no-print" id="collection">
     <div>
@@ -63,6 +88,10 @@
         <dt>Served by</dt><dd>{{ inv.created_by }}</dd>
         <dt>{{ 'Recipient' if inv.kind == 'FARM_USE' else 'Customer' }}</dt><dd>{{ inv.customer_name }}</dd>
         <dt>Phone</dt><dd>{{ inv.customer_phone or '—' }}</dd>
+        {% if inv.deliver_on %}
+        <dt>Delivery</dt><dd>{% if inv.delivered_at %}Delivered {{ inv.delivered_at[:10] }}{% if inv.delivered_by %} <span class="no-print muted">(marked by {{ inv.delivered_by }})</span>{% endif %}
+            {% elif inv.payment_status == 'Cancelled' %}Was to be delivered on {{ inv.deliver_on }}{% else %}To be delivered on {{ inv.deliver_on }}{% endif %}</dd>
+        {% endif %}
         {% if inv.collect_on %}
         <dt>Collection</dt><dd>{% if inv.collected_at %}Collected {{ inv.collected_at[:10] }}{% if inv.collected_by %} <span class="no-print muted">(marked by {{ inv.collected_by }})</span>{% endif %}
             {% elif inv.payment_status == 'Cancelled' %}Was to be collected on {{ inv.collect_on }}{% else %}To be collected on {{ inv.collect_on }}{% endif %}</dd>
@@ -71,14 +100,15 @@
 
     <div class="table-wrap">
     <table>
-        <thead><tr><th>Code</th><th>Item</th><th class="num">Qty</th><th class="num">Unit price</th><th class="num">Total</th></tr></thead>
+        <thead><tr><th>Code</th><th>Item</th><th class="num">Qty</th><th class="num">Unit price</th>{% if inv.discount %}<th class="num">Discount</th>{% endif %}<th class="num">Total</th></tr></thead>
         <tbody>
         {% for line in lines %}
             <tr>
                 <td>{{ line.item_code }}</td>
-                <td>{{ line.item_name }}</td>
+                <td>{{ sold_link(line.item_code, line.item_name) }}</td>
                 <td class="num">{{ line.qty }}</td>
                 <td class="num">{{ line.unit_price|money }}</td>
+                {% if inv.discount %}<td class="num">{{ ('− ' ~ (line.discount|money)) if line.discount else '' }}</td>{% endif %}
                 <td class="num">{{ line.line_total|money }}</td>
             </tr>
         {% endfor %}
@@ -91,6 +121,10 @@
     {% endif %}
     <dl class="totals">
         <dt>Payment status</dt><dd>{{ inv.payment_status }}</dd>
+        {% if inv.discount %}
+        <dt>Subtotal</dt><dd>{{ inv.subtotal|money }}</dd>
+        <dt>Discount</dt><dd>− {{ inv.discount|money }}</dd>
+        {% endif %}
         <dt>Grand total</dt><dd>{{ inv.total|money }}</dd>
         <dt>Amount paid</dt><dd>{{ inv.amount_paid|money }}</dd>
         {% set paid_with = paid_by|selectattr('direction', 'equalto', 'in')|selectattr('amount', 'gt', 0)|map(attribute='method')|reject('equalto', 'Not recorded')|unique|list %}

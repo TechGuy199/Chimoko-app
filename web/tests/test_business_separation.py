@@ -47,6 +47,8 @@ ENTRY_TABLES = {"assign_account_entry": "cashbook", "delete_account_entry": "cas
 # too, so the password-confirmed actions after it can still be reached with the same password.
 # Pages whose address also needs the customer's invoices (?invoice=...)
 QUERY_INVOICES = {"customer_delivery", "customer_delivery_pdf"}
+# Pages that find their records from the query alone: a delivery list (?invoice=... or ?day=...) and who bought a product (?code=...)
+QUERY_PAGES = {"delivery_list", "delivery_list_pdf", "item_sales", "item_sales_csv"}
 SKIP = {"static", "login", "logout", "setup", "pwa_manifest", "pwa_service_worker", "delete_my_login", "delete_my_business", "change_password"}
 # Confirmation phrases, so the reset pages really run (for Beta) instead of stopping at the confirmation
 PHRASES = {"reset_app": A.RESET_PHRASE, "clear_inventory": A.CLEAR_INVENTORY_PHRASE}
@@ -95,7 +97,7 @@ def form_fields():
 def value_for(name, alpha_ids):
     """A believable value for a form field. Anything that names a record gets one of Alpha's, which Beta must not reach."""
     today = datetime.date.today().isoformat()
-    if name in ("ids", "id") or name.endswith("_id") or name in ("first", "second", "keep", "remove", "target", "into", "merge_into"):
+    if name in ("ids", "id") or name.endswith("_id") or name in ("first", "second", "keep", "remove", "target", "into", "merge_into", "invoice"):
         return [str(i) for i in alpha_ids[:3]] if name == "ids" else str(alpha_ids[0])
     if "date" in name or name in ("planted_on", "ready_on", "paid_on", "day", "start", "end", "from", "to", "as_of", "work_date"):
         return today
@@ -166,6 +168,10 @@ class BusinessSeparation(unittest.TestCase):
                     VALUES (?, 'inventory_edit', 'X', ?, 5, 4, -1, 'Alpha secret note', ?)""", (biz, item["name"], stamp))
         plot = x.insert("INSERT INTO plots (business_id, department, name, notes, created_at) VALUES (?, 'Greenhouse', 'Alpha Block 7', 'Alpha secret note', ?)", (biz, stamp))
         x.insert("INSERT INTO plot_workers (business_id, plot_id, employee_id) VALUES (?, ?, ?)", (biz, plot, employee["id"]))
+        # A sale to deliver today (so the day's delivery list has Alpha's customers on it), with a discounted line
+        sale = x.one("SELECT id FROM invoices WHERE business_id=? AND kind='SALE' AND payment_status <> 'Cancelled' ORDER BY id LIMIT 1", (biz,))
+        x.execute("UPDATE invoices SET deliver_on=? WHERE id=?", (today, sale["id"]))
+        x.execute("UPDATE invoice_items SET discount=0.5 WHERE id=(SELECT MIN(id) FROM invoice_items WHERE invoice_id=?)", (sale["id"],))
         x.insert("""INSERT INTO activities (business_id, plot_id, plot_name, department, work_date, employee_id, worker_name, period, description, recorded_at)
                     VALUES (?, ?, 'Alpha Block 7', 'Greenhouse', ?, ?, ?, 'morning', 'Alpha secret note', ?)""", (biz, plot, today, employee["id"], employee["full_name"], stamp))
 
@@ -191,6 +197,8 @@ class BusinessSeparation(unittest.TestCase):
 
     def urls_for(self, rule):
         """The rule's address filled in with Alpha's records (or every valid word, for the backup and template downloads)."""
+        if rule.endpoint in QUERY_PAGES:
+            return self.query_urls(rule.endpoint)
         if not rule.arguments:
             return [rule.rule]
         values = {}
@@ -219,6 +227,25 @@ class BusinessSeparation(unittest.TestCase):
                 u["invoice"] = self.customer_invoices(u["customer_id"])
         with A.app.test_request_context():
             return [A.url_for(rule.endpoint, **u) for u in urls]
+
+    def query_urls(self, endpoint):
+        """A page that finds its records from the query, pointed at Alpha's: its sales, its delivery day, a product it has sold."""
+        x = db.Database()
+        try:
+            if endpoint.startswith("delivery_list"):
+                sales = [r["id"] for r in x.all(
+                    "SELECT id FROM invoices WHERE business_id=? AND kind='SALE' AND payment_status <> 'Cancelled' ORDER BY id LIMIT 5", (self.alpha_id,)
+                )]
+                day = x.one("SELECT deliver_on FROM invoices WHERE business_id=? AND deliver_on IS NOT NULL", (self.alpha_id,))["deliver_on"]
+                queries = [{"invoice": sales}, {"day": day}]
+            else:
+                code = x.one("SELECT item_code FROM invoice_items WHERE business_id=? AND COALESCE(item_code, '') <> '' ORDER BY id LIMIT 1", (self.alpha_id,))
+                self.assertIsNotNone(code, "Alpha has sold nothing with a code: add a sale so who bought it is tested")
+                queries = [{"code": code["item_code"]}]
+        finally:
+            x.close()
+        with A.app.test_request_context():
+            return [A.url_for(endpoint, **q) for q in queries]
 
     def customer_invoices(self, customer_id):
         x = db.Database()
@@ -249,7 +276,7 @@ class BusinessSeparation(unittest.TestCase):
         """Without this the other tests could pass for the wrong reason (Alpha's addresses not pointing at anything)."""
         failures = []
         for rule in self.rules("GET"):
-            if not any(a not in ("kind", "key", "table") for a in rule.arguments):
+            if not any(a not in ("kind", "key", "table") for a in rule.arguments) and rule.endpoint not in QUERY_PAGES:
                 continue
             for url in self.urls_for(rule):
                 status = self.alpha.get(url).status_code
@@ -258,6 +285,10 @@ class BusinessSeparation(unittest.TestCase):
                     failures.append(f"{url} -> {status}")
         self.assertEqual(failures, [], "Alpha could not open some of its own records, so those pages are not really being tested")
         self.assertTrue(set(self.leaks_in(self.alpha.get("/customers"))), "Alpha's names were not found on Alpha's own page")
+        # ...and the pages found from the query really show Alpha's records to Alpha, so Beta seeing none of them means something
+        for endpoint in ("delivery_list", "item_sales"):
+            for url in self.query_urls(endpoint):
+                self.assertTrue(self.leaks_in(self.alpha.get(url)), f"{url} showed Alpha none of its own records")
 
     def test_2_beta_sees_nothing_of_alpha(self):
         found = []

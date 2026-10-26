@@ -72,11 +72,45 @@
         }, { rootMargin: "0px 0px -80px 0px" }).observe(cartSection);
     }
 
-    function render() {
-        cartBody.replaceChildren();
+    // A discount is typed as an amount ("5") or a percentage ("10%"); what it takes off a line, or NaN when it cannot be right
+    function discountOf(item) {
+        const raw = String(item.discount || "").replace(/,/g, "").trim();
+        const gross = item.qty * item.price;
+        if (!raw) return 0;
+        let amount;
+        if (raw.endsWith("%")) {
+            const pct = Number(raw.slice(0, -1));
+            if (isNaN(pct) || pct < 0 || pct > 100) return NaN;
+            amount = gross * pct / 100;
+        } else {
+            amount = Number(raw);
+        }
+        amount = Math.round(amount * 100) / 100;
+        return isNaN(amount) || amount < 0 || amount > gross + 0.005 ? NaN : amount;
+    }
+
+    // The totals follow the cart without rebuilding it, so typing a discount never loses the cursor
+    function totals() {
         let total = 0;
         cart.forEach(function (item) {
+            const discount = discountOf(item);
+            const line = item.qty * item.price - (isNaN(discount) ? 0 : discount);
+            total += line;
+            if (item.totalCell) item.totalCell.textContent = money(line);
+            if (item.discountBox) {
+                item.discountBox.classList.toggle("invalid", isNaN(discount));
+                item.discountBox.setAttribute("aria-invalid", isNaN(discount) ? "true" : "false");
+            }
+        });
+        totalEl.textContent = money(total);
+        updateCartBar(total);
+    }
+
+    function render() {
+        cartBody.replaceChildren();
+        cart.forEach(function (item) {
             const tr = document.createElement("tr");
+            tr.className = "cart-line";
             const nameCell = cell(item.name);
             if (item.preorder) {
                 // A pre-order goes on the invoice as it was agreed: its quantity and price cannot be changed here
@@ -107,7 +141,8 @@
             }
             tr.appendChild(qtyCell);
 
-            tr.appendChild(cell(money(item.qty * item.price), "num"));
+            item.totalCell = cell("", "num");
+            tr.appendChild(item.totalCell);
 
             const remove = document.createElement("button");
             remove.type = "button";
@@ -122,13 +157,33 @@
             removeCell.className = "num";
             removeCell.appendChild(remove);
             tr.appendChild(removeCell);
-
             cartBody.appendChild(tr);
-            total += item.qty * item.price;
+
+            // A discount on this line, as an amount or a percentage, on a row of its own under it (a phone's name column is too
+            // narrow to hold it)
+            const discountRow = document.createElement("tr");
+            discountRow.className = "cart-discount-row";
+            const discountCell = document.createElement("td");
+            discountCell.colSpan = 4;
+            const discountLabel = document.createElement("label");
+            discountLabel.className = "cart-discount";
+            discountLabel.textContent = "Discount ";
+            const discountBox = document.createElement("input");
+            discountBox.inputMode = "decimal";
+            discountBox.placeholder = "0 or 10%";
+            discountBox.value = item.discount || "";
+            discountBox.addEventListener("input", function () {
+                item.discount = discountBox.value;
+                totals();
+            });
+            discountLabel.appendChild(discountBox);
+            discountCell.appendChild(discountLabel);
+            discountRow.appendChild(discountCell);
+            cartBody.appendChild(discountRow);
+            item.discountBox = discountBox;
         });
         cartEmpty.hidden = cart.size > 0;
-        totalEl.textContent = money(total);
-        updateCartBar(total);
+        totals();
     }
 
     function applyFilter() {
@@ -188,17 +243,26 @@
     status.addEventListener("change", updatePayment);
     updatePayment();
 
-    // Taken now, or collected on another day: the day is asked for (and sent) only for another day
+    // Taken now, collected on another day, or delivered: the day is asked for (and sent) only for the choice that needs it
     const collectRow = document.getElementById("collect-day-row");
     const collectHint = document.getElementById("collect-day-hint");
     const collectOn = document.getElementById("collect-on");
+    const deliverRow = document.getElementById("deliver-day-row");
+    const deliverHint = document.getElementById("deliver-day-hint");
+    const deliverOn = document.getElementById("deliver-on");
     const collection = Array.from(form.querySelectorAll('input[name="collection"]'));
     function updateCollection() {
-        const later = collection.some(function (radio) { return radio.checked && radio.value === "later"; });
+        const picked = (collection.find(function (radio) { return radio.checked; }) || {}).value;
+        const later = picked === "later";
+        const deliver = picked === "deliver";
         collectRow.hidden = !later;
         collectHint.hidden = !later;
         collectOn.disabled = !later;
         collectOn.required = later;
+        deliverRow.hidden = !deliver;
+        deliverHint.hidden = !deliver;
+        deliverOn.disabled = !deliver;
+        deliverOn.required = deliver;
     }
     collection.forEach(function (radio) { radio.addEventListener("change", updateCollection); });
 
@@ -232,8 +296,19 @@
             alert("Add at least one item to the cart first.");
             return;
         }
+        const wrong = Array.from(cart.values()).find(function (item) { return isNaN(discountOf(item)); });
+        if (wrong) {
+            e.preventDefault();
+            alert("The discount on " + wrong.name + " must be an amount up to " + money(wrong.qty * wrong.price) + ", or a percentage like 10%.");
+            if (wrong.discountBox) wrong.discountBox.focus();
+            return;
+        }
         const lines = [];
-        cart.forEach(function (item) { lines.push(item.preorder ? { preorder: item.preorder } : { id: item.id, qty: item.qty }); });
+        cart.forEach(function (item) {
+            const line = item.preorder ? { preorder: item.preorder } : { id: item.id, qty: item.qty };
+            if (item.discount) line.discount = item.discount;
+            lines.push(line);
+        });
         document.getElementById("cart-data").value = JSON.stringify(lines);
     });
 })();

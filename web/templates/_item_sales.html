@@ -1,0 +1,43 @@
+{# Who bought a product: in the panel tray.js opens over any page (in_tray), or inside item_sales.html as a page of its own #}
+<div class="item-sales">
+    {% if in_tray %}<h2 class="tray-title">{{ s.title }}</h2>{% endif %}
+    <p class="muted item-sales-where">
+        {% if s.code %}Code {{ s.code }}{% endif %}
+        {% if s.batch %} &middot; <a href="{{ url_for('planting_detail', planting_id=s.batch.id) }}">Planting record</a>{% endif %}
+        {% if s.item %} &middot; <a href="{{ url_for('item', item_id=s.item.id) }}">Inventory item</a>{% endif %}
+    </p>
+
+    {% if s.summary.lines %}
+    <div class="stats compact-stats">
+        <div class="stat"><span>Sold</span><strong>{{ '{:,}'.format(s.summary.units) }}</strong><small>on {{ s.summary.invoices }} invoice{{ 's' if s.summary.invoices != 1 }}</small></div>
+        <div class="stat"><span>Customers</span><strong>{{ s.summary.customers }}</strong><small>since {{ (s.summary.first or '')[:10] }}</small></div>
+        <div class="stat"><span>Sales</span><strong>{{ s.summary.value|money }}</strong><small>after discounts</small></div>
+        <div class="stat"><span>Discounts</span><strong>{{ s.summary.discount|money }}</strong><small>given in all</small></div>
+    </div>
+
+    <ul class="sales-list">
+        {% for r in s.rows %}
+        <li>
+            <div class="sale-top">
+                <strong>{% if s.customer_links and r.customer_id %}<a href="{{ url_for('customer_statement', customer_id=r.customer_id) }}">{{ r.customer_name }}</a>{% else %}{{ r.customer_name }}{% endif %}</strong>
+                {% if r.customer_phone %}<span class="muted">{{ r.customer_phone }}</span>{% endif %}
+                <span class="sale-total">{{ r.line_total|money }}</span>
+            </div>
+            <div class="sale-meta">
+                {{ r.created_at[:16] }} &middot; <a href="{{ url_for('invoice', invoice_id=r.invoice_id) }}">{{ r.invoice_no }}</a>
+                &middot; {{ '{:,}'.format(r.qty) }} &times; {{ r.unit_price|money }}
+                {% if r.discount %}&middot; <span class="ok">less {{ r.discount|money }} discount</span>{% endif %}
+                {% if r.payment_status != 'Paid' %}&middot; <span class="warn">{{ r.payment_status }}</span>{% endif %}
+            </div>
+        </li>
+        {% endfor %}
+    </ul>
+    {% if s.summary.lines > s.shown %}<p class="muted">The latest {{ s.shown }} of {{ '{:,}'.format(s.summary.lines) }} sales. The download has every one.</p>{% endif %}
+    <p class="toolbar item-sales-actions">
+        <a class="btn small" href="{{ csv_url }}">Download CSV</a>
+        {% if in_tray %}<a class="btn small" href="{{ url_for('item_sales', **({'code': s.code} if s.code else {'name': s.name})) }}">Open as a page</a>{% endif %}
+    </p>
+    {% else %}
+    <p class="muted center">Nobody has bought this yet.</p>
+    {% endif %}
+</div>

@@ -44,7 +44,7 @@
             <tbody>
             {% for it in items %}
                 <tr>
-                    <td>{{ it.name }} <small class="seed-note">{{ it.code }}</small></td>
+                    <td>{{ sold_link(it.code, it.name) }} <small class="seed-note">{{ it.code }}</small></td>
                     <td>{{ it.category }}</td>
                     <td>{{ it.department }}</td>
                     <td class="num">{{ it.purchases }}</td>
@@ -85,7 +85,7 @@
             {% for r in history %}
                 <tr>
                     <td>{{ r.purchase_date or '—' }}</td>
-                    <td>{{ r.name }} <small class="seed-note">{{ r.item_code }}</small></td>
+                    <td>{{ sold_link(r.item_code, r.name) }} <small class="seed-note">{{ r.item_code }}</small></td>
                     <td>{{ r.supplier_name or '—' }}</td>
                     <td>{{ r.invoice_no or '—' }}</td>
                     <td class="num">{{ r.quantity }}</td>

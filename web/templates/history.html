@@ -4,6 +4,8 @@
 <div class="page-head">
     <h1>{% if waiting %}Sales to be collected{% else %}Sales &amp; Invoices{% endif %}</h1>
     <div class="head-actions">
+        <button type="button" class="btn small" data-pick-start>Generate delivery list</button>
+        <a class="btn small" href="{{ url_for('deliveries') }}">Deliveries</a>
         {% if waiting %}<a class="btn" href="{{ url_for('history') }}">All sales &amp; invoices</a>
         {% else %}<a class="btn {{ 'primary' if waiting_count }}" href="{{ url_for('history', collect='waiting') }}">To be collected ({{ waiting_count }})</a>{% endif %}
     </div>
@@ -39,15 +41,24 @@
     <div class="stat"><span>Still owed</span><strong class="{{ 'warn' if totals.owed > 0.005 }}">{{ totals.owed|money }}</strong><small>on those sales</small></div>
 </div>
 
+{# Generate delivery list: a tick box on every sale, and a bar to make the list from the ticked ones #}
+<form method="get" action="{{ url_for('delivery_list') }}" id="delivery-pick" class="{{ 'picking' if picking }}">
+<div class="pick-bar no-print">
+    <span><strong data-pick-count>0</strong> ticked for the delivery list</span>
+    <button type="button" class="btn small" data-pick-all>Tick all shown</button>
+    <button class="btn small primary">Make delivery list</button>
+    <button type="button" class="btn small ghost" data-pick-stop>Cancel</button>
+</div>
 <section class="card">
     <div class="table-wrap">
         <table>
             <thead>
-                <tr><th>Invoice no</th><th>Date / time</th><th>Customer</th><th>Phone</th><th>Type</th><th class="num">Total</th><th class="num">Paid</th><th class="num">Balance</th><th>Status</th><th>Collection</th><th></th></tr>
+                <tr><th class="pick-cell"><span class="sr-only">Tick</span></th><th>Invoice no</th><th>Date / time</th><th>Customer</th><th>Phone</th><th>Type</th><th class="num">Total</th><th class="num">Paid</th><th class="num">Balance</th><th>Status</th><th>Collection / delivery</th><th></th></tr>
             </thead>
             <tbody>
             {% for i in invoices %}
                 <tr>
+                    <td class="pick-cell">{% if i.kind == 'SALE' and i.payment_status != 'Cancelled' %}<input type="checkbox" name="invoice" value="{{ i.id }}" aria-label="Put {{ i.invoice_no }} on the delivery list">{% endif %}</td>
                     <td><a href="{{ url_for('invoice', invoice_id=i.id) }}">{{ i.invoice_no }}</a></td>
                     <td>{{ i.created_at }}</td>
                     <td>{{ i.customer_name }}</td>
@@ -57,18 +68,21 @@
                     <td class="num">{{ i.amount_paid|money }}</td>
                     <td class="num {{ 'warn' if i.balance_due > 0 }}">{{ i.balance_due|money }}</td>
                     <td>{% if i.payment_status == 'Cancelled' %}<span class="muted">Cancelled</span>{% else %}{{ i.payment_status }}{% endif %}</td>
-                    <td>{% if i.collect_on and i.payment_status != 'Cancelled' %}{% if i.collected_at %}<span class="ok">Collected</span>
-                        {% else %}<strong class="{{ 'warn' if i.collect_on < today else 'gold' }}">{{ i.collect_on }}</strong>{% endif %}{% endif %}</td>
+                    <td>{% if i.payment_status != 'Cancelled' %}
+                        {% if i.deliver_on %}{% if i.delivered_at %}<span class="ok">Delivered</span>{% else %}<a href="{{ url_for('delivery_list', day=i.deliver_on) }}"><strong class="{{ 'warn' if i.deliver_on < today else 'gold' }}">Deliver {{ i.deliver_on }}</strong></a>{% endif %}{% endif %}
+                        {% if i.collect_on %}{% if i.collected_at %}<span class="ok">Collected</span>{% else %}<strong class="{{ 'warn' if i.collect_on < today else 'gold' }}">{{ i.collect_on }}</strong>{% endif %}{% endif %}
+                        {% endif %}</td>
                     <td class="num"><a class="btn small" href="{{ url_for('invoice', invoice_id=i.id) }}">View</a></td>
                 </tr>
             {% else %}
-                <tr><td colspan="11" class="muted center">{% if waiting %}No sale is waiting to be collected{% else %}No transactions found{% endif %}{% if q or period != 'all' %} for this search and date range{% endif %}.</td></tr>
+                <tr><td colspan="12" class="muted center">{% if waiting %}No sale is waiting to be collected{% else %}No transactions found{% endif %}{% if q or period != 'all' %} for this search and date range{% endif %}.</td></tr>
             {% endfor %}
             </tbody>
         </table>
     </div>
     {% if totals.n > invoices|length %}<p class="muted">Showing the latest {{ invoices|length }} of {{ '{:,}'.format(totals.n) }}. Narrow the dates, or use Export CSV for all of them.</p>{% endif %}
 </section>
+</form>
 {% endblock %}
 {% block scripts %}
 <script>
@@ -84,6 +98,35 @@
             if (isCustom) custom.querySelector("input").focus();
             else form.requestSubmit();
         });
+    })();
+
+    // Generate delivery list: tick boxes appear on the sales, the bar counts them, and the ticked ones make the list
+    (function () {
+        const pick = document.getElementById("delivery-pick");
+        const count = pick.querySelector("[data-pick-count]");
+        const boxes = Array.from(pick.querySelectorAll('input[name="invoice"]'));
+        function update() { count.textContent = boxes.filter(function (box) { return box.checked; }).length; }
+        document.querySelector("[data-pick-start]").addEventListener("click", function () {
+            pick.classList.add("picking");
+            pick.scrollIntoView({ behavior: "instant", block: "start" });
+        });
+        pick.querySelector("[data-pick-stop]").addEventListener("click", function () {
+            pick.classList.remove("picking");
+            boxes.forEach(function (box) { box.checked = false; });
+            update();
+        });
+        pick.querySelector("[data-pick-all]").addEventListener("click", function () {
+            boxes.forEach(function (box) { box.checked = true; });
+            update();
+        });
+        pick.addEventListener("change", update);
+        pick.addEventListener("submit", function (e) {
+            if (!boxes.some(function (box) { return box.checked; })) {
+                e.preventDefault();
+                alert("Tick at least one invoice for the delivery list.");
+            }
+        });
+        update();
     })();
 </script>
 {% endblock %}

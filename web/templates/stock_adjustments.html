@@ -25,7 +25,7 @@
                 <tr>
                     <td>{{ r.created_at }}</td>
                     <td>{{ 'Removed from POS' if r.kind == 'pos_removal' else 'Inventory correction' }}</td>
-                    <td>{{ r.item_name }}<br><small class="muted">{{ r.item_code }}{% if r.department %} &middot; {{ r.department }}{% endif %}</small></td>
+                    <td>{{ sold_link(r.item_code, r.item_name) }}<br><small class="muted">{{ r.item_code }}{% if r.department %} &middot; {{ r.department }}{% endif %}</small></td>
                     <td class="num">{{ '{:,}'.format(r.quantity_before) }}</td>
                     <td class="num">{{ '{:,}'.format(r.quantity_after) }}</td>
                     <td class="num {{ 'warn' if r.delta < 0 else 'ok' }}">{{ '{:+,}'.format(r.delta) }}</td>

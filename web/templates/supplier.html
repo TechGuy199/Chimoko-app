@@ -190,7 +190,7 @@
                 <tr>
                     <td>{{ p.purchase_date or '—' }}</td>
                     <td>{{ p.invoice_no or '—' }}</td>
-                    <td>{{ p.name }}{% if not p.in_inventory %} <small class="muted">expense</small>{% endif %}</td>
+                    <td>{{ sold_link(p.item_code, p.name) if p.in_inventory else p.name }}{% if not p.in_inventory %} <small class="muted">expense</small>{% endif %}</td>
                     <td class="num">{{ p.quantity }}</td>
                     <td class="num">{{ p.unit_cost|money }}</td>
                     <td class="num">{{ p.total_cost|money }}</td>

@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}Who bought {{ s.title }} — {% endblock %}
+{% block content %}
+<div class="page-head">
+    <div>
+        {% if s.batch %}<a class="back" href="{{ url_for('planting_detail', planting_id=s.batch.id) }}">&larr; Planting record</a>
+        {% else %}<a class="back" href="{{ url_for('history') }}">&larr; Sales &amp; Invoices</a>{% endif %}
+        <h1>Who bought {{ s.title }}</h1>
+        <p class="muted">Every sale of it, newest first: the customer, their phone number, how many, the price, any discount and what they paid for it.
+            Cancelled sales are left out.</p>
+    </div>
+</div>
+<section class="card">
+    {% include "_item_sales.html" %}
+</section>
+{% endblock %}

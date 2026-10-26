@@ -32,7 +32,8 @@
 {% set nav = [
     ('Sell', [
         ('Sales & POS', 'pos', ['pos'], false),
-        ('Sales & Invoices', 'history', ['history', 'invoice'], false),
+        ('Sales & Invoices', 'history', ['history', 'invoice', 'item_sales'], false),
+        ('Deliveries', 'deliveries', ['deliveries', 'delivery_list'], false),
         ('Customers', 'customers', ['customers', 'customer_statement', 'customer_duplicates'], true),
     ]),
     ('Stock', [
@@ -111,7 +112,7 @@
 {# Phones only: the pages used most, one tap away at the bottom of the screen. More opens the full menu as a sheet. #}
 {% set tabs = [
     ('Sell', 'pos', ['pos'], 'M3 4h2l2.4 10.2a1 1 0 0 0 1 .8h8.9a1 1 0 0 0 1-.8L20 8H6.2M9 20a1 1 0 1 0 0-2 1 1 0 0 0 0 2Zm9 0a1 1 0 1 0 0-2 1 1 0 0 0 0 2Z'),
-    ('Sales', 'history', ['history', 'invoice'], 'M7 3h10a1 1 0 0 1 1 1v17l-3-2-3 2-3-2-3 2V4a1 1 0 0 1 1-1Zm2 5h6m-6 4h6m-6 4h3'),
+    ('Sales', 'history', ['history', 'invoice', 'item_sales'], 'M7 3h10a1 1 0 0 1 1 1v17l-3-2-3 2-3-2-3 2V4a1 1 0 0 1 1-1Zm2 5h6m-6 4h6m-6 4h3'),
     ('Stock', 'inventory', ['inventory', 'item', 'inventory_new', 'categories_page'], 'M4 7.5 12 3l8 4.5v9L12 21l-8-4.5v-9Zm0 0 8 4.5m0 0 8-4.5M12 12v9'),
     ('Reports', 'reports', ['reports', 'report_department'], 'M4 20h16M7 16v-5m5 5V7m5 9v-3'),
 ] %}
@@ -186,6 +187,7 @@
    scripts inside #page-main and #page-scripts on every page change, so it is loaded once, here, outside them. #}
 <script src="{{ asset('nav.js') }}"></script>
 <script src="{{ asset('dialog.js') }}"></script>
+<script src="{{ asset('tray.js') }}"></script>
 <div id="page-scripts">{% block scripts %}{% endblock %}</div>
 <script>
     // Lets the browser install this as an app (Windows, Android, desktop Chrome/Edge). Safe to skip silently

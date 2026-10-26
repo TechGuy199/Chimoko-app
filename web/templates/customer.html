@@ -135,7 +135,7 @@
             <thead><tr><th>Code</th><th>Product</th><th class="num">Quantity</th><th class="num">Value</th><th>Last bought</th></tr></thead>
             <tbody>
             {% for p in products %}
-                <tr><td>{{ p.code or '—' }}</td><td>{{ p.name }}</td><td class="num">{{ p.qty }}</td><td class="num">{{ p.value|money }}</td><td>{{ p.last }}</td></tr>
+                <tr><td>{{ p.code or '—' }}</td><td>{{ sold_link(p.code, p.name) }}</td><td class="num">{{ p.qty }}</td><td class="num">{{ p.value|money }}</td><td>{{ p.last }}</td></tr>
             {% else %}
                 <tr><td colspan="5" class="muted center">Nothing yet.</td></tr>
             {% endfor %}
@@ -160,7 +160,7 @@
                 <thead><tr><th>Code</th><th>Item</th><th class="num">Qty</th><th class="num">Unit price</th><th class="num">Total</th></tr></thead>
                 <tbody>
                 {% for line in inv.lines %}
-                    <tr><td>{{ line.item_code or '—' }}</td><td>{{ line.item_name }}</td><td class="num">{{ line.qty }}</td><td class="num">{{ line.unit_price|money }}</td><td class="num">{{ line.line_total|money }}</td></tr>
+                    <tr><td>{{ line.item_code or '—' }}</td><td>{{ sold_link(line.item_code, line.item_name) }}{% if line.discount %} <small class="ok">less {{ line.discount|money }} discount</small>{% endif %}</td><td class="num">{{ line.qty }}</td><td class="num">{{ line.unit_price|money }}</td><td class="num">{{ line.line_total|money }}</td></tr>
                 {% endfor %}
                     <tr class="total-row"><td colspan="4">Invoice total</td><td class="num">{{ inv.total|money }}</td></tr>
                     <tr><td colspan="4">Paid so far</td><td class="num">{{ inv.amount_paid|money }}</td></tr>
