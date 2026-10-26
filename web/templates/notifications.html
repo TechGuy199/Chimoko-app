@@ -17,7 +17,7 @@
             {% for n in rows %}
                 <tr class="{{ 'unread' if not n.read_at }}">
                     <td>{{ n.created_at }}</td>
-                    <td><strong>{{ n.title }}</strong></td>
+                    <td><a href="{{ url_for('open_notification', notification_id=n.id) }}"><strong>{{ n.title }}</strong></a></td>
                     <td class="wrap">{{ n.body }}</td>
                     {% if user.role == 'admin' %}
                     <td class="wrap">

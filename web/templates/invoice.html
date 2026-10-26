@@ -69,6 +69,7 @@
         {% endif %}
     </dl>
 
+    <div class="table-wrap">
     <table>
         <thead><tr><th>Code</th><th>Item</th><th class="num">Qty</th><th class="num">Unit price</th><th class="num">Total</th></tr></thead>
         <tbody>
@@ -83,6 +84,7 @@
         {% endfor %}
         </tbody>
     </table>
+    </div>
 
     {% if inv.payment_status == 'Cancelled' %}
     <p class="flash notice">This invoice was cancelled by {{ inv.cancelled_by }} on {{ inv.cancelled_at }}. Reason: {{ inv.cancel_reason }}</p>

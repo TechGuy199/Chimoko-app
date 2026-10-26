@@ -26,7 +26,7 @@
 <tr>
     <td>{{ i.item_code }}</td>
     <td>
-        {{ i.name }}
+        <a href="{{ url_for('item', item_id=i.id) }}">{{ i.name }}</a>
         {% if i.seeds_per_pack %}<small class="seed-note">{{ '{:,}'.format(i.seeds_per_pack) }} seeds per pack &middot; {{ '{:,}'.format(i.seeds_per_pack * i.quantity) }} seeds in stock</small>{% endif %}
     </td>
     {% if show_category %}<td>{{ i.category or '—' }}</td>{% endif %}

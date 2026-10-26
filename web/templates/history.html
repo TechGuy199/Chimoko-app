@@ -48,7 +48,7 @@
             <tbody>
             {% for i in invoices %}
                 <tr>
-                    <td>{{ i.invoice_no }}</td>
+                    <td><a href="{{ url_for('invoice', invoice_id=i.id) }}">{{ i.invoice_no }}</a></td>
                     <td>{{ i.created_at }}</td>
                     <td>{{ i.customer_name }}</td>
                     <td>{{ i.customer_phone or '—' }}</td>

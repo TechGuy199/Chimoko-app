@@ -29,7 +29,7 @@
                         <td>{% if user.role == 'admin' and r.supplier_id %}<a href="{{ url_for('supplier_statement', supplier_id=r.supplier_id) }}">{{ r.supplier_name }}</a>{% else %}{{ r.supplier_name or '—' }}{% endif %}</td>
                         <td>{{ r.invoice_no or '—' }}</td>
                         <td>{{ r.item_code or '—' }}</td>
-                        <td>{{ r.name }}</td>
+                        <td>{% if user.role == 'admin' %}<a href="{{ url_for('procurement', purchase_id=r.id) }}">{{ r.name }}</a>{% else %}{{ r.name }}{% endif %}</td>
                         <td>{{ r.category }}</td>
                         <td>{{ r.department }}</td>
                         <td>{% if r.in_inventory %}<span class="ok">Yes</span>{% else %}<span class="muted">No</span>{% endif %}</td>

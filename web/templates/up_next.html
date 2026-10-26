@@ -25,23 +25,23 @@
 <section class="card">
     <h2>Batches</h2>
     <div class="table-wrap">
-        <table>
+        <table class="fit-rows batch-rows">
             <thead>
                 <tr><th>Batch</th><th>Ready</th><th>On the POS</th><th class="num">Seedlings</th><th class="num">Pre-ordered</th><th class="num">Sold</th><th class="num">Available</th><th class="num">Price</th><th>Pre-order</th></tr>
             </thead>
             <tbody>
             {% for b in batches %}
                 <tr id="batch-{{ b.id }}">
-                    <td><a href="{{ url_for('planting_detail', planting_id=b.id) }}">{{ b.label }}</a></td>
-                    <td>{{ b.actual_ready_on or b.ready_on }}<br>
+                    <td class="c-title"><a href="{{ url_for('planting_detail', planting_id=b.id) }}">{{ b.label }}</a></td>
+                    <td class="c-ready">{{ b.actual_ready_on or b.ready_on }}<br>
                         <small class="muted">{% if b.stage == 'ready' %}ready{% elif b.stage == 'due' %}due now{% else %}in {{ b.days }} day{{ 's' if b.days != 1 }}{% endif %}</small></td>
-                    <td>{% if b.released %}<span class="ok">Yes</span>{% else %}from {{ b.goes_on_pos }}{% endif %}</td>
-                    <td class="num">{{ '{:,}'.format(b.seedlings) }}</td>
-                    <td class="num">{{ b.pending }}</td>
-                    <td class="num">{{ b.sold }}</td>
-                    <td class="num"><strong>{{ b.available }}</strong></td>
-                    <td class="num">{{ b.price|money }}</td>
-                    <td>
+                    <td class="c-pos">{% if b.released %}<span class="ok">Yes</span>{% else %}from {{ b.goes_on_pos }}{% endif %}</td>
+                    <td class="num c-seedlings">{{ '{:,}'.format(b.seedlings) }}</td>
+                    <td class="num c-pending">{{ b.pending }}</td>
+                    <td class="num c-sold">{{ b.sold }}</td>
+                    <td class="num c-available"><strong>{{ b.available }}</strong></td>
+                    <td class="num c-price">{{ b.price|money }}</td>
+                    <td class="c-actions">
                         {% if b.available > 0 and can('sell') %}
                         {% set earliest = [today, b.actual_ready_on or b.ready_on or today]|max %}
                         <details class="inline-details">
@@ -105,20 +105,20 @@
             {% endif %}
         </div>
         <div class="table-wrap">
-            <table>
+            <table class="fit-rows order-rows">
                 <thead><tr><th>Batch</th><th>Ready</th><th>Collects</th><th class="num">Qty</th><th class="num">Total</th><th>Placed</th><th></th></tr></thead>
                 <tbody>
                 {% for o in g.orders %}
                     <tr id="preorder-{{ o.id }}">
-                        <td><a href="{{ url_for('planting_detail', planting_id=o.planting_id) }}">{{ o.label }}</a></td>
-                        <td>{{ o.ready_on or '—' }}<br>
+                        <td class="c-title"><a href="{{ url_for('planting_detail', planting_id=o.planting_id) }}">{{ o.label }}</a></td>
+                        <td class="c-ready">{{ o.ready_on or '—' }}<br>
                             <small class="{{ 'ok' if o.is_ready else 'muted' }}">{% if o.is_ready %}Ready to collect{% elif o.days is not none %}in {{ o.days }} day{{ 's' if o.days != 1 }}{% endif %}</small></td>
-                        <td>{% if o.collect_on %}<strong class="{{ 'warn' if o.collect_on < today else 'gold' if o.collect_on <= tomorrow }}">{{ o.collect_on }}</strong>
+                        <td class="c-collects">{% if o.collect_on %}<strong class="{{ 'warn' if o.collect_on < today else 'gold' if o.collect_on <= tomorrow }}">{{ o.collect_on }}</strong>
                                 <br><small class="muted">{{ o.collect_when }}</small>{% else %}<span class="muted">Not set</span>{% endif %}</td>
-                        <td class="num">{{ o.qty }}</td>
-                        <td class="num">{{ o.total|money }}</td>
-                        <td>{{ o.created_at }}<br><small class="muted">by {{ o.created_by }}</small></td>
-                        <td class="num actions">
+                        <td class="num c-qty">{{ o.qty }}</td>
+                        <td class="num c-total">{{ o.total|money }}</td>
+                        <td class="c-placed">{{ o.created_at }}<br><small class="muted">by {{ o.created_by }}</small></td>
+                        <td class="num actions c-actions">
                             {% if can('sell') %}
                             <a class="btn success small" href="{{ url_for('pos', preorder=o.id) }}">Generate invoice</a>
                             <details class="inline-details">

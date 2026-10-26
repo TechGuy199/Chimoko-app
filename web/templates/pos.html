@@ -1,6 +1,8 @@
 {% extends "base.html" %}
 {% block title %}Sales &amp; POS — {% endblock %}
 {% block content %}
+{# On a phone the selling comes first (styles.css): search, products and cart, then the figures and tiles #}
+<div class="pos-layout">
 <div class="stats">
     <div class="stat"><span>Listed POS items</span><strong class="accent">{{ stats.listed }}</strong></div>
     <div class="stat"><span>Low stock (&lt;{{ user.low_stock_threshold }})</span><strong class="warn">{{ stats.low }}</strong></div>
@@ -58,12 +60,12 @@
                 <tbody>
                 {% for p in products %}
                     <tr data-id="{{ p.id }}" data-code="{{ p.item_code }}" data-name="{{ p.name }}" data-dept="{{ p.department }}" data-stock="{{ p.quantity }}" data-price="{{ p.price }}">
-                        <td>{{ p.item_code }}</td>
-                        <td>{{ p.name }}</td>
-                        <td class="nowrap">{{ p.date_planted or '—' }}</td>
-                        <td>{{ p.department }}</td>
-                        <td class="num">{{ p.quantity }}</td>
-                        <td class="num">{{ p.price|money }}</td>
+                        <td class="c-code">{{ p.item_code }}</td>
+                        <td class="c-name">{{ p.name }}</td>
+                        <td class="nowrap c-planted {{ 'none' if not p.date_planted }}">{{ p.date_planted or '—' }}</td>
+                        <td class="c-dept">{{ p.department }}</td>
+                        <td class="num c-stock">{{ p.quantity }}</td>
+                        <td class="num c-price">{{ p.price|money }}</td>
                         <td class="num actions">
                             <button type="button" class="btn primary small">Add</button>
                             {% if can('transfer') %}
@@ -94,7 +96,7 @@
         </div>
     </section>
 
-    <section class="card cart">
+    <section class="card cart" id="cart-section">
         <h2>Active Invoice Cart</h2>
         <form id="checkout" method="post" action="{{ url_for('checkout') }}" data-currency="{{ user.currency }}">
             {{ csrf_field() }}
@@ -143,5 +145,12 @@
         </form>
     </section>
 </div>
+</div>
+{# Shown while the cart has something in it and is off screen: how much is in it, and a tap to go to it #}
+<a class="cart-bar no-print" id="cart-bar" href="#cart-section" hidden>
+    <span class="cart-bar-count" id="cart-bar-count"></span>
+    <strong id="cart-bar-total"></strong>
+    <span class="cart-bar-go">View cart &rsaquo;</span>
+</a>
 {% endblock %}
 {% block scripts %}<script src="{{ asset('payment_method.js') }}"></script><script src="{{ asset('pos.js') }}"></script>{% endblock %}

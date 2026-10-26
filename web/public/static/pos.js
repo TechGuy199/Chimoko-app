@@ -34,6 +34,42 @@
         item.qty += 1;
         cart.set(id, item);
         render();
+        // Something to see where the tap was, since the cart itself may be far down the page (on a phone)
+        row.classList.remove("added");
+        void row.offsetWidth;
+        row.classList.add("added");
+        cartBar.classList.remove("bump");
+        void cartBar.offsetWidth;
+        cartBar.classList.add("bump");
+    }
+
+    // The cart bar: while the cart has something in it and is off screen, how many items and the total, and a tap to go there
+    const cartBar = document.getElementById("cart-bar");
+    const cartSection = document.getElementById("cart-section");
+    // Out of the page's main area, whose entrance animation would otherwise pin it to the page instead of the screen (a page
+    // change replaces the whole body, so it never outlives the POS)
+    document.body.appendChild(cartBar);
+    // Straight to the cart (a long list is no place for a slow scroll), and a glow to show where it landed
+    cartBar.addEventListener("click", function (e) {
+        e.preventDefault();
+        cartSection.scrollIntoView({ behavior: "instant", block: "start" });
+        cartSection.classList.remove("arrived");
+        void cartSection.offsetWidth;
+        cartSection.classList.add("arrived");
+    });
+    let cartInView = false;
+    function updateCartBar(total) {
+        let items = 0;
+        cart.forEach(function (item) { items += item.qty; });
+        document.getElementById("cart-bar-count").textContent = items + (items === 1 ? " item" : " items");
+        document.getElementById("cart-bar-total").textContent = money(total);
+        cartBar.hidden = cart.size === 0 || cartInView;
+    }
+    if ("IntersectionObserver" in window) {
+        new IntersectionObserver(function (entries) {
+            cartInView = entries[0].isIntersecting;
+            cartBar.hidden = cart.size === 0 || cartInView;
+        }, { rootMargin: "0px 0px -80px 0px" }).observe(cartSection);
     }
 
     function render() {
@@ -92,6 +128,7 @@
         });
         cartEmpty.hidden = cart.size > 0;
         totalEl.textContent = money(total);
+        updateCartBar(total);
     }
 
     function applyFilter() {
