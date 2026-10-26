@@ -461,6 +461,17 @@ a.rank-name { color: var(--text); }
 a.rank-name:hover { color: var(--accent); }
 .rank-track i.out { background: var(--series-2); }
 
+/* Planting records filters, pre-orders by customer */
+.planting-filters .date-range input { width: auto; margin: 0; }
+.preorder-group { margin-top: 14px; padding: 12px 14px; border: 1px solid var(--line-strong); border-radius: var(--radius-small); }
+.group-head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px 16px; align-items: flex-start; margin-bottom: 8px; }
+.group-head form { margin: 0; }
+.remind-form { margin: 0; }
+.remind-form input[type="number"] { width: 70px; margin: 0 6px; display: inline-block; }
+.collect-picks { margin: 10px 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius-small); }
+.collect-picks legend { padding: 0 6px; color: var(--text-muted); font-size: 12px; }
+.collect-total { margin: 8px 0 0; text-align: right; }
+
 /* Daily activities */
 .day-picker input[type="date"] { width: auto; margin: 0; }
 .plot-tile .tile-badge.done { color: var(--ok-text); }

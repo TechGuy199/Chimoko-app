@@ -155,7 +155,8 @@ def load_user_and_check_csrf():
         g.user = get_db().one(
             """SELECT u.id, u.business_id, u.username, u.role, u.can_sell, u.can_procure, u.can_transfer, u.can_delete, u.theme, u.glass,
                       b.name AS business_name, b.subtitle, b.contact, b.currency, b.low_stock_threshold,
-                      b.alert_phone, b.alert_low_stock, b.alert_permission, b.backup_hour, b.last_backup_at, b.last_backup_by, b.demo_expires_at
+                      b.alert_phone, b.alert_low_stock, b.alert_permission, b.alert_preorders, b.preorder_remind_days,
+                      b.backup_hour, b.last_backup_at, b.last_backup_by, b.demo_expires_at
                FROM users u JOIN businesses b ON b.id = u.business_id WHERE u.id=?""",
             (uid,),
         )
@@ -2944,13 +2945,15 @@ def delete_payslip(payslip_id):
 #                                is a single {{1}} placeholder), optional WHATSAPP_TEMPLATE_LANG and WHATSAPP_API_VERSION
 #   WHATSAPP_PROVIDER=callmebot  WHATSAPP_CALLMEBOT_KEY (the key CallMeBot issued to the alert phone number)
 # Until one is configured, alerts still appear in the app and the WhatsApp copy is recorded as skipped.
-ALERT_KINDS = (("low_stock", "Low stock"), ("permission", "Requests for admin permission"))
+ALERT_KINDS = (("low_stock", "Low stock"), ("permission", "Requests for admin permission"), ("preorders", "Pre-orders almost due"))
 ITEM_ACTIONS = (("procure", "edit this item's details"), ("transfer", "transfer or use this item's stock"), ("delete", "delete this item"))
 GRANT_MINUTES = 60
 # An operator's request to delete one invoice travels through the same request/approve/spend-once flow as the item actions
 DELETE_INVOICE = "delete_invoice"
 COLLECT_PREORDER = "collect_preorder"
-REQUEST_LABELS = {**dict(ITEM_ACTIONS), DELETE_INVOICE: "delete this invoice", COLLECT_PREORDER: "collect a pre-order and record it as a sale"}
+COLLECT_GROUP = "collect_preorders"   # a customer's pre-orders collected together on one invoice
+REQUEST_LABELS = {**dict(ITEM_ACTIONS), DELETE_INVOICE: "delete this invoice", COLLECT_PREORDER: "collect a pre-order and record it as a sale",
+                  COLLECT_GROUP: "collect a customer's pre-orders and record them as one sale"}
 WHATSAPP_TIMEOUT = 6
 
 
@@ -3079,6 +3082,7 @@ def my_notifications_clause():
 @app.get("/notifications/poll")
 @need(None)
 def notifications_poll():
+    remind_preorders_due(get_db(), g.user["business_id"])
     where, params = my_notifications_clause()
     rows = get_db().all(
         f"SELECT id, kind, title, body, created_at FROM notifications WHERE {where} AND read_at IS NULL ORDER BY id DESC LIMIT 20", params
@@ -3128,8 +3132,9 @@ def save_alerts():
         flash("Enter the WhatsApp number with its country code, for example +260 972 047 233.", "error")
         return redirect(url_for("settings"))
     db.execute(
-        "UPDATE businesses SET alert_phone=?, alert_low_stock=?, alert_permission=? WHERE id=?",
-        (phone, 1 if request.form.get("alert_low_stock") else 0, 1 if request.form.get("alert_permission") else 0, g.user["business_id"]),
+        "UPDATE businesses SET alert_phone=?, alert_low_stock=?, alert_permission=?, alert_preorders=? WHERE id=?",
+        (phone, 1 if request.form.get("alert_low_stock") else 0, 1 if request.form.get("alert_permission") else 0,
+         1 if request.form.get("alert_preorders") else 0, g.user["business_id"]),
     )
     db.commit()
     flash("Alert settings saved.", "ok")
@@ -3256,8 +3261,8 @@ def decide_request(request_id):
     what = REQUEST_LABELS[row["action"]]
     if row["action"] == DELETE_INVOICE:
         target = url_for("invoice", invoice_id=row["item_id"])
-    elif row["action"] == COLLECT_PREORDER:
-        target = url_for("up_next")
+    elif row["action"] in (COLLECT_PREORDER, COLLECT_GROUP):
+        target = url_for("up_next") + "#preorders"
     else:
         target = url_for("item", item_id=row["item_id"])
     if approve:
@@ -5945,7 +5950,25 @@ def seed_code_for(name):
 def planting_list():
     db, biz = get_db(), g.user["business_id"]
     release_plantings(db, biz)
-    rows = with_figures(db, biz, db.all("SELECT * FROM plantings WHERE business_id=? ORDER BY ready_on DESC, id DESC LIMIT 500", (biz,)))
+    f = planting_filters(db, biz)
+    where, params = "business_id=?", [biz]
+    for word in norm(f["q"]).split():
+        like = f"%{word}%"
+        where += """ AND (LOWER(name) LIKE ? OR LOWER(seed_name) LIKE ? OR LOWER(seed_code) LIKE ? OR LOWER(COALESCE(batch_no, '')) LIKE ?
+                          OR LOWER(COALESCE(pos_code, '')) LIKE ? OR LOWER(COALESCE(notes, '')) LIKE ? OR LOWER(COALESCE(department, '')) LIKE ?)"""
+        params += [like] * 7
+    # "Ready" is the day it was marked ready, or the day it is expected to be until then
+    for column, low, high in (("planted_on", "planted_from", "planted_to"), ("COALESCE(actual_ready_on, ready_on)", "ready_from", "ready_to")):
+        if f[low]:
+            where += f" AND {column} >= ?"
+            params.append(f[low])
+        if f[high]:
+            where += f" AND {column} <= ?"
+            params.append(f[high])
+    if f["department"]:
+        where += " AND department=?"
+        params.append(f["department"])
+    rows = with_figures(db, biz, db.all(f"SELECT * FROM plantings WHERE {where} ORDER BY ready_on DESC, id DESC LIMIT 500", params))
     show = request.args.get("show", "all")
     counts = {
         "all": len(rows), "growing": sum(1 for r in rows if r["stage"] in ("growing", "due")), "ready": sum(1 for r in rows if r["stage"] == "ready"),
@@ -5959,7 +5982,24 @@ def planting_list():
         rows = [r for r in rows if r["stage"] == "record"]
     else:
         show = "all"
-    return render_template("plantings.html", rows=rows, show=show, counts=counts, editable=can_plant())
+    keep = {key: value for key, value in f.items() if value and key != "filtered"}
+    return render_template(
+        "plantings.html", rows=rows, show=show, counts=counts, editable=can_plant(), f=f, keep=keep, departments=department_names(db, biz),
+        tab=lambda name: url_for("planting_list", **({"show": name} if name != "all" else {}), **keep),
+    )
+
+
+def planting_filters(db, biz):
+    """The search and date filters on Planting Records. A range typed back to front is turned round."""
+    f = {"q": " ".join(request.args.get("q", "").split())[:100]}
+    for low, high in (("planted_from", "planted_to"), ("ready_from", "ready_to")):
+        f[low] = day_or_none(request.args.get(low, "")) if request.args.get(low) else None
+        f[high] = day_or_none(request.args.get(high, "")) if request.args.get(high) else None
+        if f[low] and f[high] and f[high] < f[low]:
+            f[low], f[high] = f[high], f[low]
+    f["department"] = request.args.get("department", "") if request.args.get("department", "") in department_names(db, biz) else ""
+    f["filtered"] = any(f[key] for key in ("q", "planted_from", "planted_to", "ready_from", "ready_to", "department"))
+    return f
 
 
 @app.get("/planting/new")
@@ -6331,13 +6371,257 @@ def up_next():
             ORDER BY CASE WHEN po.status='pending' THEN 0 ELSE 1 END, po.id DESC LIMIT 200""",
         params,
     )
+    by_planting = {r["id"]: r for r in rows}
     for o in orders:
         o["label"] = planting_label({"name": o["planting_name"], "batch_no": o["planting_batch"], "planted_on": o["planting_planted"]})
         o["total"] = round(o["qty"] * o["unit_price"], 2)
-        o["ask"] = active_request(db, o["id"], COLLECT_PREORDER) if o["status"] == "pending" and g.user["role"] != "admin" else None
-        if o["ask"] and o["ask"]["status"] == "approved":
-            o["ask"] = {**o["ask"], "until": (o["ask"]["expires_at"] or "")[11:16]}
-    return render_template("up_next.html", batches=batches, orders=orders, statuses=PAYMENT_STATUSES, release_days=RELEASE_DAYS, q=q, methods=PAYMENT_METHODS)
+        o["ask"] = approval_of(db, o["id"], COLLECT_PREORDER) if o["status"] == "pending" and g.user["role"] != "admin" else None
+        p = by_planting.get(o["planting_id"])
+        o["ready_on"] = (p["actual_ready_on"] or p["ready_on"]) if p else None
+        o["is_ready"] = bool(p and p["stage"] in ("ready", "due"))
+        o["days"] = p["days"] if p else None
+    return render_template(
+        "up_next.html", batches=batches, orders=orders, groups=preorder_groups(db, biz, [o for o in orders if o["status"] == "pending"]),
+        history=[o for o in orders if o["status"] != "pending"], statuses=PAYMENT_STATUSES, release_days=RELEASE_DAYS, q=q, methods=PAYMENT_METHODS,
+        remind_days=preorder_remind_days(), reminders_on=alert_enabled("preorders"),
+    )
+
+
+def approval_of(db, item_id, action):
+    """The signed-in operator's request for an action, with the time an approval runs out."""
+    ask = active_request(db, item_id, action)
+    if ask and ask["status"] == "approved":
+        ask = {**ask, "until": (ask["expires_at"] or "")[11:16]}
+    return ask
+
+
+# --- Pre-orders grouped by customer ---
+# A customer's pre-orders (same name and phone number, spelled any way) are listed together, and the ones that are ready can be
+# collected together on one invoice. An operator asks an admin once for the whole group; the request hangs on the customer's
+# oldest pending pre-order.
+def customer_group_key(name, phone):
+    return name_key(name or ""), phone_key(phone)
+
+
+def pending_group(db, biz, po):
+    """Every pending pre-order of the same customer as po, oldest first."""
+    key = customer_group_key(po["customer_name"], po["customer_phone"])
+    return [
+        o for o in db.all("SELECT * FROM preorders WHERE business_id=? AND status='pending' ORDER BY id", (biz,))
+        if customer_group_key(o["customer_name"], o["customer_phone"]) == key
+    ]
+
+
+def preorder_groups(db, biz, pending):
+    """The pending pre-orders shown, gathered by customer: newest-placed customer first, each customer's items soonest-ready first."""
+    anchors = {}
+    for o in db.all("SELECT id, customer_name, customer_phone FROM preorders WHERE business_id=? AND status='pending' ORDER BY id", (biz,)):
+        anchors.setdefault(customer_group_key(o["customer_name"], o["customer_phone"]), o["id"])
+    groups = {}
+    for o in sorted(pending, key=lambda o: o["id"]):
+        key = customer_group_key(o["customer_name"], o["customer_phone"])
+        group = groups.setdefault(key, {"name": o["customer_name"], "phone": o["customer_phone"], "orders": [], "anchor": anchors.get(key, o["id"])})
+        group["orders"].append(o)
+    out = []
+    for group in groups.values():
+        group["orders"].sort(key=lambda o: (o["ready_on"] or "9999", o["id"]))
+        group["total"] = round(sum(o["total"] for o in group["orders"]), 2)
+        group["ready"] = [o for o in group["orders"] if o["is_ready"]]
+        group["ready_total"] = round(sum(o["total"] for o in group["ready"]), 2)
+        group["latest"] = max(o["id"] for o in group["orders"])
+        group["ask"] = approval_of(db, group["anchor"], COLLECT_GROUP) if g.user["role"] != "admin" else None
+        out.append(group)
+    return sorted(out, key=lambda grp: -grp["latest"])
+
+
+@app.post("/preorders/<int:po_id>/request-group")
+@need("sell")
+def preorder_group_request(po_id):
+    """An operator asks an admin, once, to collect a customer's pre-orders together."""
+    db, biz = get_db(), g.user["business_id"]
+    po = get_preorder(db, po_id)
+    back = redirect(up_next_url())
+    if g.user["role"] == "admin":
+        flash("Admins approve and collect directly.", "ok")
+        return back
+    group = pending_group(db, biz, po) if po["status"] == "pending" else []
+    if not group:
+        flash("This customer has no pre-orders waiting for collection.", "error")
+        return back
+    anchor = group[0]["id"]
+    if active_request(db, anchor, COLLECT_GROUP):
+        flash("You already asked an admin about this customer's pre-orders.", "error")
+        return back
+    total = round(sum(o["qty"] * o["unit_price"] for o in group), 2)
+    request_id = db.insert(
+        """INSERT INTO permission_requests (business_id, user_id, username, action, item_id, item_name, reason, status, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)""",
+        (biz, g.user["id"], g.user["username"], COLLECT_GROUP, anchor, f"{len(group)} pre-orders for {po['customer_name']}", text("reason")[:200],
+         now().strftime("%Y-%m-%d %H:%M:%S")),
+    )
+    if alert_enabled("permission"):
+        notify(
+            db, "permission", f"Permission request from {g.user['username']}",
+            f"{g.user['username']} asks to collect {po['customer_name']}'s pre-orders on one invoice ({len(group)} waiting, {money(total)} in all). "
+            "Open the app to approve or deny.",
+            url_for("permission_requests") + f"#request-{request_id}", whatsapp=True,
+        )
+    db.commit()
+    flash("Your request has been sent to the admin. You will get a popup here when they answer.", "ok")
+    return back
+
+
+@app.post("/preorders/<int:po_id>/collect-group")
+@need("sell")
+def preorder_collect_group(po_id):
+    """Collects the ticked pre-orders of one customer together and records them as one sale, on one invoice."""
+    db, biz = get_db(), g.user["business_id"]
+    po = get_preorder(db, po_id)
+    back = redirect(up_next_url())
+    group = pending_group(db, biz, po) if po["status"] == "pending" else []
+    wanted = set(request.form.getlist("ids", type=int))
+    chosen = [o for o in group if o["id"] in wanted]
+    if not chosen:
+        flash("Tick the pre-orders the customer is collecting.", "error")
+        return back
+    if len(chosen) != len(wanted):
+        flash("Some of the ticked pre-orders were already collected or cancelled, or belong to another customer. Nothing was changed.", "error")
+        return back
+
+    grant = None
+    if g.user["role"] == "admin":
+        approved_by = g.user["username"]
+    else:
+        row = active_request(db, group[0]["id"], COLLECT_GROUP)
+        if not row or row["status"] != "approved":
+            flash("An admin has to approve collecting this customer's pre-orders first. Use the request button.", "error")
+            return back
+        grant, approved_by = row, row["decided_by"] or ""
+
+    lines = []
+    for o in chosen:
+        p = get_planting(db, o["planting_id"])
+        lines.append((o, p, round(o["qty"] * o["unit_price"], 2)))
+    total = round(sum(line[2] for line in lines), 2)
+    try:
+        amount_paid = amount_for_status(text("payment_status") or "Paid", text("amount_paid"), total)
+    except ValueError as e:
+        flash(f"Payment: {e}.", "error")
+        return back
+    method, reference = NOT_RECORDED, ""
+    if amount_paid > 0.005:
+        method, reference, problem = read_money_method()
+        if problem:
+            flash(f"Payment: {problem}", "error")
+            return back
+
+    first = group[0]
+    try:
+        sold_at = now().strftime("%Y-%m-%d %H:%M:%S")
+        invoice_no = next_invoice_no(db, biz)
+        # The invoice carries the customer's account name, however each pre-order was typed
+        customer_id = customer_for(db, biz, first["customer_name"], first["customer_phone"], sold_at)
+        account = db.one("SELECT name, phone FROM customers WHERE id=?", (customer_id,)) if customer_id else None
+        name = account["name"] if account else first["customer_name"]
+        phone = (account["phone"] if account else "") or first["customer_phone"]
+        invoice_id = db.insert(
+            """INSERT INTO invoices (business_id, invoice_no, kind, customer_name, customer_phone, payment_status, total, amount_paid, balance_due, created_by, created_at, customer_id)
+               VALUES (?, ?, 'SALE', ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                biz, invoice_no, name, phone, payment_status_for(total, amount_paid), total, amount_paid,
+                round(total - amount_paid, 2), g.user["username"], sold_at, customer_id,
+            ),
+        )
+        record_money(
+            db, biz, "in", amount_paid, method, "sale", reference, name,
+            f"Invoice {invoice_no} ({len(lines)} pre-orders collected)", "invoice", invoice_id, sold_at,
+        )
+        for o, p, line_total in lines:
+            # The seedlings were taken out of stock when each pre-order was recorded, so only the sale itself is entered here
+            db.execute(
+                """INSERT INTO invoice_items (invoice_id, business_id, item_code, item_name, department, batch_no, qty, unit_price, line_total)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (invoice_id, biz, p["pos_code"], planting_label(p), p["department"], p["batch_no"], o["qty"], o["unit_price"], line_total),
+            )
+            db.execute(
+                "UPDATE preorders SET status='collected', collected_by=?, approved_by=?, collected_at=?, invoice_id=? WHERE id=? AND business_id=?",
+                (g.user["username"], approved_by, sold_at, invoice_id, o["id"], biz),
+            )
+        use_grant(db, grant)
+        db.commit()
+    except DB_ERRORS:
+        db.rollback()
+        flash("The collection could not be saved, so nothing was changed. Please try again.", "error")
+        return back
+    left = len(group) - len(chosen)
+    flash(f"Collected {len(chosen)} pre-orders by {name} on one invoice (approved by {approved_by})."
+          + (f" {left} more {'is' if left == 1 else 'are'} still waiting." if left else ""), "ok")
+    return redirect(url_for("invoice", invoice_id=invoice_id))
+
+
+# --- Reminders: pre-ordered batches almost ready ---
+PREORDER_REMIND_DEFAULT = 3
+
+
+def preorder_remind_days():
+    days = g.user["preorder_remind_days"]
+    return PREORDER_REMIND_DEFAULT if days is None else days
+
+
+def remind_preorders_due(db, biz):
+    """Alerts everyone, once for each pre-order, when the batch it is from is ready within the set number of days (or already is).
+    Runs from the alerts poll, so it needs nothing scheduled; a pre-order is claimed before its alert is raised, so two pages
+    polling at once cannot both raise it."""
+    if not alert_enabled("preorders"):
+        return
+    today = today_str()
+    due = db.all(
+        """SELECT po.id, po.customer_name, po.qty, p.id AS planting_id, p.name, p.batch_no, p.planted_on, COALESCE(p.actual_ready_on, p.ready_on) AS ready
+           FROM preorders po JOIN plantings p ON p.id = po.planting_id
+           WHERE po.business_id=? AND po.status='pending' AND po.reminded_at IS NULL AND COALESCE(p.actual_ready_on, p.ready_on) <= ?
+           ORDER BY po.id""",
+        (biz, add_days(today, preorder_remind_days())),
+    )
+    if not due:
+        return
+    stamp = now().strftime("%Y-%m-%d %H:%M:%S")
+    claimed = [d for d in due if db.execute("UPDATE preorders SET reminded_at=? WHERE id=? AND reminded_at IS NULL", (stamp, d["id"])).rowcount == 1]
+    batches = {}
+    for d in claimed:
+        batches.setdefault(d["planting_id"], []).append(d)
+    operators = [u["id"] for u in db.all("SELECT id FROM users WHERE business_id=? AND role <> 'admin'", (biz,))]
+    for orders in batches.values():
+        first = orders[0]
+        label = planting_label(first)
+        left = (datetime.date.fromisoformat(first["ready"]) - datetime.date.fromisoformat(today)).days
+        ready_date = datetime.date.fromisoformat(first["ready"]).strftime("%d %b")
+        when = "ready today" if left == 0 else f"ready in {left} day{'s' if left != 1 else ''}, on {ready_date}" if left > 0 else f"ready since {ready_date}"
+        people = {}
+        for d in orders:
+            people[d["customer_name"]] = people.get(d["customer_name"], 0) + d["qty"]
+        title = f"Pre-orders due: {label}"
+        body = (f"{label} is {when}. {len(orders)} pre-order{'s' if len(orders) != 1 else ''} waiting to be collected: "
+                + ", ".join(f"{name} ({qty:,})" for name, qty in people.items()) + ".")
+        link = url_for("up_next") + "#preorders"
+        # Everyone is told: the admins (with the WhatsApp copy, if a number is set) and every other user of the business
+        notify(db, "preorder", title, body, link, whatsapp=True)
+        for user_id in operators:
+            notify(db, "preorder", title, body, link, for_user_id=user_id)
+    db.commit()
+
+
+@app.post("/planting/up-next/reminder")
+@need("admin")
+def preorder_reminder_settings():
+    db = get_db()
+    days = request.form.get("remind_days", type=int)
+    if days is None or not 0 <= days <= 60:
+        flash("Choose how many days before a batch is ready to be reminded (0 to 60).", "error")
+    else:
+        db.execute("UPDATE businesses SET preorder_remind_days=? WHERE id=?", (days, g.user["business_id"]))
+        db.commit()
+        flash("Everyone will be reminded " + ("on the day a pre-ordered batch is ready." if days == 0 else f"{days} day{'s' if days != 1 else ''} before a pre-ordered batch is ready."), "ok")
+    return redirect(url_for("up_next") + "#preorders")
 
 
 @app.post("/planting/<int:planting_id>/preorder")

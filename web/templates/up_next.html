@@ -64,76 +64,182 @@
     </div>
 </section>
 
+{% macro collect_fields() %}
+<label>Payment
+    <select name="payment_status">{% for st in statuses %}<option>{{ st }}</option>{% endfor %}</select>
+</label>
+<label>Amount paid (for a partial payment) <input name="amount_paid" inputmode="decimal"></label>
+<label>How it was paid (unless unpaid)
+    <select name="payment_method">
+        <option value="">Choose: cash, bank, Airtel Money or MTN Money</option>
+        {% for method, label in methods %}<option value="{{ method }}">{{ method }}</option>{% endfor %}
+    </select>
+</label>
+<label>Reference (optional) <input name="payment_reference" maxlength="60" autocomplete="off"></label>
+{% endmacro %}
 <section class="card block" id="preorders">
-    <h2>Pre-orders</h2>
-    <div class="table-wrap">
-        <table>
-            <thead><tr><th>Customer</th><th>Batch</th><th class="num">Qty</th><th class="num">Total</th><th>Placed</th><th>Status</th><th></th></tr></thead>
-            <tbody>
-            {% for o in orders %}
-                <tr id="preorder-{{ o.id }}">
-                    <td>{{ o.customer_name }}{% if o.customer_phone %}<br><small class="muted">{{ o.customer_phone }}</small>{% endif %}</td>
-                    <td><a href="{{ url_for('planting_detail', planting_id=o.planting_id) }}">{{ o.label }}</a></td>
-                    <td class="num">{{ o.qty }}</td>
-                    <td class="num">{{ o.total|money }}</td>
-                    <td>{{ o.created_at }}<br><small class="muted">by {{ o.created_by }}</small></td>
-                    <td>
-                        {% if o.status == 'pending' %}<strong class="gold">Waiting for collection</strong>
-                        {% elif o.status == 'collected' %}<span class="ok">Collected</span><br><small class="muted">approved by {{ o.approved_by }}</small>{% if o.invoice_id %} <a href="{{ url_for('invoice', invoice_id=o.invoice_id) }}">invoice</a>{% endif %}
-                        {% else %}<span class="muted">Cancelled</span>{% endif %}
-                    </td>
-                    <td class="num actions">
-                        {% if o.status == 'pending' and can('sell') %}
-                            {% if user.role == 'admin' or (o.ask and o.ask.status == 'approved') %}
-                            <details class="inline-details">
-                                <summary class="btn success small">{{ 'Approve & collect' if user.role == 'admin' else 'Collect' }}</summary>
-                                <form method="post" action="{{ url_for('preorder_collect', po_id=o.id) }}" class="preorder-form"
-                                      data-confirm="Record this pre-order as a sale of {{ o.total|money }}?{% if user.role == 'admin' %}&#10;&#10;This is your approval of the collection.{% endif %}">
-                                    {{ csrf_field() }}{{ keep_search() }}
-                                    {% if o.ask %}<p class="muted">Approved by an admin, for one use{% if o.ask.until %} until {{ o.ask.until }}{% endif %}.</p>{% endif %}
-                                    <label>Payment
-                                        <select name="payment_status">{% for s in statuses %}<option>{{ s }}</option>{% endfor %}</select>
-                                    </label>
-                                    <label>Amount paid (for a partial payment) <input name="amount_paid" inputmode="decimal"></label>
-                                    <label>How it was paid (unless unpaid)
-                                        <select name="payment_method">
-                                            <option value="">Choose: cash, bank, Airtel Money or MTN Money</option>
-                                            {% for method, label in methods %}<option value="{{ method }}">{{ method }}</option>{% endfor %}
-                                        </select>
-                                    </label>
-                                    <label>Reference (optional) <input name="payment_reference" maxlength="60" autocomplete="off"></label>
-                                    <button class="btn success wide">Record as a sale</button>
-                                </form>
-                            </details>
-                            {% elif o.ask %}
-                            <span class="gold">Waiting for an admin</span>
-                            {% else %}
-                            <details class="inline-details">
-                                <summary class="btn small">Ask an admin</summary>
-                                <form method="post" action="{{ url_for('preorder_request', po_id=o.id) }}" class="preorder-form">
-                                    {{ csrf_field() }}{{ keep_search() }}
-                                    <label>Note (optional) <input name="reason" maxlength="200"></label>
-                                    <button class="btn wide">Request approval to collect</button>
-                                </form>
-                            </details>
-                            {% endif %}
-                            <form method="post" action="{{ url_for('preorder_cancel', po_id=o.id) }}" data-confirm="Cancel this pre-order? The seedlings become free again.">
-                                {{ csrf_field() }}{{ keep_search() }}
-                                <button class="btn danger small">Cancel</button>
-                            </form>
-                        {% endif %}
-                    </td>
-                </tr>
-            {% else %}
-                <tr><td colspan="7" class="muted center">{% if q %}No pre-order matches &ldquo;{{ q }}&rdquo;.{% else %}No pre-orders yet.{% endif %}</td></tr>
-            {% endfor %}
-            </tbody>
-        </table>
+    <div class="page-head">
+        <h2>Pre-orders</h2>
+        {% if user.role == 'admin' %}
+        <form method="post" action="{{ url_for('preorder_reminder_settings') }}" class="toolbar remind-form no-print">
+            {{ csrf_field() }}
+            <label class="check">Remind everyone
+                <input name="remind_days" type="number" min="0" max="60" step="1" value="{{ remind_days }}" aria-label="Days before ready" required>
+                days before a pre-ordered batch is ready</label>
+            <button class="btn small">Save</button>
+        </form>
+        {% endif %}
     </div>
+    <p class="muted">
+        {% if reminders_on %}Everyone gets an alert {{ 'on the day' if remind_days == 0 else (remind_days ~ ' day' ~ ('s' if remind_days != 1) ~ ' before') }} a pre-ordered batch is ready.
+        {% else %}The pre-order reminder is switched off in Settings.{% endif %}
+        A customer's pre-orders are kept together; the ones that are ready are collected on one invoice.
+    </p>
+
+    {% for g in groups %}
+    <div class="preorder-group" id="customer-{{ g.anchor }}">
+        <div class="group-head">
+            <div>
+                <strong>{{ g.name }}</strong>{% if g.phone %} <span class="muted">&middot; {{ g.phone }}</span>{% endif %}
+                <br><small class="muted">{{ g.orders|length }} pre-order{{ 's' if g.orders|length != 1 }}, {{ g.total|money }} in all
+                    &middot; <span class="{{ 'ok' if g.ready }}">{{ g.ready|length }} ready ({{ g.ready_total|money }})</span></small>
+            </div>
+            {% if can('sell') %}
+            <div class="actions">
+                {% if user.role == 'admin' or (g.ask and g.ask.status == 'approved') %}
+                <button type="button" class="btn success small" data-modal-open="collect-{{ g.anchor }}">{{ 'Approve & collect' if user.role == 'admin' else 'Collect' }} ready items{% if g.ready %} ({{ g.ready|length }}){% endif %}</button>
+                {% elif g.ask %}
+                <span class="gold">Waiting for an admin</span>
+                {% else %}
+                <form method="post" action="{{ url_for('preorder_group_request', po_id=g.anchor) }}">
+                    {{ csrf_field() }}{{ keep_search() }}
+                    <button class="btn small">Ask an admin to collect all</button>
+                </form>
+                {% endif %}
+            </div>
+            {% endif %}
+        </div>
+        <div class="table-wrap">
+            <table>
+                <thead><tr><th>Batch</th><th>Ready</th><th class="num">Qty</th><th class="num">Total</th><th>Placed</th><th></th></tr></thead>
+                <tbody>
+                {% for o in g.orders %}
+                    <tr id="preorder-{{ o.id }}">
+                        <td><a href="{{ url_for('planting_detail', planting_id=o.planting_id) }}">{{ o.label }}</a></td>
+                        <td>{{ o.ready_on or '—' }}<br>
+                            <small class="{{ 'ok' if o.is_ready else 'muted' }}">{% if o.is_ready %}Ready to collect{% elif o.days is not none %}in {{ o.days }} day{{ 's' if o.days != 1 }}{% endif %}</small></td>
+                        <td class="num">{{ o.qty }}</td>
+                        <td class="num">{{ o.total|money }}</td>
+                        <td>{{ o.created_at }}<br><small class="muted">by {{ o.created_by }}</small></td>
+                        <td class="num actions">
+                            {% if can('sell') %}
+                                {% if user.role == 'admin' or (o.ask and o.ask.status == 'approved') %}
+                                <details class="inline-details">
+                                    <summary class="btn small">{{ 'Collect this one' }}</summary>
+                                    <form method="post" action="{{ url_for('preorder_collect', po_id=o.id) }}" class="preorder-form"
+                                          data-confirm="Record this pre-order on its own as a sale of {{ o.total|money }}?{% if user.role == 'admin' %}&#10;&#10;This is your approval of the collection.{% endif %}">
+                                        {{ csrf_field() }}{{ keep_search() }}
+                                        {% if o.ask %}<p class="muted">Approved by an admin, for one use{% if o.ask.until %} until {{ o.ask.until }}{% endif %}.</p>{% endif %}
+                                        {{ collect_fields() }}
+                                        <button class="btn success wide">Record as a sale</button>
+                                    </form>
+                                </details>
+                                {% elif o.ask %}
+                                <span class="gold">Waiting for an admin</span>
+                                {% else %}
+                                <details class="inline-details">
+                                    <summary class="btn small">Ask for this one</summary>
+                                    <form method="post" action="{{ url_for('preorder_request', po_id=o.id) }}" class="preorder-form">
+                                        {{ csrf_field() }}{{ keep_search() }}
+                                        <label>Note (optional) <input name="reason" maxlength="200"></label>
+                                        <button class="btn wide">Request approval to collect</button>
+                                    </form>
+                                </details>
+                                {% endif %}
+                                <form method="post" action="{{ url_for('preorder_cancel', po_id=o.id) }}" data-confirm="Cancel this pre-order? The seedlings become free again.">
+                                    {{ csrf_field() }}{{ keep_search() }}
+                                    <button class="btn danger small">Cancel</button>
+                                </form>
+                            {% endif %}
+                        </td>
+                    </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    {% if can('sell') and (user.role == 'admin' or (g.ask and g.ask.status == 'approved')) %}
+    <dialog class="modal modal-wide" id="collect-{{ g.anchor }}" aria-labelledby="collect-title-{{ g.anchor }}">
+        <div class="modal-body">
+            <h2 id="collect-title-{{ g.anchor }}">{{ g.name }} collects</h2>
+            <p class="muted">Everything ticked goes on one invoice. The ready ones are ticked; the rest stay pre-ordered unless you tick them too.
+                {% if g.ask %}Approved by an admin, for one use{% if g.ask.until %} until {{ g.ask.until }}{% endif %}.{% endif %}</p>
+            <form method="post" action="{{ url_for('preorder_collect_group', po_id=g.anchor) }}" data-collect-group
+                  data-confirm="Record {{ g.name }}'s ticked pre-orders as one sale?{% if user.role == 'admin' %}&#10;&#10;This is your approval of the collection.{% endif %}">
+                {{ csrf_field() }}{{ keep_search() }}
+                <fieldset class="collect-picks">
+                    <legend>Pre-orders collected</legend>
+                    {% for o in g.orders %}
+                    <label class="check"><input type="checkbox" name="ids" value="{{ o.id }}" data-total="{{ o.total }}" {{ 'checked' if o.is_ready }}>
+                        <span>{{ o.qty }} x {{ o.label }} &middot; {{ o.total|money }}
+                            <small class="{{ 'ok' if o.is_ready else 'muted' }}">{{ 'ready' if o.is_ready else 'not ready yet, ' ~ (o.ready_on or '') }}</small></span></label>
+                    {% endfor %}
+                    <p class="collect-total">Invoice total: <strong data-collect-total>{{ g.ready_total|money }}</strong></p>
+                </fieldset>
+                {{ collect_fields() }}
+                <button class="btn success wide">Record as one sale</button>
+                <p class="center"><button type="button" class="btn ghost" data-modal-close>Cancel</button></p>
+            </form>
+        </div>
+    </dialog>
+    {% endif %}
+    {% else %}
+    <p class="muted center">{% if q %}No pre-order waiting for collection matches &ldquo;{{ q }}&rdquo;.{% else %}No pre-orders waiting for collection.{% endif %}</p>
+    {% endfor %}
+
+    {% if history %}
+    <details class="spaced" {{ 'open' if not groups }}>
+        <summary>Collected and cancelled ({{ history|length }})</summary>
+        <div class="table-wrap">
+            <table>
+                <thead><tr><th>Customer</th><th>Batch</th><th class="num">Qty</th><th class="num">Total</th><th>Placed</th><th>Status</th></tr></thead>
+                <tbody>
+                {% for o in history %}
+                    <tr id="preorder-{{ o.id }}">
+                        <td>{{ o.customer_name }}{% if o.customer_phone %}<br><small class="muted">{{ o.customer_phone }}</small>{% endif %}</td>
+                        <td><a href="{{ url_for('planting_detail', planting_id=o.planting_id) }}">{{ o.label }}</a></td>
+                        <td class="num">{{ o.qty }}</td>
+                        <td class="num">{{ o.total|money }}</td>
+                        <td>{{ o.created_at }}<br><small class="muted">by {{ o.created_by }}</small></td>
+                        <td>{% if o.status == 'collected' %}<span class="ok">Collected</span><br><small class="muted">approved by {{ o.approved_by }}</small>{% if o.invoice_id %} <a href="{{ url_for('invoice', invoice_id=o.invoice_id) }}">invoice</a>{% endif %}
+                            {% else %}<span class="muted">Cancelled</span>{% endif %}</td>
+                    </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </details>
+    {% endif %}
 </section>
 {% endblock %}
 {% block scripts %}
 <script>
+    // Collecting a customer's pre-orders together: the invoice total follows the ticks
+    (function () {
+        document.querySelectorAll("form[data-collect-group]").forEach(function (form) {
+            const shown = form.querySelector("[data-collect-total]");
+            const currency = "{{ user.currency }}";
+            function update() {
+                let total = 0;
+                form.querySelectorAll('input[name="ids"]:checked').forEach(function (box) { total += parseFloat(box.dataset.total) || 0; });
+                shown.textContent = currency + total.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+            }
+            form.addEventListener("change", update);
+            update();
+        });
+    })();
+
     // Search as you type: wait for a short pause, then bring the matching batches and pre-orders in place
     (function () {
         const box = document.getElementById("upnext-q");

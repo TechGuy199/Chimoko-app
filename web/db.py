@@ -322,6 +322,11 @@ def init_schema():
         add_column(db, "money_balances", "last_id", "INTEGER")
         add_column(db, "businesses", "last_backup_at", "TEXT")
         add_column(db, "businesses", "last_backup_by", "TEXT")
+        # Pre-orders: the alert for batches almost ready (NULL counts as on), how many days ahead it comes (NULL = the default),
+        # and when each pre-order's reminder was raised, so it is raised once
+        add_column(db, "businesses", "alert_preorders", "INTEGER")
+        add_column(db, "businesses", "preorder_remind_days", "INTEGER")
+        add_column(db, "preorders", "reminded_at", "TEXT")
         add_column(db, "businesses", "alert_phone", "TEXT")
         add_column(db, "businesses", "alert_low_stock", "INTEGER")
         add_column(db, "businesses", "alert_permission", "INTEGER")

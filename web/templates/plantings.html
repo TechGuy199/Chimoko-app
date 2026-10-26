@@ -13,11 +13,29 @@
     </div>
 </div>
 
+<form method="get" class="toolbar planting-filters no-print" id="planting-filters">
+    {% if show != 'all' %}<input type="hidden" name="show" value="{{ show }}">{% endif %}
+    <input type="search" name="q" id="planting-q" value="{{ f.q }}" placeholder="Search batch, seed, batch number or notes" aria-label="Search planting records" autocomplete="off">
+    <select name="department" aria-label="Department" onchange="this.form.requestSubmit()">
+        <option value="">All departments</option>
+        {% for d in departments %}<option {{ 'selected' if f.department == d }}>{{ d }}</option>{% endfor %}
+    </select>
+    <span class="date-range"><span class="muted">Planted</span>
+        <input type="date" name="planted_from" value="{{ f.planted_from or '' }}" aria-label="Planted from"><span class="muted">to</span>
+        <input type="date" name="planted_to" value="{{ f.planted_to or '' }}" aria-label="Planted to"></span>
+    <span class="date-range"><span class="muted">Ready</span>
+        <input type="date" name="ready_from" value="{{ f.ready_from or '' }}" aria-label="Ready from"><span class="muted">to</span>
+        <input type="date" name="ready_to" value="{{ f.ready_to or '' }}" aria-label="Ready to"></span>
+    <button class="btn primary">Filter</button>
+    {% if f.filtered %}<a class="btn" href="{{ url_for('planting_list', **({'show': show} if show != 'all' else {})) }}">Clear</a>{% endif %}
+</form>
+
 <div class="toolbar">
-    <a class="chip {{ 'active' if show == 'all' }}" href="{{ url_for('planting_list') }}">All <small>{{ counts.all }}</small></a>
-    <a class="chip {{ 'active' if show == 'growing' }}" href="{{ url_for('planting_list', show='growing') }}">Growing <small>{{ counts.growing }}</small></a>
-    <a class="chip {{ 'active' if show == 'ready' }}" href="{{ url_for('planting_list', show='ready') }}">Ready <small>{{ counts.ready }}</small></a>
-    <a class="chip {{ 'active' if show == 'records' }}" href="{{ url_for('planting_list', show='records') }}">Records only <small>{{ counts.records }}</small></a>
+    <a class="chip {{ 'active' if show == 'all' }}" href="{{ tab('all') }}">All <small>{{ counts.all }}</small></a>
+    <a class="chip {{ 'active' if show == 'growing' }}" href="{{ tab('growing') }}">Growing <small>{{ counts.growing }}</small></a>
+    <a class="chip {{ 'active' if show == 'ready' }}" href="{{ tab('ready') }}">Ready <small>{{ counts.ready }}</small></a>
+    <a class="chip {{ 'active' if show == 'records' }}" href="{{ tab('records') }}">Records only <small>{{ counts.records }}</small></a>
+    {% if f.filtered %}<span class="muted">Showing the batches that match the filters. "Ready" is the day a batch was marked ready, or is expected to be.</span>{% endif %}
 </div>
 
 <section class="card">
@@ -74,4 +92,17 @@
     </div>
     <p class="muted">Pre-ordered seedlings are held for the customer but not yet sold. They become a sale when collected and approved by an admin.</p>
 </section>
+{% endblock %}
+{% block scripts %}
+<script>
+    // Search as you type: wait for a short pause, then bring the matching batches in place
+    (function () {
+        const box = document.getElementById("planting-q");
+        let timer;
+        box.addEventListener("input", function () {
+            clearTimeout(timer);
+            timer = setTimeout(function () { document.getElementById("planting-filters").requestSubmit(); }, 450);
+        });
+    })();
+</script>
 {% endblock %}
