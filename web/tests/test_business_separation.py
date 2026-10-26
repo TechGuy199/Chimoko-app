@@ -45,6 +45,8 @@ PARAM_TABLES = {
 ENTRY_TABLES = {"assign_account_entry": "cashbook", "delete_account_entry": "cashbook", "delete_activity": "activities"}
 # Pages that are not about a business's records, or that sign in, out or register. Changing Beta's own password is left out
 # too, so the password-confirmed actions after it can still be reached with the same password.
+# Pages whose address also needs the customer's invoices (?invoice=...)
+QUERY_INVOICES = {"customer_delivery", "customer_delivery_pdf"}
 SKIP = {"static", "login", "logout", "setup", "pwa_manifest", "pwa_service_worker", "delete_my_login", "delete_my_business", "change_password"}
 # Confirmation phrases, so the reset pages really run (for Beta) instead of stopping at the confirmation
 PHRASES = {"reset_app": A.RESET_PHRASE, "clear_inventory": A.CLEAR_INVENTORY_PHRASE}
@@ -211,8 +213,23 @@ class BusinessSeparation(unittest.TestCase):
         urls = [{}]
         for name, options in values.items():
             urls = [dict(u, **{name: o}) for u in urls for o in options]
+        # A delivery list is made from invoices ticked on the customer's statement: the address carries that customer's invoices
+        if rule.endpoint in QUERY_INVOICES:
+            for u in urls:
+                u["invoice"] = self.customer_invoices(u["customer_id"])
         with A.app.test_request_context():
             return [A.url_for(rule.endpoint, **u) for u in urls]
+
+    def customer_invoices(self, customer_id):
+        x = db.Database()
+        try:
+            ids = [r["id"] for r in x.all(
+                "SELECT id FROM invoices WHERE business_id=? AND customer_id=? AND kind='SALE' AND payment_status <> 'Cancelled' ORDER BY id", (self.alpha_id, customer_id)
+            )]
+        finally:
+            x.close()
+        self.assertTrue(ids, "Alpha's first customer has no invoices: add one so the delivery list pages are tested")
+        return ids
 
     def alpha_user(self, username):
         x = db.Database()
@@ -248,7 +265,10 @@ class BusinessSeparation(unittest.TestCase):
         for rule in self.rules("GET"):
             for url in self.urls_for(rule):
                 for query in ({}, id_args):
-                    response = self.beta.get(url, query_string=query)
+                    if "?" in url:   # an address that already has a query: the extra ones go on the end
+                        response = self.beta.get(url + "".join(f"&{k}={v}" for k, v in query.items()))
+                    else:
+                        response = self.beta.get(url, query_string=query)
                     leaked = self.leaks_in(response)
                     if leaked:
                         found.append(f"GET {url} {query or ''} -> {response.status_code} shows {leaked[:5]}")
