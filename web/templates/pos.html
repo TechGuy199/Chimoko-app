@@ -21,6 +21,10 @@
             {% if up_next.preorders %}&middot; {{ up_next.preorders }} pre-order{{ 's' if up_next.preorders != 1 }} waiting{% endif %}
         </small>
     </a>
+    <a class="dept-tile" href="{{ url_for('history', collect='waiting') }}" id="waiting-tile">
+        <strong>To be collected</strong>
+        <small>{% if waiting %}{{ waiting }} sale{{ 's' if waiting != 1 }} waiting{% if next_collection %}, the next {{ next_collection }}{% endif %}{% else %}No sale is waiting to be collected{% endif %}</small>
+    </a>
     <a class="dept-tile" href="{{ url_for('planting_list') }}">
         <strong>Planting Records</strong>
         <small>Seeds planted, ready dates and mortality</small>
@@ -95,6 +99,8 @@
         <form id="checkout" method="post" action="{{ url_for('checkout') }}" data-currency="{{ user.currency }}">
             {{ csrf_field() }}
             <input type="hidden" name="cart" id="cart-data">
+            {# Pre-orders sent here by "Generate invoice": pos.js puts them in the cart at the agreed quantity and price #}
+            <div id="preorder-lines" hidden data-lines='{{ preorder_lines|tojson }}' data-tomorrow="{{ tomorrow }}"></div>
             <div class="table-wrap">
                 <table id="cart">
                     <thead><tr><th>Name</th><th>Qty</th><th class="num">Total</th><th></th></tr></thead>
@@ -124,6 +130,13 @@
                 </label>
                 <label><span data-reference-text>Reference number</span> (optional) <input name="payment_reference" id="pay-reference" maxlength="60" data-reference autocomplete="off"></label>
             </div>
+            <fieldset class="collection">
+                <legend>Collection</legend>
+                <label class="check"><input type="radio" name="collection" value="now" checked> The customer takes the goods now</label>
+                <label class="check"><input type="radio" name="collection" value="later"> Collected on another day</label>
+                <label id="collect-day-row" hidden>Collection day <input type="date" name="collect_on" id="collect-on" min="{{ tomorrow }}" disabled></label>
+                <small class="muted" id="collect-day-hint" hidden>Everyone gets a reminder the day before, and the sale is listed under To be collected until it is marked collected.</small>
+            </fieldset>
             <p class="total">Total: <span id="cart-total">{{ 0|money }}</span></p>
             <button class="btn success wide" {{ 'disabled' if not can('sell') }}>Complete Invoice</button>
             {% if not can('sell') %}<p class="muted center">Your account cannot process sales.</p>{% endif %}

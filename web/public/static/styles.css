@@ -482,6 +482,29 @@ a.rank-name:hover { color: var(--accent); }
 .collect-picks legend { padding: 0 6px; color: var(--text-muted); font-size: 12px; }
 .collect-total { margin: 8px 0 0; text-align: right; }
 
+/* Sales collected on a later day; delivery lists */
+fieldset.collection { margin: 10px 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius-small); }
+fieldset.collection legend { padding: 0 6px; color: var(--text-muted); font-size: 12px; }
+fieldset.collection label { margin-bottom: 6px; }
+.collect-banner { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 10px 18px; margin-bottom: 18px; }
+.collect-banner p { margin: 4px 0 0; }
+.collect-banner .actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-start; }
+.collect-banner form { margin: 0; }
+.delivery-pick { margin-bottom: 18px; }
+.delivery-invoices { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 340px), 1fr)); gap: 4px 18px; max-height: 320px; overflow-y: auto; margin: 10px 0; }
+.delivery-invoices small { margin-left: 4px; }
+.delivery-note .facts { margin-bottom: 22px; }
+.delivery-note .statement-invoice + .statement-invoice { margin-top: 18px; }
+.delivery-note dl.totals { display: grid; grid-template-columns: max-content max-content; gap: 4px 24px; margin: 18px 0 0 auto; width: max-content; }
+.delivery-note dl.totals dt { color: var(--text-muted); }
+.delivery-note dl.totals dd { margin: 0; text-align: right; font-weight: 650; }
+.delivery-note footer { margin-top: 18px; text-align: center; font-size: 12px; }
+.signatures { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr)); gap: 18px 36px; margin-top: 34px; break-inside: avoid; }
+.signatures > div { display: grid; grid-template-columns: max-content 1fr; gap: 14px 12px; align-items: end; }
+.signatures strong { grid-column: 1 / -1; }
+.signatures span { color: var(--text-muted); font-size: 12px; }
+.signatures i { display: block; border-bottom: 1px solid var(--text-muted); height: 20px; }
+
 /* Daily activities */
 .day-picker input[type="date"] { width: auto; margin: 0; }
 .plot-tile .tile-badge.done { color: var(--ok-text); }

@@ -246,6 +246,7 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS stock_adjustments_by_date ON stock_adjustments (business_id, created_at)",
     "CREATE INDEX IF NOT EXISTS payroll_by_employee ON payroll (business_id, employee_id)",
     "CREATE INDEX IF NOT EXISTS money_balances_by_account ON money_balances (business_id, account)",
+    "CREATE INDEX IF NOT EXISTS invoices_by_collection ON invoices (business_id, collect_on)",
 ]
 
 # --- Postgres connections, kept between requests ---
@@ -432,6 +433,15 @@ def init_schema():
         add_column(db, "businesses", "alert_permission", "INTEGER")
         # A demo company: when it ends (local time). At that moment it is deleted with all its records and logins. NULL = a real business.
         add_column(db, "businesses", "demo_expires_at", "TEXT")
+        # The day a customer means to collect a pre-order (optional); its reminder comes the day before
+        add_column(db, "preorders", "collect_on", "TEXT")
+        # A sale collected on a later day: the day (NULL = taken at the time of sale), when it was collected and by whom, and
+        # when the reminder the day before was raised. The alert for these can be switched off (NULL counts as on).
+        add_column(db, "invoices", "collect_on", "TEXT")
+        add_column(db, "invoices", "collected_at", "TEXT")
+        add_column(db, "invoices", "collected_by", "TEXT")
+        add_column(db, "invoices", "collect_reminded_at", "TEXT")
+        add_column(db, "businesses", "alert_collections", "INTEGER")
         # Statutory rules became separate employee and employer rates. Settings saved under the old
         # "one rate, paid by one side" rule keep exactly the same effect.
         for column in ("napsa_employee_pct", "napsa_employer_pct", "nhima_employee_pct", "nhima_employer_pct"):

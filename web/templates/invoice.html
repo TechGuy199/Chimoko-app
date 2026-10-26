@@ -16,6 +16,32 @@
     </details>
 </div>
 
+{% if inv.waiting %}
+<section class="card collect-banner no-print" id="collection">
+    <div>
+        <strong class="{{ 'warn' if inv.collect_on < today else 'gold' }}">To be collected {{ inv.collect_when }}</strong>
+        <p class="muted">The customer did not take the goods at the time of sale. Everyone is reminded the day before; it stays under
+            <a href="{{ url_for('history', collect='waiting') }}">To be collected</a> until it is marked collected.</p>
+    </div>
+    {% if can('sell') %}
+    <div class="actions">
+        <form method="post" action="{{ url_for('invoice_collected', invoice_id=inv.id) }}" data-confirm="Mark {{ inv.invoice_no }} as collected by {{ inv.customer_name }}?">
+            {{ csrf_field() }}
+            <button class="btn success">Mark as collected</button>
+        </form>
+        <details class="inline-details">
+            <summary class="btn">Change day</summary>
+            <form method="post" action="{{ url_for('invoice_collect_day', invoice_id=inv.id) }}" class="preorder-form">
+                {{ csrf_field() }}
+                <label>New collection day <input name="collect_on" type="date" min="{{ today }}" value="{{ inv.collect_on }}" required></label>
+                <button class="btn primary wide">Save</button>
+            </form>
+        </details>
+    </div>
+    {% endif %}
+</section>
+{% endif %}
+
 {% for twin in twins %}
 <div class="flash notice no-print">
     This customer's phone number is also on another account, "{{ twin.name }}". If they are the same person,
@@ -37,6 +63,10 @@
         <dt>Served by</dt><dd>{{ inv.created_by }}</dd>
         <dt>{{ 'Recipient' if inv.kind == 'FARM_USE' else 'Customer' }}</dt><dd>{{ inv.customer_name }}</dd>
         <dt>Phone</dt><dd>{{ inv.customer_phone or '—' }}</dd>
+        {% if inv.collect_on %}
+        <dt>Collection</dt><dd>{% if inv.collected_at %}Collected {{ inv.collected_at[:10] }}{% if inv.collected_by %} <span class="no-print muted">(marked by {{ inv.collected_by }})</span>{% endif %}
+            {% elif inv.payment_status == 'Cancelled' %}Was to be collected on {{ inv.collect_on }}{% else %}To be collected on {{ inv.collect_on }}{% endif %}</dd>
+        {% endif %}
     </dl>
 
     <table>

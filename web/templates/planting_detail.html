@@ -103,25 +103,29 @@
         <input name="customer_name" placeholder="Customer name" required maxlength="100">
         <input name="customer_phone" placeholder="Phone" maxlength="40">
         <input name="qty" type="number" min="1" max="{{ p.available }}" value="1" required aria-label="Quantity">
+        {% set earliest = [today, p.actual_ready_on or p.ready_on or today]|max %}
+        <label class="check">Collects (optional) <input name="collect_on" type="date" min="{{ earliest }}" aria-label="Collection day (optional)"></label>
         <button class="btn" {{ 'disabled' if not can('sell') }}>Pre-order</button>
     </form>
     {% endif %}
     <div class="table-wrap">
         <table>
-            <thead><tr><th>Customer</th><th>Phone</th><th class="num">Qty</th><th class="num">Price</th><th>Placed</th><th>Status</th></tr></thead>
+            <thead><tr><th>Customer</th><th>Phone</th><th class="num">Qty</th><th class="num">Price</th><th>Placed</th><th>Collects</th><th>Status</th></tr></thead>
             <tbody>
             {% for o in orders %}
                 <tr>
                     <td>{{ o.customer_name }}</td><td>{{ o.customer_phone or '—' }}</td><td class="num">{{ o.qty }}</td><td class="num">{{ o.unit_price|money }}</td>
                     <td>{{ o.created_at }} <small class="muted">by {{ o.created_by }}</small></td>
+                    <td>{{ o.collect_on or '—' }}</td>
                     <td>
                         {% if o.status == 'pending' %}<strong class="gold">Waiting for collection</strong>
-                        {% elif o.status == 'collected' %}<span class="ok">Collected</span> <small class="muted">approved by {{ o.approved_by }}</small>{% if o.invoice_id %} <a href="{{ url_for('invoice', invoice_id=o.invoice_id) }}">invoice</a>{% endif %}
+                            {% if can('sell') %}<a class="btn success small" href="{{ url_for('pos', preorder=o.id) }}">Generate invoice</a>{% endif %}
+                        {% elif o.status == 'collected' %}<span class="ok">Collected</span> <small class="muted">{{ (o.collected_at or '')[:10] }}{% if o.collected_by %} by {{ o.collected_by }}{% endif %}</small>{% if o.invoice_id %} <a href="{{ url_for('invoice', invoice_id=o.invoice_id) }}">invoice</a>{% endif %}
                         {% else %}<span class="muted">Cancelled</span>{% endif %}
                     </td>
                 </tr>
             {% else %}
-                <tr><td colspan="6" class="muted center">No pre-orders for this batch.</td></tr>
+                <tr><td colspan="7" class="muted center">No pre-orders for this batch.</td></tr>
             {% endfor %}
             </tbody>
         </table>

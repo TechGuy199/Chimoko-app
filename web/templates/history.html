@@ -1,8 +1,16 @@
 {% extends "base.html" %}
 {% block title %}Sales &amp; Invoices — {% endblock %}
 {% block content %}
-<h1>Sales &amp; Invoices</h1>
+<div class="page-head">
+    <h1>{% if waiting %}Sales to be collected{% else %}Sales &amp; Invoices{% endif %}</h1>
+    <div class="head-actions">
+        {% if waiting %}<a class="btn" href="{{ url_for('history') }}">All sales &amp; invoices</a>
+        {% else %}<a class="btn {{ 'primary' if waiting_count }}" href="{{ url_for('history', collect='waiting') }}">To be collected ({{ waiting_count }})</a>{% endif %}
+    </div>
+</div>
+{% if waiting %}<p class="muted">Sales the customer did not take at the time, soonest collection first. Open one to mark it collected or move its day.</p>{% endif %}
 <form method="get" class="toolbar" id="history-filters">
+    {% if waiting %}<input type="hidden" name="collect" value="waiting">{% endif %}
     <input name="q" id="history-q" type="search" value="{{ q }}" placeholder="Search invoice number, customer, phone or product" aria-label="Search invoices">
     <select name="period" id="history-period" aria-label="Date range">
         {% for value, label in periods %}<option value="{{ value }}" {{ 'selected' if value == period }}>{{ label }}</option>{% endfor %}
@@ -14,7 +22,7 @@
         <input type="date" name="to" value="{{ end.isoformat() if end and period == 'custom' }}" aria-label="To" {{ 'disabled' if period != 'custom' }}>
     </span>
     <button class="btn primary">Search</button>
-    {% if q or period != 'all' %}<a class="btn" href="{{ url_for('history') }}">Clear</a>{% endif %}
+    {% if q or period != 'all' %}<a class="btn" href="{{ url_for('history', collect='waiting') if waiting else url_for('history') }}">Clear</a>{% endif %}
     <a class="btn" href="{{ csv_url }}">Export CSV</a>
 </form>
 <p class="muted period-line">
@@ -35,7 +43,7 @@
     <div class="table-wrap">
         <table>
             <thead>
-                <tr><th>Invoice no</th><th>Date / time</th><th>Customer</th><th>Phone</th><th>Type</th><th class="num">Total</th><th class="num">Paid</th><th class="num">Balance</th><th>Status</th><th></th></tr>
+                <tr><th>Invoice no</th><th>Date / time</th><th>Customer</th><th>Phone</th><th>Type</th><th class="num">Total</th><th class="num">Paid</th><th class="num">Balance</th><th>Status</th><th>Collection</th><th></th></tr>
             </thead>
             <tbody>
             {% for i in invoices %}
@@ -49,10 +57,12 @@
                     <td class="num">{{ i.amount_paid|money }}</td>
                     <td class="num {{ 'warn' if i.balance_due > 0 }}">{{ i.balance_due|money }}</td>
                     <td>{% if i.payment_status == 'Cancelled' %}<span class="muted">Cancelled</span>{% else %}{{ i.payment_status }}{% endif %}</td>
+                    <td>{% if i.collect_on and i.payment_status != 'Cancelled' %}{% if i.collected_at %}<span class="ok">Collected</span>
+                        {% else %}<strong class="{{ 'warn' if i.collect_on < today else 'gold' }}">{{ i.collect_on }}</strong>{% endif %}{% endif %}</td>
                     <td class="num"><a class="btn small" href="{{ url_for('invoice', invoice_id=i.id) }}">View</a></td>
                 </tr>
             {% else %}
-                <tr><td colspan="10" class="muted center">No transactions found{% if q or period != 'all' %} for this search and date range{% endif %}.</td></tr>
+                <tr><td colspan="11" class="muted center">{% if waiting %}No sale is waiting to be collected{% else %}No transactions found{% endif %}{% if q or period != 'all' %} for this search and date range{% endif %}.</td></tr>
             {% endfor %}
             </tbody>
         </table>

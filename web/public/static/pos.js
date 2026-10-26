@@ -41,21 +41,34 @@
         let total = 0;
         cart.forEach(function (item) {
             const tr = document.createElement("tr");
-            tr.appendChild(cell(item.name));
+            const nameCell = cell(item.name);
+            if (item.preorder) {
+                // A pre-order goes on the invoice as it was agreed: its quantity and price cannot be changed here
+                const tag = document.createElement("small");
+                tag.className = "muted";
+                tag.textContent = " pre-order, " + money(item.price) + " each";
+                nameCell.appendChild(tag);
+            }
+            tr.appendChild(nameCell);
 
-            const qty = document.createElement("input");
-            qty.type = "number";
-            qty.min = 1;
-            qty.max = item.stock;
-            qty.value = item.qty;
-            qty.className = "qty";
-            qty.addEventListener("change", function () {
-                const wanted = parseInt(qty.value, 10);
-                item.qty = Math.min(item.stock, Math.max(1, isNaN(wanted) ? 1 : wanted));
-                render();
-            });
             const qtyCell = document.createElement("td");
-            qtyCell.appendChild(qty);
+            if (item.preorder) {
+                qtyCell.textContent = item.qty;
+                qtyCell.className = "num";
+            } else {
+                const qty = document.createElement("input");
+                qty.type = "number";
+                qty.min = 1;
+                qty.max = item.stock;
+                qty.value = item.qty;
+                qty.className = "qty";
+                qty.addEventListener("change", function () {
+                    const wanted = parseInt(qty.value, 10);
+                    item.qty = Math.min(item.stock, Math.max(1, isNaN(wanted) ? 1 : wanted));
+                    render();
+                });
+                qtyCell.appendChild(qty);
+            }
             tr.appendChild(qtyCell);
 
             tr.appendChild(cell(money(item.qty * item.price), "num"));
@@ -138,6 +151,44 @@
     status.addEventListener("change", updatePayment);
     updatePayment();
 
+    // Taken now, or collected on another day: the day is asked for (and sent) only for another day
+    const collectRow = document.getElementById("collect-day-row");
+    const collectHint = document.getElementById("collect-day-hint");
+    const collectOn = document.getElementById("collect-on");
+    const collection = Array.from(form.querySelectorAll('input[name="collection"]'));
+    function updateCollection() {
+        const later = collection.some(function (radio) { return radio.checked && radio.value === "later"; });
+        collectRow.hidden = !later;
+        collectHint.hidden = !later;
+        collectOn.disabled = !later;
+        collectOn.required = later;
+    }
+    collection.forEach(function (radio) { radio.addEventListener("change", updateCollection); });
+
+    // Pre-orders sent from Up Next ("Generate invoice"): into the cart, with the customer's details, and their collection day if it
+    // is still to come
+    const preorders = document.getElementById("preorder-lines");
+    let sent = [];
+    try {
+        sent = JSON.parse(preorders.dataset.lines || "[]");
+    } catch (err) {
+        sent = [];
+    }
+    if (sent.length) {
+        sent.forEach(function (po) {
+            cart.set("po-" + po.preorder, { id: "po-" + po.preorder, preorder: po.preorder, name: po.name, price: po.price, stock: po.qty, qty: po.qty });
+        });
+        if (!customerName.value.trim()) customerName.value = sent[0].customer_name;
+        if (!customerPhone.value.trim()) customerPhone.value = sent[0].customer_phone;
+        const coming = sent.map(function (po) { return po.collect_on; }).filter(function (day) { return day && day >= preorders.dataset.tomorrow; }).sort();
+        if (coming.length) {
+            collection.forEach(function (radio) { radio.checked = radio.value === "later"; });
+            collectOn.value = coming[0];
+        }
+        render();
+    }
+    updateCollection();
+
     form.addEventListener("submit", function (e) {
         if (cart.size === 0) {
             e.preventDefault();
@@ -145,7 +196,7 @@
             return;
         }
         const lines = [];
-        cart.forEach(function (item) { lines.push({ id: item.id, qty: item.qty }); });
+        cart.forEach(function (item) { lines.push(item.preorder ? { preorder: item.preorder } : { id: item.id, qty: item.qty }); });
         document.getElementById("cart-data").value = JSON.stringify(lines);
     });
 })();

@@ -1,0 +1,87 @@
+{% extends "base.html" %}
+{% block title %}Delivery list, {{ customer.name }} — {% endblock %}
+{% block content %}
+<div class="page-head no-print">
+    <div>
+        <a class="back" href="{{ url_for('customer_statement', customer_id=customer.id) }}#delivery">&larr; {{ customer.name }}'s statement</a>
+        <h1>Delivery list</h1>
+    </div>
+    <div class="head-actions">
+        <button type="button" class="btn" onclick="window.print()">Print</button>
+        <a class="btn primary" href="{{ pdf_url }}">Download PDF</a>
+    </div>
+</div>
+
+{% if d.waiting %}
+<section class="card no-print collect-banner">
+    <div>
+        <strong class="gold">{{ d.waiting|length }} of these sales {{ 'were' if d.waiting|length != 1 else 'was' }} waiting to be collected</strong>
+        <p class="muted">{{ d.waiting|map(attribute='invoice_no')|join(', ') }}. Once the goods have been delivered, mark {{ 'them' if d.waiting|length != 1 else 'it' }} as collected.</p>
+    </div>
+    <form method="post" action="{{ url_for('customer_delivery_collected', customer_id=customer.id) }}"
+          data-confirm="Mark {{ d.waiting|map(attribute='invoice_no')|join(', ') }} as collected by {{ customer.name }}?">
+        {{ csrf_field() }}
+        {% for i in ids %}<input type="hidden" name="invoice" value="{{ i }}">{% endfor %}
+        <button class="btn success">Mark as collected</button>
+    </form>
+</section>
+{% endif %}
+
+<article class="statement delivery-note">
+    <header>
+        <h1>{{ user.business_name }}</h1>
+        {% if user.subtitle %}<p class="muted">{{ user.subtitle }}</p>{% endif %}
+        {% if user.contact %}<p class="muted">{{ user.contact }}</p>{% endif %}
+        <p class="doc-type">Delivery Note</p>
+    </header>
+
+    <dl class="facts">
+        <dt>Customer</dt><dd><strong>{{ customer.name }}</strong></dd>
+        <dt>Phone</dt><dd>{{ customer.phone or '—' }}</dd>
+        <dt>Delivery date</dt><dd>{{ d.day }}</dd>
+        <dt>Invoices</dt><dd>{{ d.invoices|map(attribute='invoice_no')|join(', ') }}</dd>
+    </dl>
+
+    {% for inv in d.invoices %}
+    <section class="statement-invoice">
+        <p class="invoice-head">
+            <strong>{{ inv.invoice_no }}</strong>
+            <span class="muted">{{ inv.created_at[:10] }}</span>
+            <span class="status">{{ inv.payment_status }}</span>
+        </p>
+        <div class="table-wrap">
+            <table>
+                <thead><tr><th>Code</th><th>Item</th><th class="num">Qty</th><th class="num">Unit price</th><th class="num">Total</th></tr></thead>
+                <tbody>
+                {% for line in inv.lines %}
+                    <tr><td>{{ line.item_code or '—' }}</td><td>{{ line.item_name }}</td><td class="num">{{ '{:,}'.format(line.qty) }}</td>
+                        <td class="num">{{ line.unit_price|money }}</td><td class="num">{{ line.line_total|money }}</td></tr>
+                {% endfor %}
+                    <tr class="total-row"><td colspan="4">Invoice total</td><td class="num">{{ inv.total|money }}</td></tr>
+                    {% if inv.balance_due > 0.005 %}<tr><td colspan="4">Still owed on this invoice</td><td class="num">{{ inv.balance_due|money }}</td></tr>{% endif %}
+                </tbody>
+            </table>
+        </div>
+    </section>
+    {% endfor %}
+
+    <dl class="totals">
+        <dt>Items delivered</dt><dd>{{ '{:,}'.format(d.units) }}</dd>
+        <dt>Total of these invoices</dt><dd>{{ d.total|money }}</dd>
+        <dt>Paid</dt><dd>{{ d.paid|money }}</dd>
+        <dt>Balance due</dt><dd><strong>{{ d.owed|money }}</strong></dd>
+    </dl>
+
+    <div class="signatures">
+        {% for who in ('Delivered by', 'Received by') %}
+        <div>
+            <strong>{{ who }}</strong>
+            <span>Name</span><i></i>
+            <span>Signature</span><i></i>
+            <span>Date</span><i></i>
+        </div>
+        {% endfor %}
+    </div>
+    <footer class="muted">Printed {{ d.printed }}</footer>
+</article>
+{% endblock %}

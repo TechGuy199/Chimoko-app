@@ -59,6 +59,31 @@
 </section>
 {% endif %}
 
+{% set deliverable = invoices|rejectattr('payment_status', 'equalto', 'Cancelled')|list %}
+{% if deliverable %}
+<section class="card no-print delivery-pick" id="delivery">
+    <h2>Delivery list</h2>
+    <p class="muted">Tick the invoices being delivered, then make the list: every item with its quantity and price, the totals and what is still owed,
+        and lines for whoever delivers and whoever receives to sign. It opens ready to print, with a PDF download.</p>
+    <form method="get" action="{{ url_for('customer_delivery', customer_id=customer.id) }}" data-delivery-form>
+        <div class="delivery-invoices">
+            {% for inv in deliverable|reverse %}
+            <label class="check"><input type="checkbox" name="invoice" value="{{ inv.id }}">
+                <span><strong>{{ inv.invoice_no }}</strong> <span class="muted">{{ inv.created_at[:10] }}</span> &middot; {{ inv.lines|length }} item{{ 's' if inv.lines|length != 1 }}
+                    &middot; {{ inv.total|money }}{% if inv.balance_due > 0.005 %} <small class="warn">{{ inv.balance_due|money }} owed</small>{% endif %}
+                    {% if inv.collect_on and not inv.collected_at %}<small class="gold">to be collected {{ inv.collect_on }}</small>{% endif %}</span></label>
+            {% endfor %}
+        </div>
+        <div class="toolbar">
+            <button type="button" class="btn small" data-tick="all">Tick all</button>
+            <button type="button" class="btn small" data-tick="none">Untick all</button>
+            <label class="check">Delivery date <input type="date" name="date" value="{{ today }}" aria-label="Delivery date"></label>
+            <button class="btn primary">Make delivery list</button>
+        </div>
+    </form>
+</section>
+{% endif %}
+
 <article class="statement">
     <header>
         <h1>{{ user.business_name }}</h1>
@@ -125,6 +150,7 @@
             <strong><a href="{{ url_for('invoice', invoice_id=inv.id) }}">{{ inv.invoice_no }}</a></strong>
             <span class="muted">{{ inv.created_at }} &middot; served by {{ inv.created_by }}</span>
             <span class="status {{ 'muted' if inv.payment_status == 'Cancelled' }}">{{ inv.payment_status }}</span>
+            {% if inv.collect_on and inv.payment_status != 'Cancelled' %}<span class="{{ 'ok' if inv.collected_at else 'gold' }}">{{ 'Collected' if inv.collected_at else 'To be collected ' ~ inv.collect_on }}</span>{% endif %}
         </p>
         {% if inv.payment_status == 'Cancelled' %}
         <p class="muted no-print">Cancelled by {{ inv.cancelled_by }} on {{ inv.cancelled_at }}. Reason: {{ inv.cancel_reason }}</p>
@@ -182,4 +208,23 @@
     </div>
 </dialog>
 {% endblock %}
-{% block scripts %}<script src="{{ asset('payment_method.js') }}"></script>{% endblock %}
+{% block scripts %}<script src="{{ asset('payment_method.js') }}"></script>
+<script>
+    // Delivery list: tick all or none at once, and at least one invoice must be ticked
+    (function () {
+        const form = document.querySelector("form[data-delivery-form]");
+        if (!form) return;
+        const boxes = Array.from(form.querySelectorAll('input[name="invoice"]'));
+        form.querySelectorAll("[data-tick]").forEach(function (button) {
+            button.addEventListener("click", function () {
+                boxes.forEach(function (box) { box.checked = button.dataset.tick === "all"; });
+            });
+        });
+        form.addEventListener("submit", function (e) {
+            if (!boxes.some(function (box) { return box.checked; })) {
+                e.preventDefault();
+                alert("Tick at least one invoice for the delivery list.");
+            }
+        });
+    })();
+</script>{% endblock %}
