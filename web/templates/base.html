@@ -145,15 +145,17 @@
         if (message && !confirm(message)) e.preventDefault();
     });
 
-    // Dropdown menus: only one open at a time; a click elsewhere or Escape closes them
+    // Dropdown menus: only one open at a time; a click elsewhere or Escape closes them. This runs once, but in-place navigation
+    // (nav.js) brings in new menus with every page, so they are looked up at the moment, never kept from the first page.
     (function () {
-        const menus = Array.from(document.querySelectorAll("details.menu"));
         function closeAll(except) {
-            menus.forEach(function (menu) { if (menu !== except) menu.open = false; });
+            document.querySelectorAll("details.menu[open]").forEach(function (menu) { if (menu !== except) menu.open = false; });
         }
-        menus.forEach(function (menu) {
-            menu.addEventListener("toggle", function () { if (menu.open) closeAll(menu); });
-        });
+        // "toggle" does not bubble, hence the capture phase
+        document.addEventListener("toggle", function (e) {
+            const menu = e.target;
+            if (menu instanceof HTMLDetailsElement && menu.open && menu.classList.contains("menu")) closeAll(menu);
+        }, true);
         document.addEventListener("click", function (e) {
             if (!e.target.closest("details.menu, [data-open-menu]")) closeAll(null);
         });
@@ -181,7 +183,7 @@
 {% endif %}
 {% endif %}
 {# In-place navigation (nav.js) swaps this page for the next one without a full reload; it re-runs only the
-   scripts inside #page-scripts on every page change, so it is loaded once, here, outside that container. #}
+   scripts inside #page-main and #page-scripts on every page change, so it is loaded once, here, outside them. #}
 <script src="{{ asset('nav.js') }}"></script>
 <script src="{{ asset('dialog.js') }}"></script>
 <div id="page-scripts">{% block scripts %}{% endblock %}</div>

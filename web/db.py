@@ -3,9 +3,13 @@
 Queries are written once with ? placeholders and must work on both engines, so keep
 them to plain SQL: no literal % or ? characters, and always alias aggregates.
 """
+import hashlib
+import inspect
 import os
 import re
 import sqlite3
+import threading
+import time
 
 DATABASE_URL = os.environ.get("DATABASE_URL") or os.environ.get("POSTGRES_URL")
 IS_POSTGRES = bool(DATABASE_URL)
@@ -13,6 +17,7 @@ LOCAL_DB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "local_dev.d
 
 if IS_POSTGRES:
     import psycopg
+    from psycopg.pq import TransactionStatus
     from psycopg.rows import dict_row
     DB_ERRORS = (psycopg.Error,)
 else:
@@ -217,7 +222,86 @@ SCHEMA = [
         last_id INTEGER, expected DOUBLE PRECISION, set_by TEXT, set_at TEXT
     )""",
     "CREATE INDEX IF NOT EXISTS cashbook_by_source ON cashbook (business_id, source, source_id)",
+    # Which version of the start-up work (the schema above, its migrations and the app's one-off repairs) has been run
+    "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRIMARY KEY, value TEXT)",
 ]
+
+# What the pages look things up by, so they stay quick as the records grow. Made after the migrations in init_schema, as some
+# of these columns are added by them.
+INDEXES = [
+    "CREATE INDEX IF NOT EXISTS invoices_by_date ON invoices (business_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS invoices_by_customer ON invoices (business_id, customer_id)",
+    "CREATE INDEX IF NOT EXISTS invoice_items_by_invoice ON invoice_items (invoice_id)",
+    "CREATE INDEX IF NOT EXISTS invoice_items_by_code ON invoice_items (business_id, item_code)",
+    "CREATE INDEX IF NOT EXISTS procurements_by_date ON procurements (business_id, purchase_date)",
+    "CREATE INDEX IF NOT EXISTS procurements_by_supplier ON procurements (business_id, supplier_id)",
+    "CREATE INDEX IF NOT EXISTS payment_log_by_record ON payment_log (business_id, kind, ref_id)",
+    "CREATE INDEX IF NOT EXISTS customers_by_phone ON customers (business_id, phone_key)",
+    "CREATE INDEX IF NOT EXISTS supplier_payments_by_supplier ON supplier_payments (business_id, supplier_id)",
+    "CREATE INDEX IF NOT EXISTS allocations_by_payment ON supplier_payment_allocations (payment_id)",
+    "CREATE INDEX IF NOT EXISTS allocations_by_purchase ON supplier_payment_allocations (procurement_id)",
+    "CREATE INDEX IF NOT EXISTS preorders_by_planting ON preorders (business_id, planting_id)",
+    "CREATE INDEX IF NOT EXISTS plantings_by_business ON plantings (business_id, ready_on)",
+    "CREATE INDEX IF NOT EXISTS notifications_by_business ON notifications (business_id, read_at)",
+    "CREATE INDEX IF NOT EXISTS stock_adjustments_by_date ON stock_adjustments (business_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS payroll_by_employee ON payroll (business_id, employee_id)",
+    "CREATE INDEX IF NOT EXISTS money_balances_by_account ON money_balances (business_id, account)",
+]
+
+# --- Postgres connections, kept between requests ---
+# Opening a connection to a hosted Postgres costs several network round trips (and an encryption handshake), often more than
+# the queries a page runs. So a connection is kept when a request finishes and handed to the next one on the same thread,
+# for as long as it is in steady use. Before it is kept, anything left open is rolled back, so no request ever sees another's
+# unfinished work and no transaction sits open between requests. A kept connection the server has closed meanwhile is
+# noticed on its first query and replaced, once. Server-side prepared statements are off, so connection poolers in front
+# of the database work too.
+KEEP_FOR = 120   # seconds a connection may sit unused and still be handed on
+_kept = threading.local()
+
+
+def _connect():
+    options = {"connect_timeout": 10, "keepalives": 1, "keepalives_idle": 30, "keepalives_interval": 10, "keepalives_count": 3}
+    if os.name != "nt":
+        options["tcp_user_timeout"] = 15000   # a connection that silently died fails within 15 s instead of hanging
+    return psycopg.connect(DATABASE_URL, row_factory=dict_row, prepare_threshold=None, **options)
+
+
+def _usable(conn):
+    return not conn.closed and not conn.broken
+
+
+def _take_connection():
+    """A kept connection if there is a fresh one, otherwise a new one: (connection, whether it was kept)."""
+    conn, since = getattr(_kept, "conn", None), getattr(_kept, "since", 0.0)
+    _kept.conn = None
+    if conn is not None:
+        if _usable(conn) and time.monotonic() - since < KEEP_FOR and conn.info.transaction_status == TransactionStatus.IDLE:
+            return conn, True
+        _close_quietly(conn)
+    return _connect(), False
+
+
+def _keep_connection(conn):
+    if not _usable(conn):
+        _close_quietly(conn)
+        return
+    try:
+        if conn.info.transaction_status != TransactionStatus.IDLE:
+            conn.rollback()
+    except DB_ERRORS:
+        _close_quietly(conn)
+        return
+    if getattr(_kept, "conn", None) is not None:
+        _close_quietly(conn)   # one is kept already (a second connection opened during the same request)
+        return
+    _kept.conn, _kept.since = conn, time.monotonic()
+
+
+def _close_quietly(conn):
+    try:
+        conn.close()
+    except DB_ERRORS:
+        pass
 
 
 # Every table holding one business's records, read from the schema above so a table added later is never missed
@@ -229,8 +313,9 @@ BUSINESS_TABLES = [
 
 class Database:
     def __init__(self):
+        self.untried = False
         if IS_POSTGRES:
-            self.conn = psycopg.connect(DATABASE_URL, row_factory=dict_row)
+            self.conn, self.untried = _take_connection()
         else:
             self.conn = sqlite3.connect(LOCAL_DB)
             self.conn.row_factory = sqlite3.Row
@@ -238,6 +323,18 @@ class Database:
     def execute(self, sql, params=()):
         if IS_POSTGRES:
             sql = sql.replace("?", "%s")
+            if self.untried:
+                # The first query on a kept connection: if the server closed it while it sat unused, nothing has been
+                # done on it yet, so a new connection can simply run the same query
+                self.untried = False
+                try:
+                    return self._run(sql, params)
+                except psycopg.OperationalError:
+                    _close_quietly(self.conn)
+                    self.conn = _connect()
+        return self._run(sql, params)
+
+    def _run(self, sql, params):
         cur = self.conn.cursor()
         cur.execute(sql, tuple(params))
         return cur
@@ -263,7 +360,10 @@ class Database:
         self.conn.rollback()
 
     def close(self):
-        self.conn.close()
+        if IS_POSTGRES:
+            _keep_connection(self.conn)
+        else:
+            self.conn.close()
 
 
 def delete_business(db, biz):
@@ -346,6 +446,49 @@ def init_schema():
                    contribution_base = 'basic'
                WHERE napsa_employee_pct IS NULL"""
         )
+        for statement in INDEXES:
+            db.execute(statement)
         db.commit()
+    finally:
+        db.close()
+
+
+# --- Start-up work, once per version of the code ---
+# Creating the tables, adding columns and repairing older records only has anything to do when the code that does it has
+# changed. Every check costs a round trip to the database and ALTER TABLE briefly locks its table, so a cold start skips
+# all of it when the database says it already ran for this exact code: the schema, init_schema and the repairs passed in.
+def startup_signature(repairs=()):
+    parts = list(SCHEMA) + INDEXES
+    try:
+        parts += [inspect.getsource(init_schema)] + [inspect.getsource(fn) for fn in repairs]
+    except (OSError, TypeError):
+        return None   # the source cannot be read, so the start-up work always runs
+    return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()[:20]
+
+
+def startup_done(signature):
+    if signature is None:
+        return False
+    db = Database()
+    try:
+        row = db.one("SELECT value FROM app_meta WHERE key='startup'")
+        return bool(row) and row["value"] == signature
+    except DB_ERRORS:
+        db.rollback()   # no app_meta table yet: a new database, or one from before this existed
+        return False
+    finally:
+        db.close()
+
+
+def mark_startup_done(signature):
+    if signature is None:
+        return
+    db = Database()
+    try:
+        db.execute("DELETE FROM app_meta WHERE key='startup'")
+        db.execute("INSERT INTO app_meta (key, value) VALUES ('startup', ?)", (signature,))
+        db.commit()
+    except DB_ERRORS:
+        db.rollback()
     finally:
         db.close()

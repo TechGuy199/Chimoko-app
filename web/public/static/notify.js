@@ -82,17 +82,31 @@
         }
     }
 
+    // The last answer, drawn again into the fresh header that every in-place page change brings (it arrives from the server
+    // with no alerts in it), so the count does not vanish until the next round
+    let last = null;
+    let lastAt = 0;
+    function draw(data) {
+        const count = countEl();
+        if (count) {
+            count.textContent = data.unread;
+            count.hidden = data.unread === 0;
+        }
+        renderList(data.items);
+    }
+    document.addEventListener("nav:swapped", function () {
+        if (last) draw(last);
+        if (Date.now() - lastAt > 10000) poll();   // moving around the app keeps the alerts current too
+    });
+
     function poll() {
+        lastAt = Date.now();
         fetch(pollUrl, { credentials: "same-origin", headers: { "Accept": "application/json" } })
             .then(function (response) { return response.ok ? response.json() : null; })
             .then(function (data) {
                 if (!data) return;
-                const count = countEl();
-                if (count) {
-                    count.textContent = data.unread;
-                    count.hidden = data.unread === 0;
-                }
-                renderList(data.items);
+                last = data;
+                draw(data);
                 // Oldest first, so a burst of alerts stacks in the order it happened
                 data.items.slice().reverse().forEach(function (item) {
                     if (!shown.has(item.id)) {

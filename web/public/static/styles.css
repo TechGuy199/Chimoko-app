@@ -139,7 +139,7 @@ a { color: var(--accent); text-decoration: none; transition: color 0.18s var(--e
 a:hover { color: var(--text-bright); }
 h1 { margin: 0 0 14px; font-size: 22px; font-weight: 650; letter-spacing: -0.01em; color: var(--text-bright); }
 h2 { margin: 0 0 12px; font-size: 12px; font-weight: 650; letter-spacing: 0.07em; text-transform: uppercase; color: var(--text-muted); }
-main { max-width: 1680px; margin: 0 auto; padding: 24px 20px 48px; animation: page-in 0.32s var(--ease) both; }
+main { max-width: 1680px; margin: 0 auto; padding: 24px 20px 48px; animation: page-in 0.2s var(--ease) both; }
 small { font-size: 11px; }
 
 /* ---------- Top bar and dropdown menus ---------- */
@@ -276,6 +276,11 @@ small { font-size: 11px; }
     box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.10), 0 10px 30px var(--shadow);
     transition: transform 0.25s var(--ease), border-color 0.25s var(--ease), box-shadow 0.25s var(--ease), background-color 0.3s var(--ease);
 }
+/* On phones and touch screens the tiles skip the blur: all that is behind them is the soft background, which looks the same
+   unblurred, and blurring it again on every frame of a scroll is what makes scrolling stutter on modest phones */
+@media (hover: none), (max-width: 760px) {
+    .stat, .dept-tile { -webkit-backdrop-filter: none; backdrop-filter: none; }
+}
 .stat span { display: block; color: var(--text-muted); font-size: 11px; font-weight: 650; letter-spacing: 0.06em; text-transform: uppercase; }
 .stat strong { display: block; margin-top: 4px; font-size: 22px; font-weight: 650; letter-spacing: -0.01em; }
 .stat small { display: block; margin-top: 2px; color: var(--text-muted); }
@@ -291,11 +296,11 @@ small { font-size: 11px; }
 }
 .dept-tile strong { display: block; font-size: 15px; font-weight: 650; }
 .dept-tile small { display: block; margin-top: 4px; color: var(--text-muted); }
-.stats .stat, .dept-tiles .dept-tile { animation: rise 0.4s var(--ease) both; }
-.stats .stat:nth-child(2), .dept-tiles .dept-tile:nth-child(2) { animation-delay: 0.04s; }
-.stats .stat:nth-child(3), .dept-tiles .dept-tile:nth-child(3) { animation-delay: 0.08s; }
-.stats .stat:nth-child(4), .dept-tiles .dept-tile:nth-child(4) { animation-delay: 0.12s; }
-.stats .stat:nth-child(n + 5), .dept-tiles .dept-tile:nth-child(n + 5) { animation-delay: 0.16s; }
+.stats .stat, .dept-tiles .dept-tile { animation: rise 0.3s var(--ease) both; }
+.stats .stat:nth-child(2), .dept-tiles .dept-tile:nth-child(2) { animation-delay: 0.03s; }
+.stats .stat:nth-child(3), .dept-tiles .dept-tile:nth-child(3) { animation-delay: 0.06s; }
+.stats .stat:nth-child(4), .dept-tiles .dept-tile:nth-child(4) { animation-delay: 0.09s; }
+.stats .stat:nth-child(n + 5), .dept-tiles .dept-tile:nth-child(n + 5) { animation-delay: 0.12s; }
 
 /* ---------- Forms and buttons ---------- */
 label { display: block; margin-bottom: 12px; color: var(--text-muted); font-size: 12px; }
@@ -463,6 +468,11 @@ a.rank-name:hover { color: var(--accent); }
 
 /* Planting records filters, pre-orders by customer */
 .planting-filters .date-range input { width: auto; margin: 0; }
+@media (max-width: 560px) {
+    /* On a phone each date range takes its own row, its two dates sharing the width */
+    .planting-filters .date-range { display: flex; width: 100%; }
+    .planting-filters .date-range input { flex: 1 1 0; min-width: 0; }
+}
 .preorder-group { margin-top: 14px; padding: 12px 14px; border: 1px solid var(--line-strong); border-radius: var(--radius-small); }
 .group-head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px 16px; align-items: flex-start; margin-bottom: 8px; }
 .group-head form { margin: 0; }
@@ -720,6 +730,19 @@ tr.unread td:first-child { box-shadow: inset 3px 0 0 var(--primary); }
 @keyframes grow { from { transform: scaleY(0); } }
 @keyframes grow-x { from { transform: scaleX(0); } }
 @keyframes page-out { to { opacity: 0; } }
+
+/* In-place navigation (nav.js): a thin bar along the top while the next page is on its way, and a page that is only refreshed
+   where it is (a search as you type, a filter, a save that comes back to the same page) does not replay its entrance */
+#nav-progress {
+    position: fixed; top: 0; left: 0; right: 0; height: 3px; z-index: 10000; pointer-events: none;
+    background: linear-gradient(90deg, var(--primary), var(--accent)); transform-origin: left center; transform: scaleX(0); opacity: 0;
+}
+#nav-progress.running { opacity: 1; animation: nav-progress 9s cubic-bezier(0.08, 0.8, 0.2, 1) forwards; }
+#nav-progress.finishing { opacity: 0; transform: scaleX(1); transition: transform 0.18s ease-out, opacity 0.25s ease 0.15s; }
+@keyframes nav-progress { from { transform: scaleX(0); } to { transform: scaleX(0.92); } }
+html.nav-busy, html.nav-busy a, html.nav-busy button { cursor: progress; }
+html.nav-quiet main, html.nav-quiet .stats .stat, html.nav-quiet .dept-tiles .dept-tile, html.nav-quiet .group > .table-wrap { animation: none; }
+form.is-sending button[type="submit"], form.is-sending button:not([type]) { opacity: 0.65; cursor: progress; }
 
 /* Moving between pages cross-fades instead of flashing; the top bar stays put */
 @view-transition { navigation: auto; }

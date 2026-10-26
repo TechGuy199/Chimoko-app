@@ -1,4 +1,5 @@
 import calendar
+import collections
 import csv
 import datetime
 import difflib
@@ -13,6 +14,7 @@ import random
 import re
 import secrets
 import time
+import urllib.parse
 import zipfile
 from zoneinfo import ZoneInfo
 
@@ -21,7 +23,7 @@ from markupsafe import Markup
 from werkzeug.security import check_password_hash, generate_password_hash
 import xlsxwriter
 
-from db import DB_ERRORS, IS_POSTGRES, Database, delete_business, init_schema
+from db import DB_ERRORS, IS_POSTGRES, Database, delete_business, init_schema, mark_startup_done, startup_done, startup_signature
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ON_VERCEL = bool(os.environ.get("VERCEL"))
@@ -55,6 +57,83 @@ app.config.update(
 )
 
 PUBLIC_DIR = os.path.join(BASE_DIR, "public")
+
+
+# --- SAVES COME BACK AS THE NEXT PAGE ---
+# Every save is a form POST answered with a redirect to the page to show next, so a refresh never sends it twice. Over a slow
+# or far-away connection that costs a second full round trip: the browser has to come back and ask for that page. When the
+# app's own in-place navigation (nav.js) sends a save, it says so (X-Nav: follow), and the redirect is followed here instead:
+# the next page is produced by an ordinary request of its own, with the cookies the save just set (so its message shows once),
+# and sent back in the same response, with X-Nav-Url saying which page it is. Anything else gets the plain redirect.
+class FollowSaves:
+    REDIRECTS = ("301", "302", "303")
+
+    def __init__(self, wsgi):
+        self.wsgi = wsgi
+
+    def __call__(self, environ, start_response):
+        if environ.get("REQUEST_METHOD") != "POST" or environ.get("HTTP_X_NAV") != "follow":
+            return self.wsgi(environ, start_response)
+        status, headers, body = self.run(environ)
+        location = next((value for name, value in headers if name.lower() == "location"), "")
+        target = urllib.parse.urlsplit(location)
+        same_site = not target.netloc or target.netloc == environ.get("HTTP_HOST")
+        if status[:3] not in self.REDIRECTS or not location or not same_site or not target.path.startswith("/"):
+            start_response(status, headers)
+            return body
+        saved_cookies = [value for name, value in headers if name.lower() == "set-cookie"]
+        page = dict(environ)
+        page.update({
+            "REQUEST_METHOD": "GET", "PATH_INFO": urllib.parse.unquote(target.path), "QUERY_STRING": target.query,
+            "CONTENT_LENGTH": "0", "CONTENT_TYPE": "", "wsgi.input": io.BytesIO(b""),
+            "HTTP_COOKIE": self.cookies_after(environ.get("HTTP_COOKIE", ""), saved_cookies),
+        })
+        for key in ("HTTP_X_NAV", "werkzeug.request"):
+            page.pop(key, None)
+        status, headers, body = self.run(page)
+        # The save's cookies first, then the page's: where both set one (the session, with its message read), the page's wins
+        headers = [(n, v) for n, v in headers if n.lower() != "set-cookie"] + [("Set-Cookie", v) for v in saved_cookies] \
+            + [(n, v) for n, v in headers if n.lower() == "set-cookie"] + [("X-Nav-Url", target.path + ("?" + target.query if target.query else ""))]
+        start_response(status, headers)
+        return body
+
+    def run(self, environ):
+        captured, chunks = {}, []
+
+        def start(status, headers, exc_info=None):
+            captured["status"], captured["headers"] = status, list(headers)
+            return chunks.append
+
+        result = self.wsgi(environ, start)
+        try:
+            chunks.extend(result)
+        finally:
+            if hasattr(result, "close"):
+                result.close()
+        return captured["status"], captured["headers"], chunks
+
+    @staticmethod
+    def cookies_after(sent, set_cookies):
+        """The Cookie header the browser would send once it has taken in these Set-Cookie headers."""
+        jar = {}
+        for part in sent.split(";"):
+            name, _, value = part.strip().partition("=")
+            if name:
+                jar[name] = value
+        for header in set_cookies:
+            first, *attributes = header.split(";")
+            name, _, value = first.strip().partition("=")
+            removed = any(a.strip().lower() == "max-age=0" for a in attributes) or any(
+                a.strip().lower().startswith("expires=") and "1970" in a for a in attributes
+            )
+            if removed:
+                jar.pop(name, None)
+            elif name:
+                jar[name] = value
+        return "; ".join(f"{name}={value}" for name, value in jar.items())
+
+
+app.wsgi_app = FollowSaves(app.wsgi_app)
 
 
 # --- INSTALLABLE APP (PWA) ---
@@ -104,9 +183,6 @@ def pwa_manifest():
 @app.get("/sw.js")
 def pwa_service_worker():
     return send_from_directory(PUBLIC_DIR, "sw.js", mimetype="application/javascript")
-
-
-init_schema()
 
 
 class StockError(Exception):
@@ -606,8 +682,6 @@ def sync_categories():
         db.close()
 
 
-sync_categories()
-
 
 def next_invoice_no(db, biz):
     year = now().strftime("%Y")
@@ -624,8 +698,14 @@ def next_invoice_no(db, biz):
             pass
     # Imported invoices can carry any number, so make sure the candidate really is free. A number whose invoice was
     # deleted stays taken, so the deletion record can never be confused with a later invoice.
-    while (db.one("SELECT id FROM invoices WHERE business_id=? AND invoice_no=?", (biz, f"INV-{year}-{seq:04d}"))
-           or db.one("SELECT id FROM deleted_invoices WHERE business_id=? AND invoice_no=?", (biz, f"INV-{year}-{seq:04d}"))):
+    def taken(number):
+        return db.one(
+            """SELECT (SELECT COUNT(*) FROM invoices WHERE business_id=? AND invoice_no=?)
+                      + (SELECT COUNT(*) FROM deleted_invoices WHERE business_id=? AND invoice_no=?) AS n""",
+            (biz, number, biz, number),
+        )["n"]
+
+    while taken(f"INV-{year}-{seq:04d}"):
         seq += 1
     return f"INV-{year}-{seq:04d}"
 
@@ -951,37 +1031,36 @@ def fill_demo_data(db, biz):
 @need(None)
 def pos():
     db, biz = get_db(), g.user["business_id"]
-    release_plantings(db, biz)
+    growing = release_plantings(db, biz)
     products = db.all(
         "SELECT id, item_code, name, department, date_planted, quantity, price FROM pos_products WHERE business_id=? AND quantity > 0 ORDER BY name",
         (biz,),
     )
-    units = db.one(
-        """SELECT COALESCE(SUM(ii.qty), 0) AS n FROM invoice_items ii
-           JOIN invoices i ON i.id = ii.invoice_id WHERE i.business_id=? AND i.kind='SALE' AND i.payment_status <> 'Cancelled'""",
-        (biz,),
-    )["n"]
-    sales = db.one(
-        "SELECT COALESCE(SUM(amount_paid), 0) AS received, COALESCE(SUM(balance_due), 0) AS owed FROM invoices WHERE business_id=? AND kind='SALE' AND payment_status <> 'Cancelled'",
-        (biz,),
-    )
-    spend = db.one(
-        "SELECT COALESCE(SUM(amount_paid), 0) AS paid, COALESCE(SUM(total_cost - amount_paid), 0) AS owed FROM procurements WHERE business_id=?",
-        (biz,),
+    # The figures on the tiles, in one round trip
+    sales = "FROM invoices WHERE business_id=? AND kind='SALE' AND payment_status <> 'Cancelled'"
+    totals = db.one(
+        f"""SELECT (SELECT COALESCE(SUM(ii.qty), 0) FROM invoice_items ii JOIN invoices i ON i.id = ii.invoice_id
+                    WHERE i.business_id=? AND i.kind='SALE' AND i.payment_status <> 'Cancelled') AS units,
+                   (SELECT COALESCE(SUM(amount_paid), 0) {sales}) AS received, (SELECT COALESCE(SUM(balance_due), 0) {sales}) AS owed,
+                   (SELECT COALESCE(SUM(amount_paid), 0) FROM procurements WHERE business_id=?) AS paid,
+                   (SELECT COALESCE(SUM(total_cost - amount_paid), 0) FROM procurements WHERE business_id=?) AS payable,
+                   (SELECT COUNT(*) FROM preorders WHERE business_id=? AND status='pending') AS preorders,
+                   (SELECT COALESCE(SUM(qty), 0) FROM preorders WHERE business_id=? AND status='pending') AS preorder_qty""",
+        (biz,) * 7,
     )
     stats = {
         "listed": len(products),
         "low": sum(1 for p in products if p["quantity"] < g.user["low_stock_threshold"]),
-        "units": units,
-        "revenue": sales["received"],
-        "receivable": sales["owed"],
-        "expenditure": spend["paid"],
-        "payable": spend["owed"],
+        "units": totals["units"],
+        "revenue": totals["received"],
+        "receivable": totals["owed"],
+        "expenditure": totals["paid"],
+        "payable": totals["payable"],
     }
     known_customers = db.all("SELECT name, phone FROM customers WHERE business_id=? ORDER BY name LIMIT 1000", (biz,))
     return render_template(
         "pos.html", products=products, stats=stats, departments=department_names(db, biz), statuses=PAYMENT_STATUSES, methods=PAYMENT_METHODS,
-        known_customers=known_customers, up_next=up_next_summary(db, biz), removal_reasons=POS_REMOVAL_REASONS,
+        known_customers=known_customers, up_next=up_next_summary(db, biz, growing, totals), removal_reasons=POS_REMOVAL_REASONS,
     )
 
 
@@ -1074,11 +1153,17 @@ def checkout():
         return redirect(url_for("pos"))
 
     lines, total = [], 0.0
-    for pid, qty in wanted.items():
-        p = db.one(
-            "SELECT id, item_code, name, department, batch_no, quantity, price FROM pos_products WHERE id=? AND business_id=?",
-            (pid, biz),
+    # Every item in the cart in one query
+    ids = list(wanted)
+    found = {
+        p["id"]: p
+        for p in db.all(
+            f"SELECT id, item_code, name, department, batch_no, quantity, price FROM pos_products WHERE business_id=? AND id IN ({', '.join('?' for _ in ids)})",
+            [biz] + ids,
         )
+    }
+    for pid, qty in wanted.items():
+        p = found.get(pid)
         if not p or qty > p["quantity"]:
             available = p["quantity"] if p else 0
             flash(f"Insufficient stock for {p['name'] if p else 'an item'}. Available: {available}.", "error")
@@ -1240,23 +1325,20 @@ def seedling_plan(packs, seeds_per_pack, germination_pct, seed_cost):
 
 
 def backfill_units():
-    """Seed items are counted in packs, but older ones have no unit recorded. Safe to repeat."""
+    """Seed items are counted in packs, but older ones have no unit recorded. Safe to repeat, and one query when there is nothing to do."""
     db = Database()
     try:
-        for biz in [row["id"] for row in db.all("SELECT id FROM businesses")]:
-            for row in db.all("SELECT DISTINCT category FROM products WHERE business_id=? AND (unit IS NULL OR unit = '')", (biz,)):
-                if is_seed_category(row["category"]):
-                    db.execute(
-                        "UPDATE products SET unit=? WHERE business_id=? AND category=? AND (unit IS NULL OR unit = '')", (SEED_UNIT, biz, row["category"])
-                    )
+        for row in db.all("SELECT DISTINCT business_id, category FROM products WHERE unit IS NULL OR unit = ''"):
+            if is_seed_category(row["category"]):
+                db.execute(
+                    "UPDATE products SET unit=? WHERE business_id=? AND category=? AND (unit IS NULL OR unit = '')", (SEED_UNIT, row["business_id"], row["category"])
+                )
         db.commit()
     except DB_ERRORS:
         db.rollback()
     finally:
         db.close()
 
-
-backfill_units()
 
 
 def get_item(db, item_id):
@@ -3434,10 +3516,14 @@ def statement_data(db, customer_id):
         (biz, customer_id),
     )
 
-    products = {}
+    products, lines_of, changes_of = {}, {}, {}
+    for line in lines:
+        lines_of.setdefault(line["invoice_id"], []).append(line)
+    for change in changes:
+        changes_of.setdefault(change["ref_id"], []).append(change)
     for inv in invoices:
-        inv["lines"] = [line for line in lines if line["invoice_id"] == inv["id"]]
-        inv["changes"] = [change for change in changes if change["ref_id"] == inv["id"]]
+        inv["lines"] = lines_of.get(inv["id"], [])
+        inv["changes"] = changes_of.get(inv["id"], [])
         if inv["payment_status"] == "Cancelled":
             continue  # kept on the statement for the record, but not counted as something they bought
         for line in inv["lines"]:
@@ -3693,10 +3779,20 @@ DUPLICATES_SHOWN = 100
 CUSTOMER_COLUMNS = "id, name, phone, name_key, phone_key, created_at"
 
 
+@functools.lru_cache(maxsize=20000)
+def letter_counts(key):
+    return collections.Counter(key)
+
+
 def names_alike(a, b):
     """True when two name keys look like the same person: reordered, a small typo, or an initial for a full name."""
     words_a, words_b = a.split(), b.split()
-    if sorted(words_a) == sorted(words_b) or difflib.SequenceMatcher(None, a, b).ratio() >= 0.86:
+    if sorted(words_a) == sorted(words_b):
+        return True
+    # A typo-level match (difflib's ratio of 0.86 or more) needs at least that share of letters in common, so most pairs are told
+    # apart by counting letters, without the full comparison. The count can only be higher than the ratio, never lower.
+    common = sum((letter_counts(a) & letter_counts(b)).values())
+    if 2.0 * common / ((len(a) + len(b)) or 1) >= 0.86 and difflib.SequenceMatcher(None, a, b).ratio() >= 0.86:
         return True
     if len(words_a) != len(words_b) or len(words_a) < 2:
         return False
@@ -3730,12 +3826,32 @@ def find_duplicates(db, biz):
     return duplicate_pairs(people, distinct_pairs(db, biz))
 
 
+# Matching every account against the others takes a while once there are thousands, and the Customers page shows the count on every
+# visit. The answer only changes when a name, a phone number or an account does, or a pair is marked different, so the last few
+# answers are kept, keyed by exactly that.
+_matches_seen = collections.OrderedDict()
+
+
 def duplicate_pairs(people, ruled_out):
     """Pairs of accounts that may be the same party, strongest evidence first. Shared by customers and suppliers.
 
     people are dicts with id, name_key and phone_key; ruled_out holds pair_key pairs an admin said are different.
     """
     by_id = {p["id"]: p for p in people}
+    key = (tuple((p["id"], p["name_key"], p["phone_key"]) for p in people), frozenset(ruled_out))
+    found = _matches_seen.get(key)
+    if found is None:
+        found = matching_pairs(people, by_id, ruled_out)
+        _matches_seen[key] = found
+        while len(_matches_seen) > 8:
+            _matches_seen.popitem(last=False)
+    pairs = [{"a": by_id[low], "b": by_id[high], "reason": reason, "rank": rank} for (low, high), (rank, reason) in found.items()]
+    pairs.sort(key=lambda pair: (pair["rank"], pair["a"]["name_key"], pair["a"]["id"]))
+    return pairs
+
+
+def matching_pairs(people, by_id, ruled_out):
+    """{pair_key: (rank, reason)} for every pair of accounts that may be the same party."""
     found = {}
 
     def suggest(a, b, rank, reason):
@@ -3765,29 +3881,31 @@ def duplicate_pairs(people, ruled_out):
             for word in set(p["name_key"].split()) | {p["name_key"][:3]}:
                 if len(word) >= 2:
                     buckets.setdefault(word, []).append(p["id"])
+    compared = set()   # names sharing two words meet in two buckets; each pair is compared once
     for ids in buckets.values():
         if len(ids) > 150:
             continue
         for i, a in enumerate(ids):
             for b in ids[i + 1:]:
-                if pair_key(a, b) not in found and names_alike(by_id[a]["name_key"], by_id[b]["name_key"]):
+                key = pair_key(a, b)
+                if key in found or key in compared:
+                    continue
+                compared.add(key)
+                if names_alike(by_id[a]["name_key"], by_id[b]["name_key"]):
                     both_have_phones = by_id[a]["phone_key"] and by_id[b]["phone_key"]
                     suggest(a, b, 3 if both_have_phones else 2, "Similar name, different phone numbers" if both_have_phones else "Similar name")
-
-    pairs = [{"a": by_id[low], "b": by_id[high], "reason": reason, "rank": rank} for (low, high), (rank, reason) in found.items()]
-    pairs.sort(key=lambda pair: (pair["rank"], pair["a"]["name_key"], pair["a"]["id"]))
-    return pairs
+    return found
 
 
 def phone_twins(db, biz, customer_id):
     """Other accounts carrying this customer's phone number, unless an admin already said they are different people."""
-    me = db.one("SELECT phone_key FROM customers WHERE id=? AND business_id=?", (customer_id, biz))
-    if not me or not me["phone_key"]:
-        return []
     others = db.all(
-        "SELECT id, name, phone FROM customers WHERE business_id=? AND phone_key=? AND id<>? ORDER BY id",
-        (biz, me["phone_key"], customer_id),
+        """SELECT o.id, o.name, o.phone FROM customers o JOIN customers me ON me.id=? AND me.business_id=o.business_id AND me.phone_key=o.phone_key
+           WHERE o.business_id=? AND o.id<>? AND me.phone_key <> '' ORDER BY o.id""",
+        (customer_id, biz, customer_id),
     )
+    if not others:
+        return []
     ruled_out = distinct_pairs(db, biz)
     return [other for other in others if pair_key(customer_id, other["id"]) not in ruled_out]
 
@@ -3892,8 +4010,6 @@ def link_existing_customers():
     finally:
         db.close()
 
-
-link_existing_customers()
 
 
 # --- SUPPLIER STATEMENTS (ADMIN) ---
@@ -4829,8 +4945,6 @@ def link_existing_suppliers():
     finally:
         db.close()
 
-
-link_existing_suppliers()
 
 
 # --- REPORTS ---
@@ -5902,11 +6016,13 @@ def sync_planting(db, biz, planting_id):
 
 
 def release_plantings(db, biz):
-    """Lists on the POS every batch that is now within a week of being ready (or already marked ready). Safe to repeat."""
+    """Lists on the POS every batch that is now within a week of being ready (or already marked ready). Safe to repeat.
+    Returns the batches that are still not on the POS."""
     today = today_str()
-    waiting = [p for p in db.all("SELECT * FROM plantings WHERE business_id=? AND released=0", (biz,)) if on_pos_now(p, today)]
+    unreleased = db.all("SELECT * FROM plantings WHERE business_id=? AND released=0", (biz,))
+    waiting = [p for p in unreleased if on_pos_now(p, today)]
     if not waiting:
-        return
+        return unreleased
     try:
         for f in with_figures(db, biz, waiting):
             db.execute("UPDATE plantings SET released=1 WHERE id=? AND business_id=?", (f["id"], biz))
@@ -5914,13 +6030,21 @@ def release_plantings(db, biz):
         db.commit()
     except DB_ERRORS:
         db.rollback()
+        return unreleased
+    released = {p["id"] for p in waiting}
+    return [p for p in unreleased if p["id"] not in released]
 
 
-def up_next_summary(db, biz):
-    """For the POS tile: batches still growing that are not on the POS yet, and pre-orders waiting for collection."""
-    rows = with_figures(db, biz, db.all("SELECT * FROM plantings WHERE business_id=? AND released=0 AND still_in_greenhouse=1 ORDER BY ready_on, id", (biz,)))
-    waiting = db.one("SELECT COUNT(*) AS n, COALESCE(SUM(qty), 0) AS qty FROM preorders WHERE business_id=? AND status='pending'", (biz,))
-    return {"batches": len(rows), "next": rows[0] if rows else None, "preorders": waiting["n"], "preorder_qty": waiting["qty"]}
+def up_next_summary(db, biz, unreleased=None, preorders=None):
+    """For the POS tile: batches still growing that are not on the POS yet, and pre-orders waiting for collection. The POS passes
+    what it has read already: the batches not on the POS (release_plantings) and the pending pre-orders' count and quantity."""
+    if unreleased is None:
+        unreleased = db.all("SELECT * FROM plantings WHERE business_id=? AND released=0", (biz,))
+    growing = sorted((p for p in unreleased if p["still_in_greenhouse"]), key=lambda p: (p["ready_on"] or "", p["id"]))
+    rows = with_figures(db, biz, growing)
+    if preorders is None:
+        preorders = db.one("SELECT COUNT(*) AS preorders, COALESCE(SUM(qty), 0) AS preorder_qty FROM preorders WHERE business_id=? AND status='pending'", (biz,))
+    return {"batches": len(rows), "next": rows[0] if rows else None, "preorders": preorders["preorders"], "preorder_qty": preorders["preorder_qty"]}
 
 
 def insert_planting(db, biz, d):
@@ -6970,14 +7094,14 @@ ACCOUNT_PARAMS = ("period", "from", "to", "direction", "channel", "category", "q
 ACCOUNT_LIST_LIMIT = 500
 
 
-def account_filters(db=None, biz=None):
+def account_filters(db=None, biz=None, counts=None):
     """What the Accounts page shows: a date range for everything, and the narrowing of its list of entries. "Not in any balance
     yet" lists only what came after the balances were counted (what came before is part of the counts)."""
     period, start, end = invoice_period(default="this_month")
     pick = lambda key, allowed: request.args.get(key, "") if request.args.get(key, "") in allowed else ""  # noqa: E731
     since = None
     if db is not None and request.args.get("channel") == "Unassigned":
-        counts = balance_counts(db, biz)
+        counts = balance_counts(db, biz) if counts is None else counts
         since = min(boundary_of(c) for c in counts.values()) if counts else None
     return {
         "since": since,
@@ -7103,10 +7227,10 @@ def account_summary(db, biz, start, end):
     }
 
 
-def account_flow(db, biz, start, end):
+def account_flow(db, biz, start, end, counts):
     """Money in and out per day (a period up to two months) or per month, with a running balance. Once the balances are counted,
     that is what is held in them (worked out from each count, so it is right before the count as well as after); until then,
-    everything ever recorded in less everything out."""
+    everything ever recorded in less everything out. counts is balance_counts(db, biz)."""
     by_day = bool(start and end and (end - start).days <= 62)
     width = 10 if by_day else 7
     where, params = days_where(start, end)
@@ -7115,11 +7239,10 @@ def account_flow(db, biz, start, end):
             WHERE business_id=?{where} GROUP BY bucket, direction, method ORDER BY bucket""",
         [biz] + params,
     )
-    counts = balance_counts(db, biz)
     if counts:
         tracked = {m for key in counts for m in dict(CHANNELS)[key]}
         first = start.isoformat() if start else (min((r["bucket"] for r in rows), default=today_str()) + "-01")[:10]
-        opening, lines = flow_lines(rows, by_day, sum(balance_at(db, biz, key, count, first) for key, count in counts.items()), tracked)
+        opening, lines = flow_lines(rows, by_day, sum(balances_at(db, biz, counts, first)[0].values()), tracked)
         return {"by_day": by_day, "opening": opening, "lines": lines, "has_start": bool(start), "counted": True}
     opening = 0.0
     if start:
@@ -7181,54 +7304,66 @@ def after(point, prefix=""):
     return f"({prefix}occurred_at > ? OR ({prefix}occurred_at = ? AND {prefix}id > ?))", [point[0], point[0], point[1]]
 
 
-def moved_through(db, biz, channel, low=None, high=None):
-    """Money in less money out through one balance, for the entries after the point low and not after the point high."""
-    methods = dict(CHANNELS)[channel]
-    where, params = "", []
-    if low:
-        clause, values = after(low)
-        where, params = where + " AND " + clause, params + values
-    if high:
-        clause, values = after(high)
-        where, params = where + " AND NOT " + clause, params + values
-    return db.one(
-        f"""SELECT COALESCE(SUM(CASE WHEN direction='in' THEN amount ELSE -amount END), 0) AS net FROM cashbook
-            WHERE business_id=? AND method IN ({', '.join('?' for _ in methods)}){where}""",
-        [biz, *methods, *params],
-    )["net"]
+def balances_at(db, biz, counts, point=None, loose_since=None):
+    """Every counted balance at a point in time (now, when None), each worked forwards or backwards from its own count, in one query:
+    ({channel: amount}, loose). A point is (timestamp, last entry) or just a timestamp (the start of that moment). With loose_since,
+    loose also counts the entries after that point that belong to no balance: {"n", "cin", "cout"}."""
+    if point is not None and not isinstance(point, tuple):
+        point = (point, 0)
+    signed = "CASE WHEN direction='in' THEN amount ELSE -amount END"
+    columns, params = [], []
+    for i, (key, count) in enumerate(counts.items()):
+        methods = dict(CHANNELS)[key]
+        base = boundary_of(count)
+        # Forwards from the count to the point (or to now), or backwards from the count to a point before it
+        low, high = (base, point) if point is None or point >= base else (point, base)
+        where, values = f"method IN ({', '.join('?' for _ in methods)})", list(methods)
+        clause, more = after(low)
+        where, values = where + " AND " + clause, values + more
+        if high:
+            clause, more = after(high)
+            where, values = where + " AND NOT " + clause, values + more
+        columns.append(f"COALESCE(SUM(CASE WHEN {where} THEN {signed} ELSE 0 END), 0) AS b{i}")
+        params += values
+    if loose_since:
+        clause, more = after(loose_since)
+        where = f"method IN ({', '.join('?' for _ in UNASSIGNED_METHODS)}) AND {clause}"
+        columns += [
+            f"COALESCE(SUM(CASE WHEN {where} THEN 1 ELSE 0 END), 0) AS loose_n",
+            f"COALESCE(SUM(CASE WHEN {where} AND direction='in' THEN amount ELSE 0 END), 0) AS loose_in",
+            f"COALESCE(SUM(CASE WHEN {where} AND direction='out' THEN amount ELSE 0 END), 0) AS loose_out",
+        ]
+        params += (list(UNASSIGNED_METHODS) + more) * 3
+    if not columns:
+        return {}, None
+    row = db.one(f"SELECT {', '.join(columns)} FROM cashbook WHERE business_id=?", params + [biz])
+    amounts = {}
+    for i, (key, count) in enumerate(counts.items()):
+        base = boundary_of(count)
+        moved = row[f"b{i}"]
+        amounts[key] = count["amount"] + moved if point is None or point >= base else count["amount"] - moved
+    loose = {"n": int(row["loose_n"]), "cin": row["loose_in"], "cout": row["loose_out"]} if loose_since else None
+    return amounts, loose
 
 
 def balance_at(db, biz, channel, count, point=None):
-    """One balance at a point in time (now, when None), worked forwards or backwards from its count. A point is
-    (timestamp, last entry) or just a timestamp (the start of that moment)."""
-    base = boundary_of(count)
-    if point is not None and not isinstance(point, tuple):
-        point = (point, 0)
-    if point is None or point >= base:
-        return count["amount"] + moved_through(db, biz, channel, base, point)
-    return count["amount"] - moved_through(db, biz, channel, point, base)
+    """One balance at a point in time (now, when None), worked forwards or backwards from its count."""
+    return balances_at(db, biz, {channel: count}, point)[0][channel]
 
 
-def balances_now(db, biz):
+def balances_now(db, biz, counts=None):
     """Each balance as it stands now, their total, and the entries since the counts that belong to none of them."""
-    counts = balance_counts(db, biz)
+    counts = balance_counts(db, biz) if counts is None else counts
     if not counts:
         return None
+    earliest = min(boundary_of(c) for c in counts.values())
+    amounts, loose = balances_at(db, biz, counts, loose_since=earliest)
     accounts = [
-        {"key": key, "label": label, "amount": round(balance_at(db, biz, key, counts[key]), 2), "count": counts[key]}
+        {"key": key, "label": label, "amount": round(amounts[key], 2), "count": counts[key]}
         for key, label in BALANCE_ACCOUNTS if key in counts
     ]
-    earliest = min(boundary_of(c) for c in counts.values())
-    since = earliest[0]
-    clause, values = after(earliest)
-    loose = db.one(
-        f"""SELECT COUNT(*) AS n, COALESCE(SUM(CASE WHEN direction='in' THEN amount ELSE 0 END), 0) AS cin,
-                   COALESCE(SUM(CASE WHEN direction='out' THEN amount ELSE 0 END), 0) AS cout
-            FROM cashbook WHERE business_id=? AND method IN ({', '.join('?' for _ in UNASSIGNED_METHODS)}) AND {clause}""",
-        [biz, *UNASSIGNED_METHODS, *values],
-    )
     return {
-        "accounts": accounts, "total": round(sum(a["amount"] for a in accounts), 2), "since": since,
+        "accounts": accounts, "total": round(sum(a["amount"] for a in accounts), 2), "since": earliest[0],
         "counted": max(c["as_of"] for c in counts.values()), "loose": loose,
     }
 
@@ -7259,9 +7394,10 @@ def stock_value(db, biz):
     """Stock at what it cost: inventory items, what is listed in the POS, and seedlings in the greenhouse (growing, ready or
     pre-ordered and not yet collected). POS items whose cost is not known are counted apart. Returns totals and every line."""
     lines = []
-    for p in db.all(
+    products = db.all(
         "SELECT item_code, name, department, quantity, unit_cost, seeds_per_pack, loose_seeds FROM products WHERE business_id=? ORDER BY name", (biz,)
-    ):
+    )
+    for p in products:
         cost, units = p["unit_cost"] or 0.0, max(p["quantity"] or 0, 0)
         value = units * cost
         # Seeds left over from an opened pack are worth their share of a pack
@@ -7270,9 +7406,9 @@ def stock_value(db, biz):
         if value > 0.005:
             lines.append({"where": "Inventory", "code": p["item_code"], "name": p["name"], "department": p["department"], "units": units, "cost": cost, "value": round(value, 2)})
 
-    plantings = with_figures(db, biz, db.all("SELECT * FROM plantings WHERE business_id=? AND still_in_greenhouse=1 ORDER BY planted_on, id", (biz,)))
-    batch_codes = {code["pos_code"] for code in db.all("SELECT pos_code FROM plantings WHERE business_id=? AND pos_code <> ''", (biz,))}
-    for p in plantings:
+    every_batch = db.all("SELECT * FROM plantings WHERE business_id=? ORDER BY planted_on, id", (biz,))
+    batch_codes = {b["pos_code"] for b in every_batch if b["pos_code"]}
+    for p in with_figures(db, biz, [b for b in every_batch if b["still_in_greenhouse"]]):
         units = p["available"] + p["pending"]
         if units > 0:
             lines.append({
@@ -7285,7 +7421,7 @@ def stock_value(db, biz):
         r["pos_code"]: r["cost_per_seedling"]
         for r in db.all("SELECT pos_code, cost_per_seedling FROM seedling_batches WHERE business_id=? ORDER BY id", (biz,))
     }
-    bought = {r["item_code"]: r["unit_cost"] for r in db.all("SELECT item_code, unit_cost FROM products WHERE business_id=?", (biz,))}
+    bought = {r["item_code"]: r["unit_cost"] for r in products}
     uncosted = {"units": 0, "count": 0, "at_price": 0.0}
     for p in db.all("SELECT item_code, name, department, quantity, price FROM pos_products WHERE business_id=? AND quantity > 0 ORDER BY name", (biz,)):
         if p["item_code"] in batch_codes:
@@ -7306,15 +7442,23 @@ def stock_value(db, biz):
     }
 
 
-def customers_owing(db, biz):
-    """Who owes the business money on sales, most first: [{"name", "owed", "invoices", "link"}]."""
+def customer_names(db, biz):
+    return {c["id"]: c["name"] for c in db.all("SELECT id, name FROM customers WHERE business_id=?", (biz,))}
+
+
+def supplier_names(db, biz):
+    return {s["id"]: s["name"] for s in db.all("SELECT id, name FROM suppliers WHERE business_id=?", (biz,))}
+
+
+def customers_owing(db, biz, names=None):
+    """Who owes the business money on sales, most first: [{"name", "owed", "invoices", "link"}]. names is customer_names(db, biz)."""
     rows = db.all(
         """SELECT customer_id, customer_name, customer_phone, COUNT(*) AS invoices, SUM(balance_due) AS owed, MIN(created_at) AS since FROM invoices
            WHERE business_id=? AND kind='SALE' AND payment_status <> 'Cancelled' AND balance_due > 0.005
            GROUP BY customer_id, customer_name, customer_phone""",
         (biz,),
     )
-    names = {c["id"]: c["name"] for c in db.all("SELECT id, name FROM customers WHERE business_id=?", (biz,))}
+    names = customer_names(db, biz) if names is None else names
     owing = {}
     for r in rows:
         # One line per customer account; a sale with no account stands on its own
@@ -7329,14 +7473,14 @@ def customers_owing(db, biz):
     return sorted(owing.values(), key=lambda o: -o["owed"])
 
 
-def suppliers_owed(db, biz):
-    """Who the business owes for purchases, most first: [{"name", "owed", "purchases", "link"}]."""
+def suppliers_owed(db, biz, names=None):
+    """Who the business owes for purchases, most first: [{"name", "owed", "purchases", "link"}]. names is supplier_names(db, biz)."""
     rows = db.all(
         """SELECT supplier_id, supplier_name, total_cost - COALESCE(amount_paid, total_cost) AS owed, purchase_date FROM procurements
            WHERE business_id=? AND total_cost - COALESCE(amount_paid, total_cost) > 0.005""",
         (biz,),
     )
-    names = {s["id"]: s["name"] for s in db.all("SELECT id, name FROM suppliers WHERE business_id=?", (biz,))}
+    names = supplier_names(db, biz) if names is None else names
     owed = {}
     for r in rows:
         key = r["supplier_id"] or ("n", r["supplier_name"] or "")
@@ -7350,10 +7494,9 @@ def suppliers_owed(db, biz):
     return sorted(owed.values(), key=lambda o: -o["owed"])
 
 
-def money_held(db, biz):
-    """The money the business holds: the balances as they stand when they have been counted, otherwise everything recorded in less
-    everything recorded out (which is only as good as the records)."""
-    balances = balances_now(db, biz)
+def money_held(db, biz, balances):
+    """The money the business holds: the balances as they stand when they have been counted (balances_now), otherwise everything
+    recorded in less everything recorded out (which is only as good as the records)."""
     if balances:
         return {"amount": balances["total"], "counted": True, "accounts": [(a["label"], a["amount"]) for a in balances["accounts"]], "loose": balances["loose"]}
     row = db.one(
@@ -7399,7 +7542,7 @@ def period_profit(db, biz, start, end):
     return {"earned": earned, "spent": spent, "total_earned": total_earned, "total_spent": total_spent, "profit": total_earned - total_spent}
 
 
-def records_check(db, biz):
+def records_check(db, biz, customers=None, suppliers=None):
     """Whether the money each record says was paid is the money Accounts holds for it: what customers paid on their invoices against
     the money in from sales and customer payments, what was paid on purchases against the money out to suppliers and for purchases,
     and every payslip against its pay and NAPSA/NHIMA. Each check names where it does not agree."""
@@ -7409,18 +7552,23 @@ def records_check(db, biz):
         parties = sorted((p for p in parties if abs(p["diff"]) > 0.005), key=lambda p: -abs(p["diff"]))
         checks.append({"label": label, "expected": round(expected, 2), "recorded": round(recorded, 2), "ok": abs(expected - recorded) < 0.01 and not parties, "parties": parties})
 
+    held = db.all(
+        """SELECT source, direction, category, source_id, COALESCE(SUM(amount), 0) AS total FROM cashbook
+           WHERE business_id=? AND source IN ('invoice', 'customer', 'purchase', 'payslip') GROUP BY source, direction, category, source_id""",
+        (biz,),
+    )
+
     def booked(source, direction, categories=None):
-        sql = "SELECT source_id, COALESCE(SUM(amount), 0) AS total FROM cashbook WHERE business_id=? AND source=? AND direction=?"
-        params = [biz, source, direction]
-        if categories:
-            sql += f" AND category IN ({', '.join('?' for _ in categories)})"
-            params += list(categories)
-        return {r["source_id"]: r["total"] for r in db.all(sql + " GROUP BY source_id", params)}
+        found = {}
+        for r in held:
+            if r["source"] == source and r["direction"] == direction and (not categories or r["category"] in categories):
+                found[r["source_id"]] = found.get(r["source_id"], 0.0) + r["total"]
+        return found
 
     # Customers: a sale's payment is in Accounts against the invoice (paid at the till, or changed on the invoice) or against the
     # customer's account (a lump sum spread over their invoices). Refunds are money out and checked against nothing here.
     on_invoice, on_account = booked("invoice", "in"), booked("customer", "in")
-    names = {c["id"]: c["name"] for c in db.all("SELECT id, name FROM customers WHERE business_id=?", (biz,))}
+    names = customer_names(db, biz) if customers is None else customers
     by_customer, parties, paid = {}, [], 0.0
     for inv in db.all("SELECT id, invoice_no, customer_id, customer_name, amount_paid FROM invoices WHERE business_id=? AND kind='SALE'", (biz,)):
         paid += inv["amount_paid"]
@@ -7455,7 +7603,7 @@ def records_check(db, biz):
            AND NOT EXISTS (SELECT 1 FROM supplier_payments sp WHERE sp.id = c.source_id)""",
         (biz,),
     )["total"]
-    names = {s["id"]: s["name"] for s in db.all("SELECT id, name FROM suppliers WHERE business_id=?", (biz,))}
+    names = supplier_names(db, biz) if suppliers is None else suppliers
     by_supplier, parties, paid = {}, [], 0.0
     for pr in db.all(
         "SELECT id, name, supplier_id, supplier_name, COALESCE(amount_paid, total_cost) AS paid FROM procurements WHERE business_id=?", (biz,)
@@ -7496,10 +7644,12 @@ def records_check(db, biz):
     return checks
 
 
-def financial_standing(db, biz, start, end):
-    """Everything on the financial standing: what the business is worth today, the profit over the period, and the records check."""
-    held, stock = money_held(db, biz), stock_value(db, biz)
-    owing, owed = customers_owing(db, biz), suppliers_owed(db, biz)
+def financial_standing(db, biz, start, end, balances=False):
+    """Everything on the financial standing: what the business is worth today, the profit over the period, and the records check.
+    balances is balances_now(db, biz), when the caller has it already."""
+    held, stock = money_held(db, biz, balances_now(db, biz) if balances is False else balances), stock_value(db, biz)
+    customers, suppliers = customer_names(db, biz), supplier_names(db, biz)
+    owing, owed = customers_owing(db, biz, customers), suppliers_owed(db, biz, suppliers)
     all_time = category_totals(db, biz)
     loans = round(all_time.get(("in", "loan_in"), 0.0) - all_time.get(("out", "loan_out"), 0.0), 2)
     receivable = round(sum(o["owed"] for o in owing), 2)
@@ -7518,7 +7668,7 @@ def financial_standing(db, biz, start, end):
         "assets": assets, "liabilities": liabilities, "total_assets": round(total_assets, 2), "total_liabilities": round(total_liabilities, 2),
         "worth": round(total_assets - total_liabilities, 2),
         "owner_in": all_time.get(("in", "capital"), 0.0), "owner_out": all_time.get(("out", "drawings"), 0.0),
-        "profit": period_profit(db, biz, start, end), "checks": records_check(db, biz), "as_of": now().strftime("%d %b %Y %H:%M"),
+        "profit": period_profit(db, biz, start, end), "checks": records_check(db, biz, customers, suppliers), "as_of": now().strftime("%d %b %Y %H:%M"),
     }
 
 
@@ -7536,7 +7686,8 @@ def period_words(f):
 @need("admin")
 def accounts():
     db, biz = get_db(), g.user["business_id"]
-    f = account_filters(db, biz)
+    counts = balance_counts(db, biz)
+    f = account_filters(db, biz, counts)
     where, params = entries_where(biz, f)
     listed = db.one(
         f"""SELECT COUNT(*) AS n, COALESCE(SUM(CASE WHEN c.direction='in' THEN c.amount ELSE 0 END), 0) AS cin,
@@ -7544,13 +7695,13 @@ def accounts():
             FROM cashbook c WHERE {where}""",
         params,
     )
-    standing = financial_standing(db, biz, f["start"], f["end"])
+    balances = balances_now(db, biz, counts)
+    standing = financial_standing(db, biz, f["start"], f["end"], balances)
     args = {key: request.args.get(key) for key in ACCOUNT_PARAMS if request.args.get(key)}
     period_args = {key: value for key, value in args.items() if key in ("period", "from", "to")}
-    balances = balances_now(db, biz)
     return render_template(
         "accounts.html", f=f, periods=INVOICE_PERIODS, summary=account_summary(db, biz, f["start"], f["end"]),
-        flow=account_flow(db, biz, f["start"], f["end"]), entries=account_entries(db, biz, f, ACCOUNT_LIST_LIMIT), listed=listed,
+        flow=account_flow(db, biz, f["start"], f["end"], counts), entries=account_entries(db, biz, f, ACCOUNT_LIST_LIMIT), listed=listed,
         standing=standing, standing_list=STANDING_LIST, period_label=period_words(f),
         standing_xlsx=url_for("standing_xlsx", **period_args), standing_pdf=url_for("standing_pdf", **period_args),
         owed_to_us=standing["receivable"], we_owe=standing["payable"], channels=[name for name, _ in CHANNELS], money_in=MONEY_IN, money_out=MONEY_OUT,
@@ -7802,10 +7953,11 @@ def set_balances():
     counts = balance_counts(db, biz)
     # Everything already recorded and dated up to the count is part of it
     last_id = db.one("SELECT COALESCE(MAX(id), 0) AS n FROM cashbook WHERE business_id=?", (biz,))["n"]
+    expected_at = balances_at(db, biz, counts, (as_of, last_id))[0]
     differences = []
     try:
         for key, label in BALANCE_ACCOUNTS:
-            expected = round(balance_at(db, biz, key, counts[key], (as_of, last_id)), 2) if key in counts else None
+            expected = round(expected_at[key], 2) if key in counts else None
             db.execute(
                 "INSERT INTO money_balances (business_id, account, amount, as_of, last_id, expected, set_by, set_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (biz, key, amounts[key], as_of, last_id, expected, g.user["username"], stamp),
@@ -7970,8 +8122,6 @@ def backfill_cashbook():
     finally:
         db.close()
 
-
-backfill_cashbook()
 
 
 # --- DAILY ACTIVITIES ---
@@ -9206,6 +9356,26 @@ def delete_admin(admin_id):
     db.commit()
     flash(f"Admin '{target['username']}' deleted.", "ok")
     return redirect(url_for("operators"))
+
+
+# --- START-UP ---
+# The tables and their migrations, then the one-off repairs of records from before each feature existed. All of it runs only
+# when the code doing it has changed since it last ran against this database (see startup_done in db.py), so an ordinary cold
+# start costs one query here. Seed units are checked every time, as an item can still be moved into a seed category.
+STARTUP_REPAIRS = (sync_categories, link_existing_customers, link_existing_suppliers, backfill_cashbook)
+
+
+def start_up():
+    signature = startup_signature(STARTUP_REPAIRS)
+    if not startup_done(signature):
+        init_schema()
+        for repair in STARTUP_REPAIRS:
+            repair()
+        mark_startup_done(signature)
+    backfill_units()
+
+
+start_up()
 
 
 if __name__ == "__main__":
