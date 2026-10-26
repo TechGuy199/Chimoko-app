@@ -18,6 +18,169 @@
     </div>
 </div>
 
+<form method="get" class="toolbar no-print" id="accounts-period">
+    {{ keep(['period', 'from', 'to']) }}
+    <select name="period" id="accounts-period-select" aria-label="Date range">
+        {% for value, label in periods %}<option value="{{ value }}" {{ 'selected' if value == f.period }}>{{ label }}</option>{% endfor %}
+    </select>
+    <span id="accounts-custom" class="date-range" {{ 'hidden' if f.period != 'custom' }}>
+        <input type="date" name="from" value="{{ f.start.isoformat() if f.start and f.period == 'custom' }}" aria-label="From" {{ 'disabled' if f.period != 'custom' }}>
+        <span class="muted">to</span>
+        <input type="date" name="to" value="{{ f.end.isoformat() if f.end and f.period == 'custom' }}" aria-label="To" {{ 'disabled' if f.period != 'custom' }}>
+        <button class="btn primary">Apply</button>
+    </span>
+    <span class="spacer"></span>
+    <a class="btn" href="{{ csv_url }}">Export CSV</a>
+    <button type="button" class="btn" onclick="window.print()">Print / Save as PDF</button>
+</form>
+<p class="muted period-line">
+    {% if f.start and f.end %}{{ f.start.strftime('%d %b %Y') }}{% if f.end != f.start %} to {{ f.end.strftime('%d %b %Y') }}{% endif %}
+    {% elif f.start %}From {{ f.start.strftime('%d %b %Y') }}
+    {% elif f.end %}Up to {{ f.end.strftime('%d %b %Y') }}
+    {% else %}All dates{% endif %}
+</p>
+
+{% set st = standing %}
+<section class="card standing" id="standing">
+    <div class="page-head">
+        <div>
+            <h2>Financial standing</h2>
+            <p class="muted">Where the business stands today from all its records, and its profit for {{ period_label|lower if period_label == 'All dates' else period_label }}. As at {{ st.as_of }}.</p>
+        </div>
+        <div class="head-actions no-print">
+            <a class="btn" href="{{ standing_pdf }}">Download PDF</a>
+            <a class="btn" href="{{ standing_xlsx }}">Download Excel</a>
+        </div>
+    </div>
+    <div class="stats">
+        <div class="stat"><span>What we have</span><strong>{{ st.total_assets|money }}</strong><small>money, what customers owe and stock</small></div>
+        <div class="stat"><span>What we owe</span><strong class="warn">{{ st.total_liabilities|money }}</strong><small>to suppliers{{ ' and lenders' if st.loans > 0.005 }}</small></div>
+        <div class="stat"><span>What the business is worth</span><strong class="{{ 'gold' if st.worth >= 0 else 'warn' }}">{{ st.worth|money }}</strong><small>what we have less what we owe</small></div>
+        <div class="stat"><span>{{ 'Profit' if st.profit.profit >= 0 else 'Loss' }}</span><strong class="{{ 'ok' if st.profit.profit >= 0 else 'warn' }}">{{ st.profit.profit|signed }}</strong>
+            <small>{{ period_label|lower if period_label == 'All dates' else period_label }}</small></div>
+    </div>
+
+    <div class="accounts-grid">
+        <div>
+            <h3>What we have</h3>
+            <div class="table-wrap">
+                <table class="method-table standing-table">
+                    <tbody>
+                    <tr class="channel-row"><td>{{ st.assets[0][0] }}</td><td class="num">{{ st.assets[0][1]|money }}</td></tr>
+                    {% for name, amount in st.held.accounts %}<tr class="method-row"><td>{{ name }}</td><td class="num">{{ amount|money }}</td></tr>{% endfor %}
+                    <tr class="channel-row"><td><a href="#standing-owing">Customers owe us</a></td><td class="num">{{ st.receivable|money }}</td></tr>
+                    <tr class="channel-row"><td>Stock, at what it cost</td><td class="num">{{ st.stock.total|money }}</td></tr>
+                    <tr class="method-row"><td>In inventory</td><td class="num">{{ st.stock.inventory|money }}</td></tr>
+                    <tr class="method-row"><td>In the POS</td><td class="num">{{ st.stock.pos|money }}</td></tr>
+                    <tr class="method-row"><td>Seedlings in the greenhouse</td><td class="num">{{ st.stock.greenhouse|money }}</td></tr>
+                    </tbody>
+                    <tfoot><tr><th>Total</th><th class="num">{{ st.total_assets|money }}</th></tr></tfoot>
+                </table>
+            </div>
+            {% if not st.held.counted %}
+            <p class="muted hint">Money recorded is everything Accounts has had in, less everything out. <a href="#balances">Enter your balances</a> for what is really held.</p>
+            {% elif st.held.loose and st.held.loose.n %}
+            <p class="muted hint">{{ st.held.loose.n }} entr{{ 'y' if st.held.loose.n == 1 else 'ies' }} since the count {{ 'is' if st.held.loose.n == 1 else 'are' }} in no balance yet, so not in money held. <a href="{{ assign_url }}">Assign {{ 'it' if st.held.loose.n == 1 else 'them' }}</a>.</p>
+            {% endif %}
+            {% if st.stock.uncosted.count %}
+            <p class="muted hint">{{ st.stock.uncosted.count }} item{{ 's' if st.stock.uncosted.count != 1 }} in the POS ({{ '{:,}'.format(st.stock.uncosted.units) }} units, {{ st.stock.uncosted.at_price|money }} at selling price) {{ 'have' if st.stock.uncosted.count != 1 else 'has' }} no known cost, so {{ 'they are' if st.stock.uncosted.count != 1 else 'it is' }} not in the stock figure.</p>
+            {% endif %}
+        </div>
+        <div>
+            <h3>What we owe</h3>
+            <div class="table-wrap">
+                <table class="method-table standing-table">
+                    <tbody>
+                    <tr class="channel-row"><td><a href="#standing-owed">We owe suppliers</a></td><td class="num">{{ st.payable|money }}</td></tr>
+                    {% if st.loans > 0.005 %}<tr class="channel-row"><td>Loans still to repay</td><td class="num">{{ st.loans|money }}</td></tr>{% endif %}
+                    </tbody>
+                    <tfoot>
+                        <tr><th>Total</th><th class="num">{{ st.total_liabilities|money }}</th></tr>
+                        <tr class="standing-worth"><th>What the business is worth</th><th class="num {{ 'gold' if st.worth >= 0 else 'warn' }}">{{ st.worth|money }}</th></tr>
+                    </tfoot>
+                </table>
+            </div>
+            {% if st.owner_in > 0.005 or st.owner_out > 0.005 %}
+            <p class="muted hint">The owner has put {{ st.owner_in|money }} into the business and taken {{ st.owner_out|money }} out, in all.</p>
+            {% endif %}
+
+            <h3>{{ 'Profit' if st.profit.profit >= 0 else 'Loss' }}: {{ period_label }}</h3>
+            <div class="table-wrap">
+                <table class="method-table standing-table">
+                    <tbody>
+                    {% for label, value in st.profit.earned %}<tr class="method-row"><td>{{ label }}</td><td class="num">{{ value|money }}</td></tr>{% endfor %}
+                    <tr class="channel-row"><td>Earned</td><td class="num ok">{{ st.profit.total_earned|money }}</td></tr>
+                    {% for label, value in st.profit.spent %}<tr class="method-row"><td>{{ label }}</td><td class="num">{{ value|money }}</td></tr>{% endfor %}
+                    <tr class="channel-row"><td>Spent</td><td class="num warn">{{ st.profit.total_spent|money }}</td></tr>
+                    </tbody>
+                    <tfoot><tr><th>{{ 'Profit' if st.profit.profit >= 0 else 'Loss' }}</th><th class="num {{ 'ok' if st.profit.profit >= 0 else 'warn' }}">{{ st.profit.profit|signed }}</th></tr></tfoot>
+                </table>
+            </div>
+            <p class="muted hint">Sales and purchases count when they are made, paid or not. Stock bought and not yet sold counts as spent here; it is in the stock above.
+                Owner's money, loans and refunds are not income or costs.</p>
+        </div>
+    </div>
+
+    <div class="accounts-grid standing-people">
+        <div id="standing-owing">
+            <h3>Customers who owe us{% if st.owing %} ({{ st.owing|length }}){% endif %}</h3>
+            {% if st.owing %}
+            <div class="table-wrap">
+                <table>
+                    <thead><tr><th>Customer</th><th class="num">Invoices</th><th>Since</th><th class="num">Owed</th></tr></thead>
+                    <tbody>
+                    {% for o in st.owing[:standing_list] %}
+                        <tr><td>{% if o.link %}<a href="{{ o.link }}">{{ o.name }}</a>{% else %}{{ o.name }}{% endif %}</td><td class="num">{{ o.invoices }}</td>
+                            <td>{{ (o.since or '')[:10] }}</td><td class="num">{{ o.owed|money }}</td></tr>
+                    {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            {% if st.owing|length > standing_list %}<p class="muted hint">And {{ st.owing|length - standing_list }} more, in the Excel download and on <a href="{{ url_for('customers') }}">Customers</a>.</p>{% endif %}
+            {% else %}<p class="muted">No customer owes anything.</p>{% endif %}
+        </div>
+        <div id="standing-owed">
+            <h3>Suppliers we owe{% if st.owed %} ({{ st.owed|length }}){% endif %}</h3>
+            {% if st.owed %}
+            <div class="table-wrap">
+                <table>
+                    <thead><tr><th>Supplier</th><th class="num">Purchases</th><th>Since</th><th class="num">Owed</th></tr></thead>
+                    <tbody>
+                    {% for o in st.owed[:standing_list] %}
+                        <tr><td>{% if o.link %}<a href="{{ o.link }}">{{ o.name }}</a>{% else %}{{ o.name }}{% endif %}</td><td class="num">{{ o.purchases }}</td>
+                            <td>{{ (o.since or '')[:10] }}</td><td class="num">{{ o.owed|money }}</td></tr>
+                    {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            {% if st.owed|length > standing_list %}<p class="muted hint">And {{ st.owed|length - standing_list }} more, in the Excel download and on <a href="{{ url_for('suppliers') }}">Suppliers</a>.</p>{% endif %}
+            {% else %}<p class="muted">Nothing is owed to any supplier.</p>{% endif %}
+        </div>
+    </div>
+
+    <div class="standing-check" id="records-check">
+        <h3>Records check</h3>
+        <ul>
+        {% for c in st.checks %}
+            <li>
+                <strong class="{{ 'ok' if c.ok else 'warn' }}">{{ '✓' if c.ok else '!' }} {{ c.label }}</strong>:
+                {% if c.ok %}<span class="muted">the records and Accounts agree ({{ c.expected|money }}).</span>
+                {% else %}<span>the records say {{ c.expected|money }} was paid, Accounts holds {{ c.recorded|money }}.</span>
+                    {% if c.parties %}
+                    <ul>
+                    {% for p in c.parties[:standing_list] %}
+                        <li>{% if p.link %}<a href="{{ p.link }}">{{ p.name }}</a>{% else %}{{ p.name }}{% endif %}: {{ p.diff|abs|money }} {{ 'more in the records than in Accounts' if p.diff > 0 else 'more in Accounts than in the records' }}</li>
+                    {% endfor %}
+                    {% if c.parties|length > standing_list %}<li class="muted">and {{ c.parties|length - standing_list }} more, in the Excel download</li>{% endif %}
+                    </ul>
+                    {% endif %}
+                {% endif %}
+            </li>
+        {% endfor %}
+        </ul>
+    </div>
+</section>
+
 <section class="card block balances" id="balances">
     <div class="page-head">
         <h2>Balances now</h2>
@@ -73,27 +236,6 @@
     {% endif %}
 </section>
 
-<form method="get" class="toolbar no-print" id="accounts-period">
-    {{ keep(['period', 'from', 'to']) }}
-    <select name="period" id="accounts-period-select" aria-label="Date range">
-        {% for value, label in periods %}<option value="{{ value }}" {{ 'selected' if value == f.period }}>{{ label }}</option>{% endfor %}
-    </select>
-    <span id="accounts-custom" class="date-range" {{ 'hidden' if f.period != 'custom' }}>
-        <input type="date" name="from" value="{{ f.start.isoformat() if f.start and f.period == 'custom' }}" aria-label="From" {{ 'disabled' if f.period != 'custom' }}>
-        <span class="muted">to</span>
-        <input type="date" name="to" value="{{ f.end.isoformat() if f.end and f.period == 'custom' }}" aria-label="To" {{ 'disabled' if f.period != 'custom' }}>
-        <button class="btn primary">Apply</button>
-    </span>
-    <span class="spacer"></span>
-    <a class="btn" href="{{ csv_url }}">Export CSV</a>
-    <button type="button" class="btn" onclick="window.print()">Print / Save as PDF</button>
-</form>
-<p class="muted period-line">
-    {% if f.start and f.end %}{{ f.start.strftime('%d %b %Y') }}{% if f.end != f.start %} to {{ f.end.strftime('%d %b %Y') }}{% endif %}
-    {% elif f.start %}From {{ f.start.strftime('%d %b %Y') }}
-    {% elif f.end %}Up to {{ f.end.strftime('%d %b %Y') }}
-    {% else %}All dates{% endif %}
-</p>
 
 <div class="stats">
     <div class="stat"><span>Money in</span><strong class="ok">{{ summary.in|money }}</strong><small>in this period</small></div>

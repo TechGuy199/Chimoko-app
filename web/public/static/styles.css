@@ -495,6 +495,20 @@ a.rank-name:hover { color: var(--accent); }
 .balances .page-head { margin-bottom: 8px; }
 .balances .page-head h2 { margin: 0; }
 .balances details { margin-top: 10px; }
+/* Financial standing (Accounts): worth today, profit for the period, who owes what, and the records check */
+.standing .page-head { margin-bottom: 8px; }
+.standing .page-head h2 { margin: 0 0 2px; }
+.standing h3 { margin: 18px 0 8px; font-size: 15px; }
+.standing .accounts-grid > div > h3:first-child { margin-top: 4px; }
+.standing-table td.num, .standing-table th.num { white-space: nowrap; }
+.standing-table td:first-child, .standing-table th:first-child { white-space: normal; }
+.standing-table .standing-worth th { font-size: 15px; border-top: 2px solid var(--line-strong); }
+.standing-people { margin-top: 6px; }
+.standing-check ul { margin: 0; padding-left: 18px; }
+.standing-check > ul { list-style: none; padding: 0; }
+.standing-check > ul > li { padding: 6px 0; border-bottom: 1px solid var(--line); }
+.standing-check > ul > li:last-child { border-bottom: 0; }
+.standing-check ul ul { margin-top: 4px; font-size: 13px; }
 .assign-form { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; margin: 0; }
 .assign-form select { width: auto; min-width: 0; max-width: 150px; margin: 0; padding: 4px 6px; font-size: 12px; }
 .print-only { display: none; }

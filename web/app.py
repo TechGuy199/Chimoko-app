@@ -2350,7 +2350,7 @@ def request_invoice_deletion(invoice_id):
 def delete_invoice(invoice_id):
     db, biz = get_db(), g.user["business_id"]
     inv = db.one(
-        """SELECT id, invoice_no, kind, customer_name, customer_phone, payment_status, total, amount_paid, balance_due, created_by, created_at
+        """SELECT id, invoice_no, kind, customer_name, customer_phone, payment_status, total, amount_paid, balance_due, created_by, created_at, customer_id
            FROM invoices WHERE id=? AND business_id=?""",
         (invoice_id, biz),
     )
@@ -2404,7 +2404,19 @@ def delete_invoice(invoice_id):
 
         db.execute("DELETE FROM invoice_items WHERE invoice_id=? AND business_id=?", (invoice_id, biz))
         db.execute("DELETE FROM payment_log WHERE business_id=? AND kind='sale' AND ref_id=?", (biz, invoice_id))
-        # A deleted invoice was a mistake, so the money recorded against it goes from Accounts too (its payments stay in the deletion record)
+        # A deleted invoice was a mistake, so the money recorded against it goes from Accounts too (its payments stay in the deletion record).
+        # Part of what it had been paid may have come from a lump sum on the customer's account, which Accounts holds against the account,
+        # not the invoice: that share comes off as a correction on the account, for the admin to assign to the balance it is taken from.
+        if inv["kind"] == "SALE" and inv["customer_id"]:
+            on_invoice = db.one(
+                "SELECT COALESCE(SUM(amount), 0) AS total FROM cashbook WHERE business_id=? AND source='invoice' AND source_id=? AND direction='in'",
+                (biz, invoice_id),
+            )["total"]
+            if inv["amount_paid"] - on_invoice > 0.005:
+                record_money(
+                    db, biz, "in", -round(inv["amount_paid"] - on_invoice, 2), CORRECTION, "customer_payment", "", inv["customer_name"],
+                    f"Invoice {inv['invoice_no']} deleted: its share of payments on account", "customer", inv["customer_id"],
+                )
         db.execute("DELETE FROM cashbook WHERE business_id=? AND source='invoice' AND source_id=?", (biz, invoice_id))
         db.execute("DELETE FROM invoices WHERE id=? AND business_id=?", (invoice_id, biz))
         db.insert(
@@ -3804,6 +3816,10 @@ def merge_customers():
 
     try:
         moved = db.execute("UPDATE invoices SET customer_id=? WHERE customer_id=? AND business_id=?", (keep["id"], remove["id"], biz)).rowcount
+        # Payments made on the removed account are in Accounts against it; they belong to the kept account now
+        db.execute(
+            "UPDATE cashbook SET source_id=?, party=? WHERE business_id=? AND source='customer' AND source_id=?", (keep["id"], keep["name"], biz, remove["id"]),
+        )
         # The removed account's spelling, and any spellings merged into it earlier, now lead to the kept account
         db.execute("UPDATE customer_aliases SET customer_id=? WHERE customer_id=? AND business_id=?", (keep["id"], remove["id"], biz))
         db.execute("DELETE FROM customer_aliases WHERE business_id=? AND name_key=? AND phone_key=?", (biz, remove["name_key"], remove["phone_key"]))
@@ -4655,6 +4671,12 @@ def absorb_supplier(db, biz, keep, remove):
     in place (a phone number it lacked, the earliest start date). The caller commits. Returns (purchases moved, payments moved)."""
     moved = db.execute("UPDATE procurements SET supplier_id=? WHERE supplier_id=? AND business_id=?", (keep["id"], remove["id"], biz)).rowcount
     paid = db.execute("UPDATE supplier_payments SET supplier_id=? WHERE supplier_id=? AND business_id=?", (keep["id"], remove["id"], biz)).rowcount
+    # Accounts lists supplier payments under the account's name
+    db.execute(
+        """UPDATE cashbook SET party=? WHERE business_id=? AND source='supplier_payment'
+           AND source_id IN (SELECT id FROM supplier_payments WHERE supplier_id=? AND business_id=?)""",
+        (keep["name"], biz, keep["id"], biz),
+    )
     # The removed account's spelling, and any spellings merged into it earlier, now lead to the kept account
     db.execute("UPDATE supplier_aliases SET supplier_id=? WHERE supplier_id=? AND business_id=?", (keep["id"], remove["id"], biz))
     db.execute("DELETE FROM supplier_aliases WHERE business_id=? AND name_key=? AND phone_key=?", (biz, remove["name_key"], remove["phone_key"]))
@@ -6940,6 +6962,292 @@ def balance_history(db, biz):
     return history[:12]
 
 
+# --- Financial standing: everything the records say about where the business stands, on one page ---
+# What it is worth today: the money it holds, what customers owe it and the stock it has (at what it cost), less what it owes
+# suppliers and lenders. And whether it made a profit over the chosen period: sales made (paid or not) and other income, less
+# purchases made (paid or not) and running costs. Stock bought and not yet sold counts as spent in the profit; it is in the stock
+# figure instead. Owner's money put in or taken out, loans and refunds are not income or costs.
+RUNNING_COSTS = ("salaries", "statutory", "rent", "utilities", "transport", "repairs", "charges", "tax", "other_expense")
+STANDING_LIST = 8   # the biggest few customers owing and suppliers owed, on the page (the downloads have them all)
+
+
+def stock_value(db, biz):
+    """Stock at what it cost: inventory items, what is listed in the POS, and seedlings in the greenhouse (growing, ready or
+    pre-ordered and not yet collected). POS items whose cost is not known are counted apart. Returns totals and every line."""
+    lines = []
+    for p in db.all(
+        "SELECT item_code, name, department, quantity, unit_cost, seeds_per_pack, loose_seeds FROM products WHERE business_id=? ORDER BY name", (biz,)
+    ):
+        cost, units = p["unit_cost"] or 0.0, max(p["quantity"] or 0, 0)
+        value = units * cost
+        # Seeds left over from an opened pack are worth their share of a pack
+        if p["seeds_per_pack"] and (p["loose_seeds"] or 0) > 0:
+            value += p["loose_seeds"] * cost / p["seeds_per_pack"]
+        if value > 0.005:
+            lines.append({"where": "Inventory", "code": p["item_code"], "name": p["name"], "department": p["department"], "units": units, "cost": cost, "value": round(value, 2)})
+
+    plantings = with_figures(db, biz, db.all("SELECT * FROM plantings WHERE business_id=? AND still_in_greenhouse=1 ORDER BY planted_on, id", (biz,)))
+    batch_codes = {code["pos_code"] for code in db.all("SELECT pos_code FROM plantings WHERE business_id=? AND pos_code <> ''", (biz,))}
+    for p in plantings:
+        units = p["available"] + p["pending"]
+        if units > 0:
+            lines.append({
+                "where": "Greenhouse", "code": p["pos_code"], "name": p["label"], "department": p["department"], "units": units,
+                "cost": p["cost_per_seedling"] or 0.0, "value": round(units * (p["cost_per_seedling"] or 0.0), 2),
+            })
+
+    # In the POS: seedlings from a sowing cost what the sowing worked out; anything moved from inventory costs what the item cost
+    sown = {
+        r["pos_code"]: r["cost_per_seedling"]
+        for r in db.all("SELECT pos_code, cost_per_seedling FROM seedling_batches WHERE business_id=? ORDER BY id", (biz,))
+    }
+    bought = {r["item_code"]: r["unit_cost"] for r in db.all("SELECT item_code, unit_cost FROM products WHERE business_id=?", (biz,))}
+    uncosted = {"units": 0, "count": 0, "at_price": 0.0}
+    for p in db.all("SELECT item_code, name, department, quantity, price FROM pos_products WHERE business_id=? AND quantity > 0 ORDER BY name", (biz,)):
+        if p["item_code"] in batch_codes:
+            continue   # a greenhouse batch, counted above
+        cost = sown.get(p["item_code"], bought.get(p["item_code"]))
+        if cost is None:
+            uncosted["units"] += p["quantity"]
+            uncosted["count"] += 1
+            uncosted["at_price"] += p["quantity"] * (p["price"] or 0.0)
+            lines.append({"where": "POS (cost not known)", "code": p["item_code"], "name": p["name"], "department": p["department"], "units": p["quantity"], "cost": None, "value": 0.0})
+            continue
+        lines.append({"where": "POS", "code": p["item_code"], "name": p["name"], "department": p["department"], "units": p["quantity"], "cost": cost, "value": round(p["quantity"] * cost, 2)})
+
+    total = lambda where: round(sum(line["value"] for line in lines if line["where"] == where), 2)  # noqa: E731
+    return {
+        "inventory": total("Inventory"), "pos": total("POS"), "greenhouse": total("Greenhouse"),
+        "total": round(total("Inventory") + total("POS") + total("Greenhouse"), 2), "uncosted": uncosted, "lines": lines,
+    }
+
+
+def customers_owing(db, biz):
+    """Who owes the business money on sales, most first: [{"name", "owed", "invoices", "link"}]."""
+    rows = db.all(
+        """SELECT customer_id, customer_name, customer_phone, COUNT(*) AS invoices, SUM(balance_due) AS owed, MIN(created_at) AS since FROM invoices
+           WHERE business_id=? AND kind='SALE' AND payment_status <> 'Cancelled' AND balance_due > 0.005
+           GROUP BY customer_id, customer_name, customer_phone""",
+        (biz,),
+    )
+    names = {c["id"]: c["name"] for c in db.all("SELECT id, name FROM customers WHERE business_id=?", (biz,))}
+    owing = {}
+    for r in rows:
+        # One line per customer account; a sale with no account stands on its own
+        key = ("c", r["customer_id"]) if r["customer_id"] else ("n", r["customer_name"], r["customer_phone"])
+        o = owing.setdefault(key, {
+            "name": names.get(r["customer_id"]) or r["customer_name"] or WALK_IN, "phone": r["customer_phone"] or "", "owed": 0.0, "invoices": 0,
+            "since": r["since"], "link": url_for("customer_statement", customer_id=r["customer_id"]) if r["customer_id"] else None,
+        })
+        o["owed"] += r["owed"]
+        o["invoices"] += r["invoices"]
+        o["since"] = min(o["since"] or "9999", r["since"] or "9999")
+    return sorted(owing.values(), key=lambda o: -o["owed"])
+
+
+def suppliers_owed(db, biz):
+    """Who the business owes for purchases, most first: [{"name", "owed", "purchases", "link"}]."""
+    rows = db.all(
+        """SELECT supplier_id, supplier_name, total_cost - COALESCE(amount_paid, total_cost) AS owed, purchase_date FROM procurements
+           WHERE business_id=? AND total_cost - COALESCE(amount_paid, total_cost) > 0.005""",
+        (biz,),
+    )
+    names = {s["id"]: s["name"] for s in db.all("SELECT id, name FROM suppliers WHERE business_id=?", (biz,))}
+    owed = {}
+    for r in rows:
+        key = r["supplier_id"] or ("n", r["supplier_name"] or "")
+        o = owed.setdefault(key, {
+            "name": names.get(r["supplier_id"]) or r["supplier_name"] or "No supplier named", "owed": 0.0, "purchases": 0, "since": r["purchase_date"],
+            "link": url_for("supplier_statement", supplier_id=r["supplier_id"]) if r["supplier_id"] else None,
+        })
+        o["owed"] += r["owed"]
+        o["purchases"] += 1
+        o["since"] = min(o["since"] or "9999", r["purchase_date"] or "9999")
+    return sorted(owed.values(), key=lambda o: -o["owed"])
+
+
+def money_held(db, biz):
+    """The money the business holds: the balances as they stand when they have been counted, otherwise everything recorded in less
+    everything recorded out (which is only as good as the records)."""
+    balances = balances_now(db, biz)
+    if balances:
+        return {"amount": balances["total"], "counted": True, "accounts": [(a["label"], a["amount"]) for a in balances["accounts"]], "loose": balances["loose"]}
+    row = db.one(
+        """SELECT COALESCE(SUM(CASE WHEN direction='in' THEN amount ELSE -amount END), 0) AS net FROM cashbook WHERE business_id=?""", (biz,)
+    )
+    return {"amount": round(row["net"], 2), "counted": False, "accounts": [], "loose": None}
+
+
+def category_totals(db, biz, start=None, end=None):
+    """Cashbook totals per (direction, category), for a period or for all time."""
+    where, params = days_where(start, end)
+    return {
+        (r["direction"], r["category"]): r["total"]
+        for r in db.all(
+            f"SELECT direction, category, COALESCE(SUM(amount), 0) AS total FROM cashbook WHERE business_id=?{where} GROUP BY direction, category",
+            [biz] + params,
+        )
+    }
+
+
+def period_profit(db, biz, start, end):
+    """Earned against spent over a period: sales made (paid or not) and other income, less purchases made (paid or not) and running costs."""
+    where, params = days_where(start, end, "created_at")
+    sales = db.one(
+        f"SELECT COUNT(*) AS n, COALESCE(SUM(total), 0) AS total FROM invoices WHERE business_id=? AND kind='SALE' AND payment_status <> 'Cancelled'{where}",
+        [biz] + params,
+    )
+    where, params = days_where(start, end, "purchase_date")
+    buys = db.one(
+        f"""SELECT COALESCE(SUM(CASE WHEN COALESCE(in_inventory, 1) = 1 THEN total_cost ELSE 0 END), 0) AS stock,
+                   COALESCE(SUM(CASE WHEN COALESCE(in_inventory, 1) = 1 THEN 0 ELSE total_cost END), 0) AS other
+            FROM procurements WHERE business_id=?{where}""",
+        [biz] + params,
+    )
+    moved = category_totals(db, biz, start, end)
+    earned = [("Sales made" + (f" ({sales['n']:,} invoice{'s' if sales['n'] != 1 else ''})" if sales["n"] else ""), sales["total"])]
+    if abs(moved.get(("in", "other_income"), 0.0)) > 0.005:
+        earned.append((CATEGORY_LABELS["other_income"], moved[("in", "other_income")]))
+    spent = [("Stock bought", buys["stock"]), ("Other purchases (not stock)", buys["other"])]
+    spent += [(CATEGORY_LABELS[key], moved.get(("out", key), 0.0)) for key in RUNNING_COSTS]
+    spent = [(label, value) for label, value in spent if abs(value) > 0.005]
+    total_earned, total_spent = sum(v for _, v in earned), sum(v for _, v in spent)
+    return {"earned": earned, "spent": spent, "total_earned": total_earned, "total_spent": total_spent, "profit": total_earned - total_spent}
+
+
+def records_check(db, biz):
+    """Whether the money each record says was paid is the money Accounts holds for it: what customers paid on their invoices against
+    the money in from sales and customer payments, what was paid on purchases against the money out to suppliers and for purchases,
+    and every payslip against its pay and NAPSA/NHIMA. Each check names where it does not agree."""
+    checks = []
+
+    def check(label, expected, recorded, parties):
+        parties = sorted((p for p in parties if abs(p["diff"]) > 0.005), key=lambda p: -abs(p["diff"]))
+        checks.append({"label": label, "expected": round(expected, 2), "recorded": round(recorded, 2), "ok": abs(expected - recorded) < 0.01 and not parties, "parties": parties})
+
+    def booked(source, direction, categories=None):
+        sql = "SELECT source_id, COALESCE(SUM(amount), 0) AS total FROM cashbook WHERE business_id=? AND source=? AND direction=?"
+        params = [biz, source, direction]
+        if categories:
+            sql += f" AND category IN ({', '.join('?' for _ in categories)})"
+            params += list(categories)
+        return {r["source_id"]: r["total"] for r in db.all(sql + " GROUP BY source_id", params)}
+
+    # Customers: a sale's payment is in Accounts against the invoice (paid at the till, or changed on the invoice) or against the
+    # customer's account (a lump sum spread over their invoices). Refunds are money out and checked against nothing here.
+    on_invoice, on_account = booked("invoice", "in"), booked("customer", "in")
+    names = {c["id"]: c["name"] for c in db.all("SELECT id, name FROM customers WHERE business_id=?", (biz,))}
+    by_customer, parties, paid = {}, [], 0.0
+    for inv in db.all("SELECT id, invoice_no, customer_id, customer_name, amount_paid FROM invoices WHERE business_id=? AND kind='SALE'", (biz,)):
+        paid += inv["amount_paid"]
+        gap = inv["amount_paid"] - on_invoice.get(inv["id"], 0.0)
+        if inv["customer_id"]:
+            by_customer[inv["customer_id"]] = by_customer.get(inv["customer_id"], 0.0) + gap
+        elif abs(gap) > 0.005:
+            parties.append({"name": f"Invoice {inv['invoice_no']} ({inv['customer_name'] or WALK_IN})", "diff": gap, "link": url_for("invoice", invoice_id=inv["id"])})
+    for customer_id in set(by_customer) | set(on_account):
+        gap = by_customer.get(customer_id, 0.0) - on_account.get(customer_id, 0.0)
+        exists = customer_id in names
+        parties.append({
+            "name": names.get(customer_id, f"Customer account {customer_id} (no longer there)"), "diff": gap,
+            "link": url_for("customer_statement", customer_id=customer_id) if exists else None,
+        })
+    in_book = sum(on_invoice.values()) + sum(on_account.values())
+    check("Payments from customers", paid, in_book, parties)
+
+    # Suppliers: a purchase's payment is in Accounts as a payment to the supplier (spread over their purchases) or, with no
+    # supplier account (or paid before supplier payments were kept), against the purchase itself
+    on_purchase = booked("purchase", "out")
+    to_supplier = {
+        r["supplier_id"]: r["total"]
+        for r in db.all(
+            """SELECT sp.supplier_id, COALESCE(SUM(c.amount), 0) AS total FROM cashbook c JOIN supplier_payments sp ON sp.id = c.source_id
+               WHERE c.business_id=? AND c.source='supplier_payment' AND c.direction='out' GROUP BY sp.supplier_id""",
+            (biz,),
+        )
+    }
+    stray = db.one(
+        """SELECT COALESCE(SUM(amount), 0) AS total FROM cashbook c WHERE business_id=? AND source='supplier_payment'
+           AND NOT EXISTS (SELECT 1 FROM supplier_payments sp WHERE sp.id = c.source_id)""",
+        (biz,),
+    )["total"]
+    names = {s["id"]: s["name"] for s in db.all("SELECT id, name FROM suppliers WHERE business_id=?", (biz,))}
+    by_supplier, parties, paid = {}, [], 0.0
+    for pr in db.all(
+        "SELECT id, name, supplier_id, supplier_name, COALESCE(amount_paid, total_cost) AS paid FROM procurements WHERE business_id=?", (biz,)
+    ):
+        paid += pr["paid"] or 0.0
+        gap = (pr["paid"] or 0.0) - on_purchase.get(pr["id"], 0.0)
+        if pr["supplier_id"]:
+            by_supplier[pr["supplier_id"]] = by_supplier.get(pr["supplier_id"], 0.0) + gap
+        elif abs(gap) > 0.005:
+            parties.append({"name": f"Purchase of {pr['name']} ({pr['supplier_name'] or 'no supplier'})", "diff": gap, "link": url_for("procurement", purchase_id=pr["id"])})
+    for supplier_id in set(by_supplier) | set(to_supplier):
+        parties.append({
+            "name": names.get(supplier_id, f"Supplier account {supplier_id} (no longer there)"), "diff": by_supplier.get(supplier_id, 0.0) - to_supplier.get(supplier_id, 0.0),
+            "link": url_for("supplier_statement", supplier_id=supplier_id) if supplier_id in names else None,
+        })
+    if abs(stray) > 0.005:
+        parties.append({"name": "Supplier payments no longer on any statement", "diff": -stray, "link": None})
+    check("Payments to suppliers", paid, sum(on_purchase.values()) + sum(to_supplier.values()) + stray, parties)
+
+    # Payslips: net pay and NAPSA/NHIMA (both shares) each leave as their own entry
+    pay, levies = booked("payslip", "out", ("salaries",)), booked("payslip", "out", ("statutory",))
+    parties, expected = [], 0.0
+    slips = db.all(
+        """SELECT id, employee_name, pay_month, net_payable,
+                  COALESCE(napsa_amt, 0) + COALESCE(nhima_amt, 0) + COALESCE(employer_napsa, 0) + COALESCE(employer_nhima, 0) AS levies
+           FROM payroll WHERE business_id=?""",
+        (biz,),
+    )
+    for s in slips:
+        expected += s["net_payable"] + s["levies"]
+        gap = s["net_payable"] + s["levies"] - pay.get(s["id"], 0.0) - levies.get(s["id"], 0.0)
+        parties.append({"name": f"Payslip: {s['employee_name']}, {s['pay_month']}", "diff": gap, "link": url_for("payslips", id=s["id"])})
+    gone = set(pay) | set(levies)
+    gone -= {s["id"] for s in slips}
+    for slip_id in gone:
+        parties.append({"name": f"A deleted payslip (number {slip_id})", "diff": -(pay.get(slip_id, 0.0) + levies.get(slip_id, 0.0)), "link": None})
+    check("Payslips", expected, sum(pay.values()) + sum(levies.values()), parties)
+    return checks
+
+
+def financial_standing(db, biz, start, end):
+    """Everything on the financial standing: what the business is worth today, the profit over the period, and the records check."""
+    held, stock = money_held(db, biz), stock_value(db, biz)
+    owing, owed = customers_owing(db, biz), suppliers_owed(db, biz)
+    all_time = category_totals(db, biz)
+    loans = round(all_time.get(("in", "loan_in"), 0.0) - all_time.get(("out", "loan_out"), 0.0), 2)
+    receivable = round(sum(o["owed"] for o in owing), 2)
+    payable = round(sum(o["owed"] for o in owed), 2)
+    assets = [
+        ("Money held" if held["counted"] else "Money recorded", held["amount"]),
+        ("Customers owe us", receivable),
+        ("Stock (at cost)", stock["total"]),
+    ]
+    liabilities = [("We owe suppliers", payable)]
+    if loans > 0.005:
+        liabilities.append(("Loans still to repay", loans))
+    total_assets, total_liabilities = sum(v for _, v in assets), sum(v for _, v in liabilities)
+    return {
+        "held": held, "stock": stock, "owing": owing, "owed": owed, "loans": loans, "receivable": receivable, "payable": payable,
+        "assets": assets, "liabilities": liabilities, "total_assets": round(total_assets, 2), "total_liabilities": round(total_liabilities, 2),
+        "worth": round(total_assets - total_liabilities, 2),
+        "owner_in": all_time.get(("in", "capital"), 0.0), "owner_out": all_time.get(("out", "drawings"), 0.0),
+        "profit": period_profit(db, biz, start, end), "checks": records_check(db, biz), "as_of": now().strftime("%d %b %Y %H:%M"),
+    }
+
+
+def period_words(f):
+    if f["start"] and f["end"]:
+        return f["start"].strftime("%d %b %Y") + ("" if f["end"] == f["start"] else " to " + f["end"].strftime("%d %b %Y"))
+    if f["start"]:
+        return "From " + f["start"].strftime("%d %b %Y")
+    if f["end"]:
+        return "Up to " + f["end"].strftime("%d %b %Y")
+    return "All dates"
+
+
 @app.get("/accounts")
 @need("admin")
 def accounts():
@@ -6952,17 +7260,16 @@ def accounts():
             FROM cashbook c WHERE {where}""",
         params,
     )
-    owed_to_us = db.one(
-        "SELECT COALESCE(SUM(balance_due), 0) AS owed FROM invoices WHERE business_id=? AND kind='SALE' AND payment_status <> 'Cancelled'", (biz,)
-    )["owed"]
-    we_owe = db.one("SELECT COALESCE(SUM(total_cost - COALESCE(amount_paid, total_cost)), 0) AS owed FROM procurements WHERE business_id=?", (biz,))["owed"]
+    standing = financial_standing(db, biz, f["start"], f["end"])
     args = {key: request.args.get(key) for key in ACCOUNT_PARAMS if request.args.get(key)}
     period_args = {key: value for key, value in args.items() if key in ("period", "from", "to")}
     balances = balances_now(db, biz)
     return render_template(
         "accounts.html", f=f, periods=INVOICE_PERIODS, summary=account_summary(db, biz, f["start"], f["end"]),
         flow=account_flow(db, biz, f["start"], f["end"]), entries=account_entries(db, biz, f, ACCOUNT_LIST_LIMIT), listed=listed,
-        owed_to_us=owed_to_us, we_owe=we_owe, channels=[name for name, _ in CHANNELS], money_in=MONEY_IN, money_out=MONEY_OUT,
+        standing=standing, standing_list=STANDING_LIST, period_label=period_words(f),
+        standing_xlsx=url_for("standing_xlsx", **period_args), standing_pdf=url_for("standing_pdf", **period_args),
+        owed_to_us=standing["receivable"], we_owe=standing["payable"], channels=[name for name, _ in CHANNELS], money_in=MONEY_IN, money_out=MONEY_OUT,
         manual_in=[(k, CATEGORY_LABELS[k]) for k in MANUAL_IN], manual_out=[(k, CATEGORY_LABELS[k]) for k in MANUAL_OUT],
         methods=PAYMENT_METHODS, csv_url=url_for("accounts_csv", **args), return_to=url_for("accounts", **args), today=today_str(),
         list_filtered=bool(f["direction"] or f["channel"] or f["category"] or f["q"]),
@@ -6989,6 +7296,155 @@ def accounts_csv():
             for r in rows
         ],
     )
+
+
+def standing_rows(s, period):
+    """The financial standing as (section, item, amount) lines, for the downloads."""
+    rows = [("What we have", label, value) for label, value in s["assets"]]
+    rows += [("What we have", f"  of which {label}", value) for label, value in s["held"]["accounts"]]
+    rows += [
+        ("What we have", "  of which stock in inventory", s["stock"]["inventory"]), ("What we have", "  of which stock in the POS", s["stock"]["pos"]),
+        ("What we have", "  of which seedlings in the greenhouse", s["stock"]["greenhouse"]), ("What we have", "Total", s["total_assets"]),
+    ]
+    rows += [("What we owe", label, value) for label, value in s["liabilities"]] + [("What we owe", "Total", s["total_liabilities"])]
+    rows.append(("Worth", "What the business is worth (what we have less what we owe)", s["worth"]))
+    p = s["profit"]
+    rows += [(f"Profit, {period}", f"Earned: {label}", value) for label, value in p["earned"]]
+    rows += [(f"Profit, {period}", f"Spent: {label}", value) for label, value in p["spent"]]
+    rows.append((f"Profit, {period}", "Profit" if p["profit"] >= 0 else "Loss", p["profit"]))
+    return rows
+
+
+@app.get("/accounts/standing.xlsx")
+@need("admin")
+def standing_xlsx():
+    db, biz = get_db(), g.user["business_id"]
+    f = account_filters()
+    s, period = financial_standing(db, biz, f["start"], f["end"]), period_words(f)
+    stock_where = ("Inventory", "POS", "Greenhouse", "POS (cost not known)")
+    sheets = [
+        ("Financial standing", [("Section", TEXT), ("Item", TEXT), ("Amount", MONEY)], standing_rows(s, period)),
+        ("Customers owing", [("Customer", TEXT), ("Phone", TEXT), ("Unpaid invoices", WHOLE), ("Owing since", TEXT), ("Owed", MONEY)],
+         [(o["name"], o["phone"], o["invoices"], (o["since"] or "")[:10], o["owed"]) for o in s["owing"]]),
+        ("Suppliers owed", [("Supplier", TEXT), ("Unpaid purchases", WHOLE), ("Owed since", TEXT), ("Owed", MONEY)],
+         [(o["name"], o["purchases"], (o["since"] or "")[:10], o["owed"]) for o in s["owed"]]),
+        ("Stock at cost", [("Where", TEXT), ("Code", TEXT), ("Item", TEXT), ("Department", TEXT), ("Units", WHOLE), ("Cost each", MONEY), ("Value", MONEY)],
+         [(x["where"], x["code"], x["name"], x["department"], x["units"], x["cost"], x["value"])
+          for x in sorted(s["stock"]["lines"], key=lambda x: (stock_where.index(x["where"]), x["name"]))]),
+        ("Records check", [("Check", TEXT), ("Where", TEXT), ("Records say paid", MONEY), ("In Accounts", MONEY), ("Difference", MONEY)],
+         [row for c in s["checks"] for row in [(c["label"], "All", c["expected"], c["recorded"], round(c["expected"] - c["recorded"], 2))]
+          + [(c["label"], p["name"], None, None, round(p["diff"], 2)) for p in c["parties"]]]),
+    ]
+    return xlsx_response(f"financial-standing-{today_str()}.xlsx", workbook_bytes(sheets))
+
+
+@app.get("/accounts/standing.pdf")
+@need("admin")
+def standing_pdf():
+    db, biz = get_db(), g.user["business_id"]
+    f = account_filters()
+    s, period = financial_standing(db, biz, f["start"], f["end"]), period_words(f)
+    return Response(
+        standing_pdf_bytes(s, period), mimetype="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="financial-standing-{today_str()}.pdf"', "Cache-Control": "no-store"},
+    )
+
+
+def standing_pdf_bytes(s, period):
+    """The financial standing as a printable A4 statement."""
+    from xml.sax.saxutils import escape
+
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+    from reportlab.lib.units import mm
+    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+
+    base = getSampleStyleSheet()
+    small = ParagraphStyle("small", parent=base["Normal"], fontSize=8, leading=10)
+    centre = ParagraphStyle("centre", parent=base["Normal"], alignment=1, fontSize=9, leading=12)
+    title = ParagraphStyle("title", parent=base["Title"], fontSize=16, spaceAfter=2)
+    heading = ParagraphStyle("heading", parent=base["Heading3"], fontSize=11, spaceBefore=10, spaceAfter=4)
+    grey, line = colors.HexColor("#eeeeee"), colors.HexColor("#bbbbbb")
+
+    def table(rows, widths, bold_rows=()):
+        style = [
+            ("FONTSIZE", (0, 0), (-1, -1), 9), ("LEADING", (0, 0), (-1, -1), 11), ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"), ("BACKGROUND", (0, 0), (-1, 0), grey),
+            ("LINEBELOW", (0, 0), (-1, -1), 0.4, line), ("ALIGN", (-1, 0), (-1, -1), "RIGHT"),
+        ]
+        for r in bold_rows:
+            style += [("FONTNAME", (0, r), (-1, r), "Helvetica-Bold"), ("LINEABOVE", (0, r), (-1, r), 0.8, colors.black)]
+        return Table(rows, colWidths=[w * mm for w in widths], style=TableStyle(style))
+
+    story = [Paragraph(escape(g.user["business_name"]), title)]
+    for extra in (g.user["subtitle"], g.user["contact"]):
+        if extra:
+            story.append(Paragraph(escape(extra), centre))
+    story += [Spacer(1, 4), Paragraph("<b>FINANCIAL STANDING</b>", centre), Paragraph(escape(f"As at {s['as_of']}"), centre), Spacer(1, 6)]
+
+    story.append(Paragraph("What we have", heading))
+    rows = [["Item", "Amount"]]
+    for label, value in s["assets"]:
+        rows.append([label, money(value)])
+        if label.startswith("Money") and s["held"]["accounts"]:
+            rows += [[f"      {name}", money(amount)] for name, amount in s["held"]["accounts"]]
+        if label.startswith("Stock"):
+            rows += [["      In inventory", money(s["stock"]["inventory"])], ["      In the POS", money(s["stock"]["pos"])],
+                     ["      Seedlings in the greenhouse", money(s["stock"]["greenhouse"])]]
+    rows.append(["Total", money(s["total_assets"])])
+    story.append(table(rows, (130, 50), (len(rows) - 1,)))
+
+    story.append(Paragraph("What we owe", heading))
+    rows = [["Item", "Amount"]] + [[label, money(value)] for label, value in s["liabilities"]] + [["Total", money(s["total_liabilities"])]]
+    story.append(table(rows, (130, 50), (len(rows) - 1,)))
+    story.append(Spacer(1, 6))
+    story.append(Table(
+        [["What the business is worth", money(s["worth"])]], colWidths=[130 * mm, 50 * mm],
+        style=TableStyle([
+            ("FONTNAME", (0, 0), (-1, -1), "Helvetica-Bold"), ("FONTSIZE", (0, 0), (-1, -1), 10), ("ALIGN", (1, 0), (1, 0), "RIGHT"),
+            ("LINEABOVE", (0, 0), (-1, 0), 0.8, colors.black), ("LINEBELOW", (0, 0), (-1, 0), 0.8, colors.black),
+        ]),
+    ))
+
+    p = s["profit"]
+    story.append(Paragraph(escape(f"Profit: {period}"), heading))
+    rows = [["Item", "Amount"]] + [[label, money(value)] for label, value in p["earned"]] + [["Total earned", money(p["total_earned"])]]
+    earned_total = len(rows) - 1
+    rows += [[label, money(-value)] for label, value in p["spent"]] + [["Total spent", money(-p["total_spent"])]]
+    rows.append(["Profit" if p["profit"] >= 0 else "Loss", money(p["profit"])])
+    story.append(table(rows, (130, 50), (earned_total, len(rows) - 2, len(rows) - 1)))
+    story.append(Paragraph(
+        "Sales and purchases count when they are made, paid or not. Stock bought and not yet sold counts as spent here; it is in the stock figure above.", small,
+    ))
+
+    for title_text, people, column in (("Customers who owe us", s["owing"], "Invoices"), ("Suppliers we owe", s["owed"], "Purchases")):
+        if people:
+            story.append(Paragraph(title_text, heading))
+            rows = [["Name", column, "Since", "Owed"]]
+            rows += [[Paragraph(escape(o["name"]), small), str(o.get("invoices", o.get("purchases"))), (o["since"] or "")[:10], money(o["owed"])] for o in people]
+            story.append(table(rows, (95, 25, 30, 30)))
+
+    problems = [c for c in s["checks"] if not c["ok"]]
+    story.append(Paragraph("Records check", heading))
+    if not problems:
+        story.append(Paragraph("Every payment on sales, purchases and payslips agrees with Accounts.", small))
+    for c in problems:
+        story.append(Paragraph(escape(f"{c['label']}: the records say {money(c['expected'])}, Accounts holds {money(c['recorded'])}."), small))
+
+    def footer(canvas, doc):
+        canvas.setFont("Helvetica", 7)
+        canvas.setFillColor(colors.grey)
+        canvas.drawString(15 * mm, 9 * mm, f"Financial standing printed {s['as_of']}")
+        canvas.drawRightString(A4[0] - 15 * mm, 9 * mm, f"Page {doc.page}")
+
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buffer, pagesize=A4, leftMargin=15 * mm, rightMargin=15 * mm, topMargin=14 * mm, bottomMargin=16 * mm,
+        title="Financial standing", author=g.user["business_name"],
+    )
+    doc.build(story, onFirstPage=footer, onLaterPages=footer)
+    return buffer.getvalue()
 
 
 def accounts_back():
