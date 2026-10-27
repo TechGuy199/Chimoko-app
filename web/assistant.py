@@ -59,7 +59,7 @@ SHOW_MESSAGES = 30          # earlier messages shown when the panel is opened
 RETAIN_DAYS = 30            # chats are deleted after this
 ACTION_MINUTES = 15         # how long a prepared change waits for Confirm
 MAX_ACTIONS = 3             # changes prepared at once
-MAX_SPEAK_CHARS = 700       # a spoken answer: 24 kHz audio of this is about 45 seconds, well under Vercel's 4.5 MB response limit
+MAX_SPEAK_CHARS = 500       # one piece of speech: the less there is to make, the sooner it arrives (24 kHz audio of this is about 30 seconds)
 MAX_AUDIO_BYTES = 1_600_000 # 16 kHz clips: about 50 seconds
 MAX_RESULT_CHARS = 24000    # of one tool's answer, before it is refused as too much for Gemini to read
 
@@ -67,11 +67,11 @@ MAX_RESULT_CHARS = 24000    # of one tool's answer, before it is refused as too 
 def limits(user):
     """Daily limits: questions per person and per business, and voice clips (heard or spoken) per business. Demo companies get a taste."""
     if user["demo_expires_at"]:
-        return {"user_questions": 8, "business_questions": 8, "business_voice": 4}
+        return {"user_questions": 8, "business_questions": 8, "business_voice": 6}
     return {
         "user_questions": _env_int("ASSISTANT_QUESTIONS_PER_USER", 40),
         "business_questions": _env_int("ASSISTANT_QUESTIONS_PER_BUSINESS", 150),
-        "business_voice": _env_int("ASSISTANT_VOICE_PER_BUSINESS", 100),
+        "business_voice": _env_int("ASSISTANT_VOICE_PER_BUSINESS", 150),
     }
 
 

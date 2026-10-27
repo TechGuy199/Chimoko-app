@@ -14,6 +14,8 @@
     let recording = null;
     const player = new Audio();   // one element for every answer read aloud, so a phone that allows it once allows it always
     let unlocked = false;
+    let reading = 0;              // which reading aloud is current: a newer one, or Stop, makes an older one give up
+    let preparing = false;        // the status line says the voice is being made
 
     function keep(key, value) {
         try {
@@ -240,18 +242,49 @@
         player.play().catch(function () { unlocked = false; });
     }
 
-    function say(text) {
+    // Making speech takes time in proportion to its length, so a long answer is read in two pieces: the first sentence, which is ready
+    // soon, and the rest. Both are asked for at once and the rest plays when the first sentence ends.
+    function pieces(text) {
+        const t = String(text).trim();
+        if (t.length <= 160) return [t];
+        const first = t.match(/^[\s\S]{15,200}?[.!?:](?=\s)/);
+        if (!first || t.length - first[0].length < 40) return [t];
+        return [first[0], t.slice(first[0].length).trim()];
+    }
+
+    function stopSpeaking() {
+        reading++;
         player.pause();
-        status("Getting the voice");
-        const form = new FormData();
-        form.append("text", text);
-        send(cfg.speak, form).then(function (r) {
-            status("");
-            if (!r.audio) { if (r.error) addError(r.error); return; }
-            player.src = URL.createObjectURL(r.audio);
-            player.onended = function () { status(""); };
-            player.play().catch(function () { addError("Tap the speaker under the answer to hear it."); });
+        player.onended = null;
+        if (preparing) { preparing = false; status(""); }
+    }
+
+    function say(text) {
+        stopSpeaking();
+        const mine = reading;
+        const clips = pieces(text).map(function (part) {
+            const form = new FormData();
+            form.append("text", part);
+            return send(cfg.speak, form);
         });
+        let at = 0;
+        function next() {
+            if (mine !== reading) return;
+            if (at >= clips.length) return;
+            preparing = true;
+            status("Getting the voice");
+            clips[at++].then(function (r) {
+                if (mine !== reading) return;
+                preparing = false;
+                status("");
+                if (!r.audio) { if (r.error) addError(r.error); return; }
+                const url = URL.createObjectURL(r.audio);
+                player.src = url;
+                player.onended = function () { URL.revokeObjectURL(url); next(); };
+                player.play().catch(function () { addError("Tap the speaker under the answer to hear it."); });
+            });
+        }
+        next();
     }
 
     // ---------- Recording: raw sound, 16 kHz mono, made into a WAV file here, so every browser sends the same thing ----------
@@ -287,7 +320,7 @@
             return;
         }
         unlock();
-        player.pause();
+        stopSpeaking();
         navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } }).then(function (stream) {
             const Context = window.AudioContext || window.webkitAudioContext;
             const context = new Context();
@@ -360,7 +393,7 @@
             keep("assistant.speak", on ? "1" : "0");
             ui.speakToggle.setAttribute("aria-pressed", on ? "true" : "false");
             ui.speakToggle.classList.toggle("on", on);
-            if (on) unlock(); else player.pause();
+            if (on) unlock(); else stopSpeaking();
         });
         const on = keep("assistant.speak") === "1";
         ui.speakToggle.setAttribute("aria-pressed", on ? "true" : "false");
@@ -368,7 +401,7 @@
         tools.appendChild(ui.speakToggle);
         tools.appendChild(button("assistant-new", "Start a new chat", "again", function () {
             if (recording) stopRecording(false);
-            player.pause();
+            stopSpeaking();
             send(cfg.clear, new FormData()).then(function () { ui.body.replaceChildren(); welcome(); });
         }));
         tools.appendChild(button("assistant-close", "Close the assistant", "close", closePanel));
@@ -435,7 +468,7 @@
 
     function closePanel() {
         if (recording) stopRecording(false);
-        player.pause();
+        stopSpeaking();
         if (panel && panel.open) panel.close();
         fab.classList.remove("open");
         fab.setAttribute("aria-expanded", "false");
