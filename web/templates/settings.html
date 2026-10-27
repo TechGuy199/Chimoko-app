@@ -118,8 +118,8 @@
         supplier details.
     </p>
     <p class="muted">
-        <strong>It is run by Google's Gemini, so what it looks up (customer names and phone numbers, sales, and for an admin the accounts) is sent to Google to answer.</strong>
-        Use a Gemini key from a Google project with billing switched on: on Google's paid terms your records are not used to improve Google's products, but on its free terms they can be.
+        <strong>It is run by Anthropic's Claude, so what it looks up (customer names and phone numbers, sales, and for an admin the accounts) is sent to Anthropic to answer.</strong>
+        Voice uses the browser's own speech: what is said is usually turned into words by the browser maker's online service (Google for Chrome, Microsoft for Edge, Apple for Safari), and speech recognition is not available in Firefox.
     </p>
     <form method="post" action="{{ url_for('save_assistant') }}">
         {{ csrf_field() }}
@@ -129,12 +129,12 @@
     {% endif %}
     <div class="rules-summary spaced">
         {% if assistant_info.configured %}
-        <p><strong class="ok">Connected to Gemini</strong> (model {{ assistant_info.model }}).</p>
+        <p><strong class="ok">Connected to Claude</strong> (model {{ assistant_info.model }}).</p>
         {% else %}
-        <p><strong class="warn">Not connected yet</strong>: the server has no Gemini key. Add GEMINI_API_KEY under Settings &gt; Environment Variables in Vercel, then redeploy.</p>
+        <p><strong class="warn">Not connected yet</strong>: the server has no Claude key. Add ANTHROPIC_API_KEY under Settings &gt; Environment Variables in Vercel (the Anthropic account needs credit), then redeploy.</p>
         {% endif %}
-        <p class="muted">Today: this business has asked {{ assistant_info.usage.business_questions }} of {{ assistant_info.limits.business_questions }} questions and used voice {{ assistant_info.usage.business_voice }}
-            of {{ assistant_info.limits.business_voice }} times. Each person may ask {{ assistant_info.limits.user_questions }} a day.</p>
+        <p class="muted">Today: this business has asked {{ assistant_info.usage.business_questions }} of {{ assistant_info.limits.business_questions }} questions.
+            Each person may ask {{ assistant_info.limits.user_questions }} a day.</p>
     </div>
 </section>
 

@@ -1,26 +1,23 @@
-"""The assistant: a chat (and voice) panel, run by Google's Gemini, that can look at anything the signed-in person may open in the app
-and prepare things for them to confirm.
+"""The assistant: a chat panel, run by Anthropic's Claude, that can look at anything the signed-in person may open in the app and prepare
+things for them to confirm. It can be spoken to and can read its answers aloud, using the browser's own voice (assistant.js).
 
 How it stays safe:
-- It never touches the database itself. Gemini is only offered tools (assistant_tools.py): each is a read-only look-up, scoped to the
-  signed-in person's business and to what their role may open, or a "propose" that writes a waiting card for the person to confirm.
-- Whatever the tools return is information, never instructions (the instructions to Gemini say so), and a tool the person's account may
+- It never touches the database itself. Claude is only offered tools (assistant_tools.py): each is a read-only look-up, scoped to the
+  signed-in person's business and to what their role may open, or a "prepare" that writes a waiting card for the person to confirm.
+- Whatever the tools return is information, never instructions (the instructions to Claude say so), and a tool the person's account may
   not use is not even offered to it.
 - Nothing is changed until the person presses Confirm. Confirm sends the app's own page for that change (the same one its form would
   have used) as that person, so every check the app already has runs again: permission, stock, amounts, the lot.
 - The key lives on the server only. Each person, and each business, has daily limits; a business must switch the assistant on first.
 """
-import base64
 import concurrent.futures
 import datetime
-import io
 import json
 import logging
 import os
 import re
 import secrets
 import types
-import wave
 
 log = logging.getLogger("assistant")
 
@@ -41,33 +38,28 @@ def _env_int(name, default):
         return default
 
 
-MODEL = os.environ.get("ASSISTANT_MODEL", "gemini-3.8-flash")                 # answers, and chooses which tools to use
-LISTEN_MODEL = os.environ.get("ASSISTANT_LISTEN_MODEL", "gemini-3.5-flash-lite")  # turns a recording into words
-SPEAK_MODEL = os.environ.get("ASSISTANT_SPEAK_MODEL", "gemini-3.8-flash-lite-tts")  # turns an answer into speech
-VOICE = os.environ.get("ASSISTANT_VOICE", "Kore")
-THINKING = os.environ.get("ASSISTANT_THINKING", "low")
+MODEL = os.environ.get("ASSISTANT_MODEL", "claude-haiku-5-5")   # answers, and chooses which tools to use
+EFFORT = os.environ.get("ASSISTANT_EFFORT", "low")               # how much the model thinks: low is right for a chat that looks things up
 
 MAX_MESSAGE = 1000          # characters in one question
-MAX_ROUNDS = 6              # look-ups Gemini may chain to answer one question
-MAX_OUTPUT_TOKENS = 2000       # the model's thinking counts toward this as well as the answer
-KEEP_MESSAGES = 12          # earlier messages given to Gemini with each question
+MAX_ROUNDS = 6              # look-ups Claude may chain to answer one question
+MAX_OUTPUT_TOKENS = 4000    # the model's thinking counts toward this as well as the answer
+KEEP_MESSAGES = 12          # earlier messages given to Claude with each question
 SHOW_MESSAGES = 30          # earlier messages shown when the panel is opened
 RETAIN_DAYS = 30            # chats are deleted after this
 ACTION_MINUTES = 15         # how long a prepared change waits for Confirm
 MAX_ACTIONS = 3             # changes prepared at once
-MAX_SPEAK_CHARS = 700       # a spoken answer: 24 kHz audio of this is about 45 seconds, well under Vercel's 4.5 MB response limit
-MAX_AUDIO_BYTES = 1_600_000 # 16 kHz clips: about 50 seconds
-MAX_RESULT_CHARS = 24000    # of one tool's answer, before it is refused as too much for Gemini to read
+MAX_RESULT_CHARS = 24000    # of one tool's answer, before it is refused as too much to read
+REFUSED = "I can't help with that one."
 
 
 def limits(user):
-    """Daily limits: questions per person and per business, and voice clips (heard or spoken) per business. Demo companies get a taste."""
+    """Daily limits: questions per person and per business. Demo companies get a taste."""
     if user["demo_expires_at"]:
-        return {"user_questions": 8, "business_questions": 8, "business_voice": 4}
+        return {"user_questions": 8, "business_questions": 8}
     return {
         "user_questions": _env_int("ASSISTANT_QUESTIONS_PER_USER", 40),
         "business_questions": _env_int("ASSISTANT_QUESTIONS_PER_BUSINESS", 150),
-        "business_voice": _env_int("ASSISTANT_VOICE_PER_BUSINESS", 100),
     }
 
 
@@ -80,12 +72,12 @@ class Refused(Exception):
 
 
 class ToolError(Exception):
-    """A tool could not do what was asked: the message goes back to Gemini, which explains it to the person."""
+    """A tool could not do what was asked: the message goes back to Claude, which explains it to the person."""
 
 
 # ---------- Who may use it ----------
 def enabled_for(user):
-    """Real businesses switch it on in Settings (it sends records to Google); a demo company has it on, with a small allowance."""
+    """Real businesses switch it on in Settings (it sends records to Anthropic); a demo company has it on, with a small allowance."""
     return bool(user and (user["demo_expires_at"] or user["assistant_enabled"] == 1))
 
 
@@ -96,12 +88,12 @@ def may(user, perm):
     return perm in ("sell", "procure", "transfer", "delete") and bool(user["can_" + perm])
 
 
-# ---------- The Gemini connection ----------
+# ---------- The Claude connection ----------
 _client = None   # the real one, made on first use; tests put a stand-in here
 
 
 def api_key():
-    return os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY") or ""
+    return os.environ.get("ANTHROPIC_API_KEY") or ""
 
 
 def configured():
@@ -112,102 +104,61 @@ def client():
     global _client
     if _client is None:
         if not api_key():
-            raise Refused("The assistant has no Gemini key yet. An admin needs to add GEMINI_API_KEY to the server's settings.", 503)
-        _client = Gemini(api_key())
+            raise Refused("The assistant has no Claude key yet. An admin needs to add ANTHROPIC_API_KEY to the server's settings.", 503)
+        _client = Claude(api_key())
     return _client
 
 
 class Turn:
-    """One answer from Gemini: the steps it took (to send back with the next round), any look-ups it asked for, its words, and its cost."""
+    """One answer from Claude: what to send back with the next round (its content blocks), any look-ups it asked for, its words, why it
+    stopped, and what it cost."""
 
-    def __init__(self, steps, calls, text, tokens_in=0, tokens_out=0):
-        self.steps, self.calls, self.text, self.tokens_in, self.tokens_out = steps, calls, text, tokens_in, tokens_out
+    def __init__(self, content, calls, text, tokens_in=0, tokens_out=0, stop="end_turn"):
+        self.content, self.calls, self.text, self.tokens_in, self.tokens_out, self.stop = content, calls, text, tokens_in, tokens_out, stop
 
 
-class Gemini:
-    """The only code that talks to Google. It uses the Interactions API without storing anything on Google's side (store=False): our own
-    database holds the chat, and the steps of a question are sent back each round, as Google's documentation describes for stateless use."""
+class Claude:
+    """The only code that talks to Anthropic: the Messages API, with the app's tools. Nothing is kept on Anthropic's side between questions:
+    each one is sent whole (the recent chat as plain text, then this question's own look-ups)."""
 
     def __init__(self, key):
-        from google import genai   # only when the assistant is first used, so the rest of the app starts as fast as before
+        import anthropic   # only when the assistant is first used, so the rest of the app starts as fast as before
 
-        self.api = genai.Client(api_key=key)
+        self.errors = anthropic
+        self.api = anthropic.Anthropic(api_key=key, timeout=90.0)   # it retries a busy or dropped request twice by itself
 
-    def turn(self, system, steps, tools):
-        config = {"max_output_tokens": MAX_OUTPUT_TOKENS}
-        if THINKING:   # ASSISTANT_THINKING= (empty) leaves it to the model, for a model that does not take the setting
-            config["thinking_level"] = THINKING
-        request = dict(model=MODEL, input=steps, system_instruction=system, store=False, generation_config=config)
+    def turn(self, system, messages, tools):
+        request = dict(
+            model=MODEL, max_tokens=MAX_OUTPUT_TOKENS, messages=messages, output_config={"effort": EFFORT},
+            # The tools and these instructions are the same for everyone of a role in a business on a day, so Anthropic reads them from its cache
+            system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
+        )
         if tools:
             request["tools"] = tools
         try:
-            done = self.api.interactions.create(**request)
-        except Exception as e:
+            done = self.api.messages.create(**request)
+        except self.errors.APIError as e:
             raise unavailable(e)
-        made = list(done.steps or [])
-        calls = [{"id": s.id, "name": s.name, "arguments": dict(s.arguments or {})} for s in made if s.type == "function_call"]
+        calls = [{"id": b.id, "name": b.name, "arguments": dict(b.input or {})} for b in done.content if b.type == "tool_use"]
+        text = "".join(b.text for b in done.content if b.type == "text").strip()
         usage = done.usage
-        return Turn(
-            [s.model_dump(mode="json", exclude_none=True) for s in made], calls, (done.output_text or "").strip(),
-            (usage.total_input_tokens or 0) if usage else 0, (usage.total_output_tokens or 0) if usage else 0,
-        )
-
-    def transcribe(self, wav):
-        try:
-            done = self.api.interactions.create(
-                model=LISTEN_MODEL, store=False,
-                input=[
-                    {"type": "text", "text": "Write down exactly what is said in this recording, in the language spoken (usually English, sometimes with "
-                                            "Bemba or Nyanja words). It is someone talking to a business app: names of people, plants and products are "
-                                            "common. Reply with only the words spoken. If there is no speech, reply with nothing."},
-                    {"type": "audio", "data": base64.b64encode(wav).decode("ascii"), "mime_type": "audio/wav"},
-                ],
-            )
-        except Exception as e:
-            raise unavailable(e)
-        return (done.output_text or "").strip()
-
-    def speak(self, text):
-        try:
-            done = self.api.interactions.create(
-                model=SPEAK_MODEL, store=False, response_format={"type": "audio"},
-                generation_config={"speech_config": [{"voice": VOICE}]},
-                input=[{"type": "user_input", "content": [{"type": "text", "text": text}]}],
-            )
-        except Exception as e:
-            raise unavailable(e)
-        audio = done.output_audio
-        if audio is None or not audio.data:
-            raise Refused("The voice did not come back. Please try again.", 503)
-        return as_wav(base64.b64decode(audio.data), getattr(audio, "mime_type", None), getattr(audio, "sample_rate", None))
+        spent_in = (usage.input_tokens or 0) + (getattr(usage, "cache_creation_input_tokens", 0) or 0) + (getattr(usage, "cache_read_input_tokens", 0) or 0)
+        return Turn(done.content, calls, text, spent_in, usage.output_tokens or 0, done.stop_reason)
 
 
 def unavailable(error):
-    """A Gemini failure as something for the person to read; the details (never the chat) go to the server's log."""
-    log.warning("Gemini call failed: %s: %s", type(error).__name__, str(error)[:300])
-    said = (type(error).__name__ + " " + str(error)).lower()
-    if any(word in said for word in ("429", "quota", "resource_exhausted", "rate limit", "rate_limit", "overloaded", "503")):
+    """An Anthropic failure as something for the person to read; the details (never the chat) go to the server's log."""
+    status, kind = getattr(error, "status_code", None), str(getattr(error, "type", "") or "")
+    log.warning("Claude call failed: %s (status %s, %s): %s", type(error).__name__, status, kind, str(error)[:300])
+    if status in (429, 529) or kind in ("rate_limit_error", "overloaded_error"):
         return Refused("The assistant is busy at the moment. Please try again in a minute.", 503)
-    if any(word in said for word in ("401", "403", "api key", "api_key", "permission_denied", "unauthenticated")):
-        return Refused("Google did not accept the assistant's key. An admin needs to check GEMINI_API_KEY.", 503)
+    if status in (401, 403) or kind in ("authentication_error", "permission_error"):
+        return Refused("Anthropic did not accept the assistant's key. An admin needs to check ANTHROPIC_API_KEY.", 503)
+    if status == 402 or kind == "billing_error":
+        return Refused("The Anthropic account has no credit left. An admin needs to check its billing.", 503)
+    if status == 404 or kind == "not_found_error":
+        return Refused("Anthropic does not know the model the assistant is set to use. An admin needs to check ASSISTANT_MODEL.", 503)
     return Refused("The assistant could not answer just now. Please try again.", 503)
-
-
-def as_wav(data, mime, sample_rate):
-    """Speech as a WAV file a browser can play: Gemini sends one, or raw 16-bit audio (audio/l16) that is wrapped here."""
-    if data[:4] == b"RIFF":
-        return data
-    rate = sample_rate
-    match = re.search(r"rate=(\d+)", mime or "")
-    if not rate and match:
-        rate = int(match.group(1))
-    out = io.BytesIO()
-    with wave.open(out, "wb") as w:
-        w.setnchannels(1)
-        w.setsampwidth(2)
-        w.setframerate(rate or 24000)
-        w.writeframes(data)
-    return out.getvalue()
 
 
 # ---------- A look-up's working space ----------
@@ -224,7 +175,7 @@ class Ctx:
         return f"{self.currency}{round(float(amount or 0), 2):,.2f}"
 
     def source(self, label, url):
-        """A page the answer came from, shown under it (made here, so a link is never something Gemini wrote)."""
+        """A page the answer came from, shown under it (made here, so a link is never something Claude wrote)."""
         if url and all(url != u for _, u in self.sources) and len(self.sources) < 5:
             self.sources.append((label, url))
 
@@ -248,7 +199,7 @@ class Ctx:
         return action_id
 
 
-# ---------- The tools Gemini may use ----------
+# ---------- The tools Claude may use ----------
 class Tool:
     def __init__(self, name, description, properties, required, fn, admin, perm):
         self.name, self.description, self.properties, self.required, self.fn, self.admin, self.perm = name, description, properties, required, fn, admin, perm
@@ -271,15 +222,15 @@ def tool(description, properties=None, required=(), admin=False, perm=None):
 
 
 def declarations(user):
-    """The tools this person's account may use, in the form Gemini takes. Others are not offered at all."""
+    """The tools this person's account may use, in the form Claude takes. Others are not offered at all."""
     return [
-        {"type": "function", "name": t.name, "description": t.description, "parameters": {"type": "object", "properties": t.properties, "required": t.required}}
+        {"name": t.name, "description": t.description, "input_schema": {"type": "object", "properties": t.properties, "required": t.required}}
         for t in TOOLS.values() if t.allowed(user)
     ]
 
 
 def run_tool(ctx, name, arguments):
-    """Runs one look-up for Gemini: {"ok": True, "data": ...} or {"ok": False, "error": ...}. Never raises."""
+    """Runs one look-up for Claude: {"ok": True, "data": ...} or {"ok": False, "error": ...}. Never raises."""
     t = TOOLS.get(name)
     if t is None or not t.allowed(ctx.user):
         return {"ok": False, "error": "This account cannot do that."}
@@ -300,10 +251,11 @@ def run_tool(ctx, name, arguments):
     return out
 
 
-# ---------- Instructions to Gemini ----------
+# ---------- Instructions to Claude ----------
 def system_prompt(user, voice):
-    stamp = H.now()
-    return f"""You are the assistant inside the business app of {user['business_name']}: stock and inventory, the point of sale, pre-orders, deliveries, customers, suppliers, accounts, staff and greenhouse planting. You are talking with {user['username']}, who is {'an admin' if user['role'] == 'admin' else 'an operator'}. Now it is {stamp.strftime('%A %d %B %Y, %H:%M')}. Money is in {(user['currency'] or '').strip() or 'the business currency'}.
+    # Only the date, not the time, and not the person's name: the instructions are then the same all day for everyone of a role in a business,
+    # so Anthropic can read them (and the tools before them) from its cache instead of processing them again for every question
+    return f"""You are the assistant inside the business app of {user['business_name']}: stock and inventory, the point of sale, pre-orders, deliveries, customers, suppliers, accounts, staff and greenhouse planting. You are talking with {'an admin' if user['role'] == 'admin' else 'an operator'}. Today is {H.now().strftime('%A %d %B %Y')}. Money is in {(user['currency'] or '').strip() or 'the business currency'}.
 
 How you work:
 - You see the business only through your tools. For anything about figures or records, use them; never guess, and never work out totals from memory: the tools give totals. If you were not given a tool for something, this person's account cannot open that part of the app: say so plainly and suggest asking an admin.
@@ -322,7 +274,10 @@ def clip(value, n=160):
 
 def history(db, user, n=KEEP_MESSAGES):
     rows = db.all("SELECT role, content FROM assistant_messages WHERE business_id=? AND user_id=? ORDER BY id DESC LIMIT ?", (user["business_id"], user["id"], n))
-    return list(reversed(rows))
+    rows.reverse()
+    while rows and rows[0]["role"] != "user":   # a chat sent to Claude has to begin with the person
+        rows.pop(0)
+    return rows
 
 
 def remember(db, user, role, content):
@@ -364,39 +319,36 @@ def clear(db, user):
 def usage_today(db, user):
     day = H.today_str()
     mine = db.one("SELECT questions FROM assistant_usage WHERE business_id=? AND user_id=? AND day=?", (user["business_id"], user["id"], day))
-    whole = db.one("SELECT COALESCE(SUM(questions), 0) AS q, COALESCE(SUM(voice), 0) AS v FROM assistant_usage WHERE business_id=? AND day=?", (user["business_id"], day))
-    return {"user_questions": mine["questions"] if mine else 0, "business_questions": whole["q"], "business_voice": whole["v"]}
+    whole = db.one("SELECT COALESCE(SUM(questions), 0) AS q FROM assistant_usage WHERE business_id=? AND day=?", (user["business_id"], day))
+    return {"user_questions": mine["questions"] if mine else 0, "business_questions": whole["q"]}
 
 
-def charge(db, user, questions=0, voice=0, tokens_in=0, tokens_out=0):
+def charge(db, user, questions=0, tokens_in=0, tokens_out=0):
     db.execute(
-        """INSERT INTO assistant_usage (business_id, user_id, day, questions, voice, input_tokens, output_tokens) VALUES (?, ?, ?, ?, ?, ?, ?)
-           ON CONFLICT (business_id, user_id, day) DO UPDATE SET questions = assistant_usage.questions + ?, voice = assistant_usage.voice + ?,
+        """INSERT INTO assistant_usage (business_id, user_id, day, questions, input_tokens, output_tokens) VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT (business_id, user_id, day) DO UPDATE SET questions = assistant_usage.questions + ?,
                input_tokens = assistant_usage.input_tokens + ?, output_tokens = assistant_usage.output_tokens + ?""",
-        (user["business_id"], user["id"], H.today_str(), questions, voice, tokens_in, tokens_out, questions, voice, tokens_in, tokens_out),
+        (user["business_id"], user["id"], H.today_str(), questions, tokens_in, tokens_out, questions, tokens_in, tokens_out),
     )
     db.commit()
 
 
-def need_ready(db, user, kind="questions"):
+def need_ready(db, user):
     """Stops a request that cannot be served: switched off, no key, or over today's limit."""
     if not enabled_for(user):
         raise Refused("The assistant is switched off for this business. An admin can switch it on in Settings.", 403)
     if not configured():
-        raise Refused("The assistant has no Gemini key yet. An admin needs to add GEMINI_API_KEY to the server's settings.", 503)
+        raise Refused("The assistant has no Claude key yet. An admin needs to add ANTHROPIC_API_KEY to the server's settings.", 503)
     used, cap = usage_today(db, user), limits(user)
-    if kind == "questions":
-        if used["user_questions"] >= cap["user_questions"]:
-            raise Refused(f"You have used today's {cap['user_questions']} questions. The limit starts again tomorrow.", 429)
-        if used["business_questions"] >= cap["business_questions"]:
-            raise Refused("This business has used the assistant's questions for today. It starts again tomorrow.", 429)
-    elif used["business_voice"] >= cap["business_voice"]:
-        raise Refused("This business has used the assistant's voice for today. Typing still works; voice starts again tomorrow.", 429)
+    if used["user_questions"] >= cap["user_questions"]:
+        raise Refused(f"You have used today's {cap['user_questions']} questions. The limit starts again tomorrow.", 429)
+    if used["business_questions"] >= cap["business_questions"]:
+        raise Refused("This business has used the assistant's questions for today. It starts again tomorrow.", 429)
 
 
 def converse(db, user, message, voice=False):
-    """One question: Gemini looks things up with its tools (up to MAX_ROUNDS times) until it can answer. Returns the answer, the pages it came
-    from, and any changes it prepared for the person to confirm."""
+    """One question: Claude looks things up with its tools (up to MAX_ROUNDS times) until it can answer. Returns the answer, the pages it came
+    from, and any changes it prepared for the person to confirm. voice = the question was spoken, so the answer is short and fit to be read out."""
     message = " ".join(message.split())[:MAX_MESSAGE]
     if not message:
         raise Refused("Type or say something to ask.")
@@ -406,23 +358,26 @@ def converse(db, user, message, voice=False):
 
     ctx = Ctx(db, user)
     tools = declarations(user)
-    steps = [
-        {"type": "user_input" if m["role"] == "user" else "model_output", "content": [{"type": "text", "text": m["content"]}]} for m in history(db, user)
-    ]
-    steps.append({"type": "user_input", "content": [{"type": "text", "text": message}]})
+    messages = [{"role": m["role"], "content": m["content"]} for m in history(db, user)]
+    messages.append({"role": "user", "content": message})
     system, spent_in, spent_out, answer = system_prompt(user, voice), 0, 0, ""
-    gemini = client()
+    claude = client()
     for _ in range(MAX_ROUNDS):
-        turn = gemini.turn(system, steps, tools)
+        turn = claude.turn(system, messages, tools)
         spent_in, spent_out = spent_in + turn.tokens_in, spent_out + turn.tokens_out
-        steps += turn.steps
+        if turn.stop == "refusal":
+            answer = REFUSED
+            break
         if not turn.calls:
             answer = turn.text
             break
+        # What Claude said goes back unchanged, then every look-up it asked for is answered together, in one message
+        messages.append({"role": "assistant", "content": turn.content})
+        results = []
         for call in turn.calls:
             result = run_tool(ctx, call["name"], call["arguments"])
-            steps.append({"type": "function_result", "name": call["name"], "call_id": call["id"],
-                          "result": [{"type": "text", "text": json.dumps(result, default=str)}]})
+            results.append({"type": "tool_result", "tool_use_id": call["id"], "content": json.dumps(result, default=str), **({} if result["ok"] else {"is_error": True})})
+        messages.append({"role": "user", "content": results})
     charge(db, user, tokens_in=spent_in, tokens_out=spent_out)
     if not answer:
         answer = "I could not finish looking that up. Please ask again, a little more simply."
@@ -444,44 +399,6 @@ def state(db, user):
         "configured": configured(), "messages": list(reversed(rows)), "actions": [action_card(a) for a in waiting],
         "usage": usage_today(db, user), "limits": limits(user), "name": user["username"],
     }
-
-
-# ---------- Voice ----------
-def listen(db, user, wav):
-    """A recording as words. Counts against the business's voice allowance."""
-    need_ready(db, user, "voice")
-    if len(wav) > MAX_AUDIO_BYTES or len(wav) < 2000:
-        raise Refused("That recording was too long or too short. Hold it to a few seconds of speaking, up to about 30.")
-    charge(db, user, voice=1)
-    said = " ".join(client().transcribe(wav).split())
-    if not said:
-        raise Refused("I did not catch that. Please try again, a little closer to the microphone.")
-    return said[:MAX_MESSAGE]
-
-
-def speakable(text):
-    """The words of an answer without the marks that are for reading: links, lists, bold, symbols. Cut at a sentence if it is long."""
-    t = re.sub(r"```.*?```", " ", text or "", flags=re.S)
-    t = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", t)
-    t = re.sub(r"https?://\S+", "", t)
-    t = re.sub(r"^\s*(?:[-•*]|\d+\.)\s+", "", t, flags=re.M)
-    t = re.sub(r"[*_`#>|]+", "", t)
-    t = " ".join(t.split())
-    if len(t) > MAX_SPEAK_CHARS:
-        cut = t[:MAX_SPEAK_CHARS]
-        end = max(cut.rfind(". "), cut.rfind("? "), cut.rfind("! "))
-        t = cut[: end + 1] if end > 200 else cut
-    return t
-
-
-def speak(db, user, text):
-    """An answer as a WAV recording. Counts against the business's voice allowance."""
-    need_ready(db, user, "voice")
-    words = speakable(text)
-    if not words:
-        raise Refused("There is nothing to read aloud.")
-    charge(db, user, voice=1)
-    return client().speak(words)
 
 
 # ---------- Changes waiting for Confirm ----------

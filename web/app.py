@@ -9977,7 +9977,7 @@ def delete_admin(admin_id):
 
 
 # --- ASSISTANT ---
-# The chat panel (assistant.js) and its voice. The work is in assistant.py; these only check who is asking and answer as JSON. Every request
+# The chat panel (assistant.js). The work is in assistant.py; these only check who is asking and answer as JSON. Every request
 # is a form post (so the app's CSRF check covers it) and every one is limited to the signed-in person's own business.
 def assistant_json(work):
     try:
@@ -9998,26 +9998,6 @@ def assistant_state():
 @need(None)
 def assistant_chat():
     return assistant_json(lambda: assistant.converse(get_db(), g.user, request.form.get("message", ""), voice=request.form.get("voice") == "1"))
-
-
-@app.post("/assistant/listen")
-@need(None)
-def assistant_listen():
-    def work():
-        recording = request.files.get("audio")
-        data = recording.read(assistant.MAX_AUDIO_BYTES + 1) if recording else b""
-        return {"text": assistant.listen(get_db(), g.user, data)}
-    return assistant_json(work)
-
-
-@app.post("/assistant/speak")
-@need(None)
-def assistant_speak():
-    try:
-        wav = assistant.speak(get_db(), g.user, request.form.get("text", ""))
-    except assistant.Refused as e:
-        return jsonify({"error": e.message}), e.status
-    return Response(wav, mimetype="audio/wav", headers={"Cache-Control": "no-store"})
 
 
 @app.post("/assistant/actions/<int:action_id>/confirm")

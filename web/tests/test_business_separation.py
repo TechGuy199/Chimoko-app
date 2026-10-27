@@ -21,7 +21,7 @@ import unittest
 import zipfile
 import zlib
 
-for setting in ("DATABASE_URL", "POSTGRES_URL", "VERCEL", "ALLOW_SIGNUP", "GEMINI_API_KEY", "GOOGLE_API_KEY"):
+for setting in ("DATABASE_URL", "POSTGRES_URL", "VERCEL", "ALLOW_SIGNUP", "ANTHROPIC_API_KEY"):
     os.environ.pop(setting, None)
 WEB = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, WEB)
@@ -124,24 +124,22 @@ def value_for(name, alpha_ids):
     return "1"
 
 
-class StandInGemini:
-    """Gemini, for the tests: answers "ok" to everything, so no key or network is ever used. A test can have it ask for look-ups first."""
+class StandInClaude:
+    """Claude, for the tests: answers "ok" to everything, so no key or network is ever used. A test can have it ask for look-ups first."""
 
     def __init__(self):
         self.ask, self.results = None, []
 
-    def turn(self, system, steps, tools):
-        if self.ask is not None and not any(s.get("type") == "function_result" for s in steps):
-            made = [{"id": f"c{i}", "name": n, "arguments": a} for i, (n, a) in enumerate(self.ask(tools))]
-            return A.assistant.Turn([{"type": "function_call", "id": c["id"], "name": c["name"], "arguments": c["arguments"]} for c in made], made, "", 1, 1)
-        self.results = [json.loads(s["result"][0]["text"]) for s in steps if s.get("type") == "function_result"]
-        return A.assistant.Turn([{"type": "model_output", "content": [{"type": "text", "text": "ok"}]}], [], "ok", 1, 1)
+    @staticmethod
+    def answers(messages):
+        return [b for m in messages if isinstance(m["content"], list) for b in m["content"] if b.get("type") == "tool_result"]
 
-    def transcribe(self, wav):
-        return "hello"
-
-    def speak(self, text):
-        return A.assistant.as_wav(b"\x00\x00" * 240, None, 24000)
+    def turn(self, system, messages, tools):
+        if self.ask is not None and not self.answers(messages):
+            made = [{"id": f"toolu_{i}", "name": n, "arguments": a} for i, (n, a) in enumerate(self.ask(tools))]
+            return A.assistant.Turn([{"type": "tool_use", "id": c["id"], "name": c["name"], "input": c["arguments"]} for c in made], made, "", 1, 1, "tool_use")
+        self.results = [json.loads(b["content"]) for b in self.answers(messages)]
+        return A.assistant.Turn([{"type": "text", "text": "ok"}], [], "ok", 1, 1, "end_turn")
 
 
 class BusinessSeparation(unittest.TestCase):
@@ -157,9 +155,9 @@ class BusinessSeparation(unittest.TestCase):
             A.g.user = {"id": alpha_admin, "business_id": cls.alpha_id, "username": "alphaowner", "role": "admin"}
             A.fill_demo_data(x, cls.alpha_id)
             cls.add_every_other_record(x, cls.alpha_id)
-        # Both businesses use the assistant (so its pages and tools are really exercised), with Gemini replaced by a stand-in
+        # Both businesses use the assistant (so its pages and tools are really exercised), with Claude replaced by a stand-in
         x.execute("UPDATE businesses SET assistant_enabled=1 WHERE id IN (?, ?)", (cls.alpha_id, cls.beta_id))
-        A.assistant._client = StandInGemini()
+        A.assistant._client = StandInClaude()
         x.commit()
         # What Beta must never see: every name Alpha has given to anything
         cls.markers = {"Alpha Isolation Farm", "alphaowner", "alpha-operator", "alpha-second-admin", "Alpha secret note"}
@@ -360,7 +358,7 @@ class BusinessSeparation(unittest.TestCase):
         self.assertEqual(crashes, [], "These actions crashed when pointed at another business's records:\n" + "\n".join(crashes))
 
     def test_assistant_tools_stay_inside_their_business(self):
-        """Beta's admin has Gemini ask every look-up, using Alpha's names to search for, and Alpha's invoice numbers: nothing of Alpha's may come back.
+        """Beta's admin has Claude ask every look-up, using Alpha's names to search for, and Alpha's invoice numbers: nothing of Alpha's may come back.
         (An error may repeat the words that were searched for, so only answers that found something are read.)"""
         x = db.Database()
         try:
@@ -373,7 +371,7 @@ class BusinessSeparation(unittest.TestCase):
         def ask(tools):
             made = []
             for t in tools:
-                props = set(t["parameters"]["properties"])
+                props = set(t["input_schema"]["properties"])
                 for term in terms:
                     args = {key: term for key in searches if key in props}
                     if "invoice_no" in props:
@@ -393,7 +391,7 @@ class BusinessSeparation(unittest.TestCase):
         finally:
             stand_in.ask = None
         self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
-        self.assertGreater(len(stand_in.results), 40, "Gemini was not given enough look-ups for this test to mean anything")
+        self.assertGreater(len(stand_in.results), 40, "Claude was not given enough look-ups for this test to mean anything")
         answered = [r for r in stand_in.results if r.get("ok")]
         self.assertTrue(answered, "no look-up answered, so none could have leaked")
         leaked = sorted({m for m in self.markers if m for r in answered if m in json.dumps(r["data"], default=str)})
