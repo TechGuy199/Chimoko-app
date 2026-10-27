@@ -9,28 +9,28 @@ import json
 
 from assistant import H, ToolError, clip, tool
 
-# ---------- Descriptions of what a tool takes ----------
-def S(description):
-    return {"type": "string", "description": description}
+# ---------- Descriptions of what a tool takes (kept terse: every call to the model carries all of them) ----------
+def S(description=None):
+    return {"type": "string", "description": description} if description else {"type": "string"}
 
 
-def N(description):
-    return {"type": "integer", "description": description}
+def N(description=None):
+    return {"type": "integer", "description": description} if description else {"type": "integer"}
 
 
-def B(description):
-    return {"type": "boolean", "description": description}
+def B(description=None):
+    return {"type": "boolean", "description": description} if description else {"type": "boolean"}
 
 
-def E(description, *values):
-    return {"type": "string", "enum": list(values), "description": description}
+def E(*values):
+    return {"type": "string", "enum": list(values)}
 
 
 PERIOD_NAMES = ("today", "yesterday", "this_week", "last_week", "this_month", "last_month", "this_year", "all_time")
-PERIOD = E("A named period.", *PERIOD_NAMES)
-FROM = S("First day, as YYYY-MM-DD. Use with to_date instead of period.")
-TO = S("Last day (included), as YYYY-MM-DD.")
-LIMIT = N("How many rows at most (default 20, up to 40).")
+PERIOD = E(*PERIOD_NAMES)
+FROM = S("First day, YYYY-MM-DD")
+TO = S("Last day, YYYY-MM-DD")
+LIMIT = N("Max rows")
 
 
 # ---------- Reading what was asked ----------
@@ -128,8 +128,7 @@ def handover_of(row):
 
 
 # ================= Read-only tools, for anyone who can open the app =================
-@tool("A quick picture of the business today: sales today and this month, what customers still owe, POS stock and low stock, pre-orders waiting, "
-      "and deliveries and collections due. Use it first for general questions such as 'how are we doing?'.")
+@tool("Overview: sales today and this month, what customers owe, POS stock, pre-orders, deliveries and collections due. Start here for 'how are we doing?'.")
 def business_snapshot(ctx, args):
     db, biz, today = ctx.db, ctx.biz, ctx.today
     tomorrow, month_start = H.add_days(today, 1), today[:8] + "01"
@@ -168,9 +167,8 @@ def business_snapshot(ctx, args):
     }
 
 
-@tool("Sales totals for a period, optionally grouped: by day, month, item, department, customer, payment_status or seller. "
-      "Use it for 'how much did we sell...', 'best sellers', 'sales by department'. Amounts are after discounts.",
-      {"period": PERIOD, "from_date": FROM, "to_date": TO, "group_by": E("What to group the sales by (leave out for just the totals).", "day", "month", "item", "department", "customer", "payment_status", "seller"), "limit": LIMIT})
+@tool("Sales totals for a period, optionally grouped. Amounts are after discounts.",
+      {"period": PERIOD, "from_date": FROM, "to_date": TO, "group_by": E("day", "month", "item", "department", "customer", "payment_status", "seller"), "limit": LIMIT})
 def sales_report(ctx, args):
     db, biz = ctx.db, ctx.biz
     first, last, label = period(ctx, args)
@@ -186,7 +184,7 @@ def sales_report(ctx, args):
         [biz] + when_params,
     )
     out = {"period": label, "invoices": totals["n"], "total": r2(totals["total"]), "received": r2(totals["paid"]), "still_owed": r2(totals["owed"]), "discounts_given": r2(discount["d"])}
-    group, limit = args.get("group_by"), whole(args, "limit", 15)
+    group, limit = args.get("group_by"), whole(args, "limit", 10)
     by_invoice = {
         "day": "SUBSTR(i.created_at, 1, 10)", "month": "SUBSTR(i.created_at, 1, 7)", "payment_status": "i.payment_status",
         "customer": "COALESCE(NULLIF(i.customer_name, ''), 'Walk-in Customer')", "seller": "COALESCE(i.created_by, '')",
@@ -212,10 +210,8 @@ def sales_report(ctx, args):
     return out
 
 
-@tool("Find sales invoices by invoice number, customer name or phone, status, period, or what is unpaid / to be delivered / to be collected. "
-      "Returns the matching invoices (newest first) with how many matched in all and their total.",
-      {"query": S("Part of an invoice number, a customer's name or phone number."), "status": E("Payment status (cancelled ones are left out unless asked for).", "Paid", "Partial Payment", "Unpaid", "Cancelled"),
-       "unpaid_only": B("Only invoices that still have a balance due."), "handover": E("Only sales still to be delivered, still to be collected, or already delivered.", "to_deliver", "to_collect", "delivered"),
+@tool("Find sales invoices by number, customer name or phone, status, period, unpaid, or delivery/collection state. Newest first, with the count and total of all matches.",
+      {"query": S("Invoice no, customer name or phone"), "status": E("Paid", "Partial Payment", "Unpaid", "Cancelled"), "unpaid_only": B(), "handover": E("to_deliver", "to_collect", "delivered"),
        "period": PERIOD, "from_date": FROM, "to_date": TO, "limit": LIMIT})
 def find_invoices(ctx, args):
     db, biz = ctx.db, ctx.biz
@@ -249,7 +245,7 @@ def find_invoices(ctx, args):
     rows = db.all(
         f"""SELECT i.id, i.invoice_no, i.created_at, i.customer_name, i.customer_phone, i.payment_status, i.total, i.amount_paid, i.balance_due, i.created_by,
                    i.deliver_on, i.delivered_at, i.collect_on, i.collected_at FROM invoices i WHERE {where} ORDER BY i.created_at DESC, i.id DESC LIMIT ?""",
-        params + [whole(args, "limit", 20)],
+        params + [whole(args, "limit", 12)],
     )
     for r in rows[:3]:
         ctx.source(r["invoice_no"], H.url_for("invoice", invoice_id=r["id"]))
@@ -264,8 +260,7 @@ def find_invoices(ctx, args):
     }
 
 
-@tool("Everything on one invoice: its items with quantities, prices and discounts, the totals, who sold it, and delivery or collection. For admins, the payments on it too.",
-      {"invoice_no": S("The invoice number, for example INV-2026-0012.")}, required=["invoice_no"])
+@tool("One invoice in full: items, prices, discounts, totals, delivery or collection; for admins the payments too.", {"invoice_no": S("e.g. INV-2026-0012")}, required=["invoice_no"])
 def invoice_details(ctx, args):
     db, biz = ctx.db, ctx.biz
     number = text_of(args, "invoice_no", 40).upper()
@@ -290,8 +285,8 @@ def invoice_details(ctx, args):
     return out
 
 
-@tool("Who bought a product, and when: customers, phone numbers, quantities, prices and discounts, newest first, with totals. Search by product code or part of its name.",
-      {"product": S("The product's code or part of its name."), "period": PERIOD, "from_date": FROM, "to_date": TO, "limit": LIMIT}, required=["product"])
+@tool("Who bought a product: customers, phones, quantities, prices, discounts, newest first, with totals.",
+      {"product": S("Code or part of the name"), "period": PERIOD, "from_date": FROM, "to_date": TO, "limit": LIMIT}, required=["product"])
 def product_buyers(ctx, args):
     db, biz = ctx.db, ctx.biz
     term = text_of(args, "product", 80)
@@ -311,7 +306,7 @@ def product_buyers(ctx, args):
     rows = db.all(
         f"""SELECT i.invoice_no, i.created_at, i.customer_name, i.customer_phone, ii.item_code, ii.item_name, ii.qty, ii.unit_price, COALESCE(ii.discount, 0) AS discount, ii.line_total
             FROM invoice_items ii JOIN invoices i ON i.id = ii.invoice_id WHERE {base} ORDER BY i.created_at DESC, ii.id DESC LIMIT ?""",
-        params + [whole(args, "limit", 20)],
+        params + [whole(args, "limit", 12)],
     )
     if summary["codes"] == 1 and summary["code"]:
         ctx.source("Who bought " + clip(summary["name"], 40), H.sold_url(summary["code"], summary["name"]))
@@ -326,12 +321,11 @@ def product_buyers(ctx, args):
     }
 
 
-@tool("Stock on hand: what is listed for sale on the POS (with selling price), and the inventory (with cost and supplier). Search by name or code; can show only low stock.",
-      {"query": S("Part of a name or code."), "where": E("POS stock, inventory, or both (default both).", "pos", "inventory", "both"), "low_only": B("Only items running low (below the low-stock level)."),
-       "department": S("Only this department."), "limit": LIMIT})
+@tool("Stock on hand: POS stock (selling price) and inventory (cost, supplier). Can show only low stock.",
+      {"query": S("Part of a name or code"), "where": E("pos", "inventory", "both"), "low_only": B(), "department": S(), "limit": LIMIT})
 def find_stock(ctx, args):
     db, biz = ctx.db, ctx.biz
-    q, dept, limit = text_of(args, "query"), text_of(args, "department", 40), whole(args, "limit", 20)
+    q, dept, limit = text_of(args, "query"), text_of(args, "department", 40), whole(args, "limit", 12)
     where_, low = choice(args, "where", ("pos", "inventory", "both"), "both"), bool(args.get("low_only"))
     threshold = ctx.user["low_stock_threshold"]
     out = {"low_stock_means_under": threshold}
@@ -369,8 +363,7 @@ def find_stock(ctx, args):
     return out
 
 
-@tool("Greenhouse planting records (batches): what was planted, seedlings expected or counted, when they are ready, how many are pre-ordered, sold and still available.",
-      {"query": S("Part of a plant, seed or batch name."), "stage": E("Where the batch stands.", "growing", "due", "ready", "record", "all"), "limit": LIMIT})
+@tool("Greenhouse batches: planted, seedlings, ready date, pre-ordered, sold, available.", {"query": S("Plant, seed or batch name"), "stage": E("growing", "due", "ready", "record", "all"), "limit": LIMIT})
 def plantings(ctx, args):
     db, biz = ctx.db, ctx.biz
     q, stage = text_of(args, "query"), choice(args, "stage", ("growing", "due", "ready", "record", "all"), "all")
@@ -380,7 +373,7 @@ def plantings(ctx, args):
         params = [like(q)] * 3
     rows = db.all(f"SELECT * FROM plantings WHERE business_id=?{sql} ORDER BY ready_on DESC, id DESC LIMIT 200", [biz] + params)
     figures = [f for f in H.with_figures(db, biz, rows) if stage == "all" or f["stage"] == stage]
-    limit = whole(args, "limit", 20)
+    limit = whole(args, "limit", 12)
     for f in figures[:2]:
         ctx.source(f["label"], H.url_for("planting_detail", planting_id=f["id"]))
     ctx.source("Planting Records", H.url_for("planting_list"))
@@ -394,8 +387,7 @@ def plantings(ctx, args):
     }
 
 
-@tool("Customers' pre-orders of seedlings: who ordered what, how many, the collection day, and whether it is waiting, collected or cancelled.",
-      {"status": E("Which pre-orders (default pending).", "pending", "collected", "cancelled", "all"), "customer": S("Part of the customer's name."), "limit": LIMIT})
+@tool("Customers' seedling pre-orders: who, what, how many, collection day, status.", {"status": E("pending", "collected", "cancelled", "all"), "customer": S(), "limit": LIMIT})
 def preorders(ctx, args):
     db, biz = ctx.db, ctx.biz
     status, who = choice(args, "status", ("pending", "collected", "cancelled", "all"), "pending"), text_of(args, "customer")
@@ -411,7 +403,7 @@ def preorders(ctx, args):
         f"""SELECT po.customer_name, po.customer_phone, po.qty, po.unit_price, po.status, po.collect_on, po.created_at, po.note, p.name AS plant, p.batch_no, p.planted_on, po.planting_id
             FROM preorders po JOIN plantings p ON p.id = po.planting_id WHERE po.business_id=?{sql}
             ORDER BY CASE WHEN po.status = 'pending' THEN 0 ELSE 1 END, COALESCE(po.collect_on, '9999-12-31'), po.id DESC LIMIT ?""",
-        [biz] + params + [whole(args, "limit", 20)],
+        [biz] + params + [whole(args, "limit", 12)],
     )
     ctx.source("Up Next & pre-orders", H.url_for("up_next"))
     return {
@@ -423,11 +415,10 @@ def preorders(ctx, args):
     }
 
 
-@tool("Deliveries still to make and collections still waiting, by day, with the customers and what is on each sale. Overdue ones come first.",
-      {"kind": E("Deliveries, collections, or both (default both).", "deliveries", "collections", "both"), "day": S("Only this day, as YYYY-MM-DD."), "limit": LIMIT})
+@tool("Deliveries and collections still waiting, by day, with customers and items. Overdue first.", {"kind": E("deliveries", "collections", "both"), "day": S("YYYY-MM-DD"), "limit": LIMIT})
 def deliveries_and_collections(ctx, args):
     db, biz = ctx.db, ctx.biz
-    kind, day, limit = choice(args, "kind", ("deliveries", "collections", "both"), "both"), (H.day_or_none(str(args.get("day"))) if args.get("day") else None), whole(args, "limit", 25)
+    kind, day, limit = choice(args, "kind", ("deliveries", "collections", "both"), "both"), (H.day_or_none(str(args.get("day"))) if args.get("day") else None), whole(args, "limit", 12)
     out = {"today": ctx.today}
     for name, column, done in (("deliveries", "deliver_on", "delivered_at"), ("collections", "collect_on", "collected_at")):
         if kind not in (name, "both"):
@@ -461,9 +452,8 @@ def deliveries_and_collections(ctx, args):
     return out
 
 
-@tool("Purchases of stock and other things bought (procurements): date, supplier, item, quantity, cost, how much is paid and what is still owed.",
-      {"query": S("Part of an item name, code or the purchase invoice number."), "supplier": S("Part of the supplier's name."), "unpaid_only": B("Only purchases not fully paid."),
-       "period": PERIOD, "from_date": FROM, "to_date": TO, "limit": LIMIT})
+@tool("Purchases of stock and other things: date, supplier, item, quantity, cost, paid, owed.",
+      {"query": S("Item name, code or purchase invoice no"), "supplier": S(), "unpaid_only": B(), "period": PERIOD, "from_date": FROM, "to_date": TO, "limit": LIMIT})
 def purchases(ctx, args):
     db, biz = ctx.db, ctx.biz
     q, supplier = text_of(args, "query"), text_of(args, "supplier")
@@ -483,7 +473,7 @@ def purchases(ctx, args):
     rows = db.all(
         f"""SELECT purchase_date, supplier_name, invoice_no, item_code, name, quantity, unit_cost, total_cost, COALESCE(amount_paid, total_cost) AS paid, in_inventory
             FROM procurements WHERE business_id=?{sql} ORDER BY purchase_date DESC, id DESC LIMIT ?""",
-        [biz] + params + [whole(args, "limit", 20)],
+        [biz] + params + [whole(args, "limit", 12)],
     )
     ctx.source("Procurements", H.url_for("procurements"))
     return {
@@ -496,8 +486,8 @@ def purchases(ctx, args):
     }
 
 
-@tool("Daily activities: the work recorded in the plots (greenhouse blocks, fields, benches): who did what, where and when.",
-      {"period": PERIOD, "from_date": FROM, "to_date": TO, "worker": S("Part of a worker's name."), "plot_or_work": S("Part of a plot's name or of what was done."), "limit": LIMIT})
+@tool("Work recorded in the plots: who did what, where and when.",
+      {"period": PERIOD, "from_date": FROM, "to_date": TO, "worker": S(), "plot_or_work": S("Plot name or part of the work done"), "limit": LIMIT})
 def daily_activities(ctx, args):
     db, biz = ctx.db, ctx.biz
     first, last, label = period(ctx, args, "today")
@@ -512,7 +502,7 @@ def daily_activities(ctx, args):
     rows = db.all(
         f"""SELECT work_date, plot_name, department, worker_name, period, description, product, product_qty, product_unit FROM activities
             WHERE business_id=?{sql} ORDER BY work_date DESC, id DESC LIMIT ?""",
-        [biz] + params + [whole(args, "limit", 25)],
+        [biz] + params + [whole(args, "limit", 12)],
     )
     ctx.source("Daily Activities", H.url_for("activities"))
     return {
@@ -524,7 +514,7 @@ def daily_activities(ctx, args):
     }
 
 
-@tool("This person's recent alerts (low stock, pre-orders and deliveries due, requests...), unread first.", {"limit": LIMIT})
+@tool("This person's recent alerts, unread first.", {"limit": LIMIT})
 def my_alerts(ctx, args):
     db, biz, user = ctx.db, ctx.biz, ctx.user
     mine = "(for_user_id = ? OR for_user_id IS NULL)" if user["role"] == "admin" else "for_user_id = ?"
@@ -559,7 +549,7 @@ GUIDE = {
 }
 
 
-@tool("How to do things in the app. Give a topic: " + ", ".join(GUIDE) + ". Leave the topic out to list them.", {"topic": E("The topic.", *GUIDE)})
+@tool("How to do things in the app. Leave the topic out to list them.", {"topic": E(*GUIDE)})
 def app_guide(ctx, args):
     topic = args.get("topic")
     if topic not in GUIDE:
@@ -568,11 +558,10 @@ def app_guide(ctx, args):
 
 
 # ================= Read-only tools for admins =================
-@tool("Customer accounts (admins): how many invoices, what they bought in all, what they paid, what they owe, and when they last bought. Search by name or phone, or list who owes most.",
-      {"query": S("Part of a name or phone number."), "owing_only": B("Only customers who owe money."), "limit": LIMIT}, admin=True)
+@tool("Customer accounts: invoices, total bought, paid, owed, last purchase. Search by name or phone, or list who owes most.", {"query": S("Name or phone"), "owing_only": B(), "limit": LIMIT}, admin=True)
 def customers(ctx, args):
     db, biz = ctx.db, ctx.biz
-    q, limit = text_of(args, "query"), whole(args, "limit", 15)
+    q, limit = text_of(args, "query"), whole(args, "limit", 10)
     sql, params = "", []
     if q:
         sql = " AND (LOWER(c.name) LIKE ? OR COALESCE(c.phone, '') LIKE ?)"
@@ -601,11 +590,10 @@ def customers(ctx, args):
     return out
 
 
-@tool("Supplier accounts (admins): purchases, what was paid, what is still owed, and the latest payments. Search by name or phone, or list whom the business owes most.",
-      {"query": S("Part of a name or phone number."), "owing_only": B("Only suppliers who are owed money."), "limit": LIMIT}, admin=True)
+@tool("Supplier accounts: purchases, paid, owed, latest payments. Search by name or phone, or list whom we owe most.", {"query": S("Name or phone"), "owing_only": B(), "limit": LIMIT}, admin=True)
 def suppliers(ctx, args):
     db, biz = ctx.db, ctx.biz
-    q, limit = text_of(args, "query"), whole(args, "limit", 15)
+    q, limit = text_of(args, "query"), whole(args, "limit", 10)
     sql, params = "", []
     if q:
         sql = " AND (LOWER(s.name) LIKE ? OR COALESCE(s.phone, '') LIKE ?)"
@@ -632,8 +620,7 @@ def suppliers(ctx, args):
     return out
 
 
-@tool("The financial picture (admins): money held in each account, what customers owe, what is owed to suppliers, stock at cost, what the business is worth, and for a period the money in and out, "
-      "where it came from and what it went on, and profit.", {"period": PERIOD, "from_date": FROM, "to_date": TO}, admin=True)
+@tool("Money held, who owes us, whom we owe, stock at cost, worth; and for a period money in and out and profit.", {"period": PERIOD, "from_date": FROM, "to_date": TO}, admin=True)
 def financial_overview(ctx, args):
     db, biz = ctx.db, ctx.biz
     first, last, label = period(ctx, args)
@@ -655,8 +642,8 @@ def financial_overview(ctx, args):
     }
 
 
-@tool("Money in and out entries in Accounts (admins): date, direction, amount, how it was paid, category, who with and what for. Search or filter to answer 'what did we spend on...'.",
-      {"query": S("Part of the party's name, the description or the category."), "direction": E("Money in or out.", "in", "out"), "period": PERIOD, "from_date": FROM, "to_date": TO, "limit": LIMIT}, admin=True)
+@tool("Money in and out entries in Accounts: date, amount, method, category, party, purpose. For 'what did we spend on...'.",
+      {"query": S("Party, purpose or category"), "direction": E("in", "out"), "period": PERIOD, "from_date": FROM, "to_date": TO, "limit": LIMIT}, admin=True)
 def cashbook_entries(ctx, args):
     db, biz = ctx.db, ctx.biz
     first, last, label = period(ctx, args)
@@ -675,7 +662,7 @@ def cashbook_entries(ctx, args):
     )
     rows = db.all(
         f"SELECT occurred_at, direction, amount, method, category, party, description FROM cashbook WHERE business_id=?{sql} ORDER BY occurred_at DESC, id DESC LIMIT ?",
-        [biz] + params + [whole(args, "limit", 20)],
+        [biz] + params + [whole(args, "limit", 12)],
     )
     ctx.source("Accounts", H.url_for("accounts"))
     return {
@@ -685,8 +672,7 @@ def cashbook_entries(ctx, args):
     }
 
 
-@tool("Staff and pay (admins): employees (type, basic salary, start date) and payroll for a month: pay, NAPSA and NHIMA, net pay. National ID numbers and addresses are never shown.",
-      {"employee": S("Part of an employee's name."), "month": S("Pay month as YYYY-MM (default this month)."), "limit": LIMIT}, admin=True)
+@tool("Employees and payroll for a month: pay, NAPSA, NHIMA, net. Never shows ID numbers or addresses.", {"employee": S(), "month": S("YYYY-MM"), "limit": LIMIT}, admin=True)
 def staff(ctx, args):
     db, biz = ctx.db, ctx.biz
     who = text_of(args, "employee")
@@ -696,7 +682,7 @@ def staff(ctx, args):
     if who:
         sql, params = " AND LOWER(full_name) LIKE ?", [like(who)]
     people = db.all(
-        f"SELECT id, full_name, employment_type, basic_salary, start_date, expected_days_week FROM employees WHERE business_id=?{sql} ORDER BY full_name LIMIT ?", [biz] + params + [whole(args, "limit", 30)]
+        f"SELECT id, full_name, employment_type, basic_salary, start_date, expected_days_week FROM employees WHERE business_id=?{sql} ORDER BY full_name LIMIT ?", [biz] + params + [whole(args, "limit", 12)]
     )
     pay_sql, pay_params = "", []
     if who:
@@ -715,15 +701,15 @@ def staff(ctx, args):
     }
 
 
-@tool("The records of care (admins): stock adjustments (items removed or corrected), deleted invoices with their reasons, or operators' permission requests.",
-      {"kind": E("Which record.", "stock_adjustments", "deleted_invoices", "permission_requests"), "period": PERIOD, "from_date": FROM, "to_date": TO, "limit": LIMIT}, required=["kind"], admin=True)
+@tool("Stock adjustments, deleted invoices or operators' permission requests.",
+      {"kind": E("stock_adjustments", "deleted_invoices", "permission_requests"), "period": PERIOD, "from_date": FROM, "to_date": TO, "limit": LIMIT}, required=["kind"], admin=True)
 def audit_log(ctx, args):
     db, biz = ctx.db, ctx.biz
     kind = choice(args, "kind", ("stock_adjustments", "deleted_invoices", "permission_requests"), "")
     if not kind:
         raise ToolError("Which record: stock_adjustments, deleted_invoices or permission_requests?")
     first, last, label = period(ctx, args, "this_month")
-    limit = whole(args, "limit", 20)
+    limit = whole(args, "limit", 12)
     if kind == "stock_adjustments":
         sql, params = between("created_at", first, last)
         rows = db.all(f"SELECT created_at, kind, item_name, item_code, quantity_before, quantity_after, delta, reason, note, created_by FROM stock_adjustments WHERE business_id=?{sql} ORDER BY id DESC LIMIT ?", [biz] + params + [limit])
@@ -774,13 +760,11 @@ def money_method(args, needed):
     return method
 
 
-@tool("Prepare a sale for the person to confirm (they press Confirm; nothing is sold until then). Items must be listed on the POS.",
-      {"items": {"type": "array", "description": "What is sold.", "items": {"type": "object", "properties": {
-          "product": S("The product's code or name."), "quantity": N("How many."), "discount": S("Money off this line: an amount like 5, or a percentage like 10%. Leave out for none.")}, "required": ["product", "quantity"]}},
-       "customer_name": S("The customer's name (leave out for a walk-in)."), "customer_phone": S("Their phone number."),
-       "payment_status": E("Default Paid.", "Paid", "Unpaid", "Partial Payment"), "amount_paid": {"type": "number", "description": "For a partial payment: how much was paid now."},
-       "payment_method": S("How it was paid: Cash, Bank transfer, Airtel Money, MTN Money, Cheque, Card or Other. Needed unless unpaid."), "payment_reference": S("A receipt or transaction number, if given."),
-       "handover": E("Customer takes the goods now (default), collects on a later day, or we deliver.", "now", "later", "deliver"), "day": S("For later or deliver: the day, as YYYY-MM-DD (a collection must be from tomorrow).")},
+@tool("Prepare a sale for the person to confirm (nothing is sold until they press Confirm). Items must be on the POS.",
+      {"items": {"type": "array", "items": {"type": "object", "properties": {"product": S("Code or name"), "quantity": N(), "discount": S("Amount like 5 or percentage like 10%")}, "required": ["product", "quantity"]}},
+       "customer_name": S(), "customer_phone": S(), "payment_status": E("Paid", "Unpaid", "Partial Payment"), "amount_paid": {"type": "number", "description": "For a partial payment: paid now"},
+       "payment_method": S("Cash, Bank transfer, Airtel Money, MTN Money, Cheque, Card or Other; needed unless unpaid"), "payment_reference": S(),
+       "handover": E("now", "later", "deliver"), "day": S("YYYY-MM-DD, for later or deliver")},
       required=["items"], perm="sell")
 def prepare_sale(ctx, args):
     items = args.get("items")
@@ -856,9 +840,8 @@ def planting_for(ctx, term):
     return figures[0]
 
 
-@tool("Prepare a pre-order of seedlings for a customer, for the person to confirm. The seedlings are held from the batch once confirmed.",
-      {"batch": S("The plant or batch (its name, batch number or POS code)."), "customer_name": S("The customer's name."), "customer_phone": S("Their phone number."), "quantity": N("How many seedlings."),
-       "collect_on": S("The day they will collect, as YYYY-MM-DD (not before the batch is ready). Leave out if not known."), "note": S("A note.")},
+@tool("Prepare a seedling pre-order for the person to confirm.",
+      {"batch": S("Plant, batch no or POS code"), "customer_name": S(), "customer_phone": S(), "quantity": N(), "collect_on": S("YYYY-MM-DD, not before the batch is ready"), "note": S()},
       required=["batch", "customer_name", "quantity"], perm="sell")
 def prepare_preorder(ctx, args):
     f = planting_for(ctx, args.get("batch"))
@@ -899,9 +882,9 @@ def sale_to_change(ctx, args):
     return inv
 
 
-@tool("Prepare a payment received on an invoice (admins), for the person to confirm. Say how much was received now.",
-      {"invoice_no": S("The invoice number."), "amount_received": {"type": "number", "description": "How much was received now."}, "payment_method": S("Cash, Bank transfer, Airtel Money, MTN Money, Cheque, Card or Other."),
-       "payment_reference": S("A receipt or transaction number, if given."), "note": S("A note.")}, required=["invoice_no", "amount_received", "payment_method"], admin=True)
+@tool("Prepare a payment received on an invoice, for the person to confirm.",
+      {"invoice_no": S(), "amount_received": {"type": "number"}, "payment_method": S("Cash, Bank transfer, Airtel Money, MTN Money, Cheque, Card or Other"), "payment_reference": S(), "note": S()},
+      required=["invoice_no", "amount_received", "payment_method"], admin=True)
 def prepare_payment(ctx, args):
     inv = sale_to_change(ctx, args)
     try:
@@ -924,9 +907,8 @@ def prepare_payment(ctx, args):
     return shown(title, rows)
 
 
-@tool("Prepare a change to a sale's delivery or collection, for the person to confirm: mark it delivered, mark it collected, or move its delivery or collection day.",
-      {"invoice_no": S("The invoice number."), "change": E("What to do.", "mark_delivered", "mark_collected", "set_delivery_day", "set_collection_day"),
-       "day": S("For moving a day: the new day, as YYYY-MM-DD (today or later).")}, required=["invoice_no", "change"], perm="sell")
+@tool("Prepare a change to a sale's delivery or collection, for the person to confirm.",
+      {"invoice_no": S(), "change": E("mark_delivered", "mark_collected", "set_delivery_day", "set_collection_day"), "day": S("New day, YYYY-MM-DD")}, required=["invoice_no", "change"], perm="sell")
 def prepare_handover_change(ctx, args):
     inv = sale_to_change(ctx, args)
     change = choice(args, "change", ("mark_delivered", "mark_collected", "set_delivery_day", "set_collection_day"), "")
