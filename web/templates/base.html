@@ -191,7 +191,7 @@
 {# The assistant: a button and a chat panel on every page, for a signed-in person when it is on for the business (Settings). Loaded once, here. #}
 {% if user and assistant_on %}
 <script src="{{ asset('assistant.js') }}" data-csrf="{{ csrf_token() }}" data-state="{{ url_for('assistant_state') }}" data-chat="{{ url_for('assistant_chat') }}"
-        data-clear="{{ url_for('assistant_clear') }}"
+        data-listen="{{ url_for('assistant_listen') }}" data-speak="{{ url_for('assistant_speak') }}" data-clear="{{ url_for('assistant_clear') }}"
         data-actions="/assistant/actions/" data-user="{{ user.username }}"></script>
 {% endif %}
 <div id="page-scripts">{% block scripts %}{% endblock %}</div>

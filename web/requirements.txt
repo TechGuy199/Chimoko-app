@@ -3,4 +3,4 @@ psycopg[binary]>=3.1
 tzdata
 reportlab>=4.0
 XlsxWriter>=3.1
-anthropic>=2.0
+google-genai>=2.25.0

@@ -1,8 +1,8 @@
-"""What the assistant (assistant.py) may do, as tools Claude can choose from.
+"""What the assistant (assistant.py) may do, as tools Gemini can choose from.
 
 Every tool is read-only, except the prepare_* ones, which only write a card for the person to confirm. A tool never sees more than the signed-in
 person could open in the app: each query is scoped to their business (ctx.biz), and a tool for an admin-only part of the app (admin=True) is
-not even offered to an operator. Lists are capped, text from the records is shortened, and links are made here, never by Claude.
+not even offered to an operator. Lists are capped, text from the records is shortened, and links are made here, never by Gemini.
 """
 import datetime
 import json
