@@ -222,6 +222,23 @@ SCHEMA = [
         last_id INTEGER, expected DOUBLE PRECISION, set_by TEXT, set_at TEXT
     )""",
     "CREATE INDEX IF NOT EXISTS cashbook_by_source ON cashbook (business_id, source, source_id)",
+    # The assistant (Gemini). Each person's recent conversation with it, so a chat carries on; kept 30 days, or until they start a new chat.
+    """CREATE TABLE IF NOT EXISTS assistant_messages (
+        id {pk}, business_id INTEGER NOT NULL, user_id INTEGER NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT
+    )""",
+    # What a person used of the assistant on a day (questions asked, voice clips heard or spoken, tokens), counted against the daily limits.
+    """CREATE TABLE IF NOT EXISTS assistant_usage (
+        id {pk}, business_id INTEGER NOT NULL, user_id INTEGER NOT NULL, day TEXT NOT NULL, questions INTEGER NOT NULL DEFAULT 0,
+        voice INTEGER NOT NULL DEFAULT 0, input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0,
+        UNIQUE (business_id, user_id, day)
+    )""",
+    # Something the assistant prepared (a sale, a pre-order, a payment...) and is waiting for its person to press Confirm on. request is
+    # what will be sent to the app's own page for it (path and form), summary what the person was shown, kept so the card can be shown again.
+    # status is pending, running, done, failed, cancelled or expired. Nothing happens until Confirm, and then only once.
+    """CREATE TABLE IF NOT EXISTS assistant_actions (
+        id {pk}, business_id INTEGER NOT NULL, user_id INTEGER NOT NULL, kind TEXT NOT NULL, request TEXT NOT NULL, summary TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending', created_at TEXT, expires_at TEXT, decided_at TEXT, result TEXT DEFAULT '', link TEXT DEFAULT ''
+    )""",
     # Which version of the start-up work (the schema above, its migrations and the app's one-off repairs) has been run
     "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRIMARY KEY, value TEXT)",
 ]
@@ -248,6 +265,8 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS money_balances_by_account ON money_balances (business_id, account)",
     "CREATE INDEX IF NOT EXISTS invoices_by_collection ON invoices (business_id, collect_on)",
     "CREATE INDEX IF NOT EXISTS invoices_by_delivery ON invoices (business_id, deliver_on)",
+    "CREATE INDEX IF NOT EXISTS assistant_messages_by_user ON assistant_messages (business_id, user_id, id)",
+    "CREATE INDEX IF NOT EXISTS assistant_actions_by_user ON assistant_actions (business_id, user_id, status)",
 ]
 
 # --- Postgres connections, kept between requests ---
@@ -452,6 +471,8 @@ def init_schema():
         add_column(db, "invoices", "delivered_by", "TEXT")
         add_column(db, "invoices", "deliver_reminded_at", "TEXT")
         add_column(db, "businesses", "alert_deliveries", "INTEGER")
+        # The assistant is off for a business until one of its admins switches it on (it sends records to Google); 1 = on
+        add_column(db, "businesses", "assistant_enabled", "INTEGER")
         # Statutory rules became separate employee and employer rates. Settings saved under the old
         # "one rate, paid by one side" rule keep exactly the same effect.
         for column in ("napsa_employee_pct", "napsa_employer_pct", "nhima_employee_pct", "nhima_employer_pct"):

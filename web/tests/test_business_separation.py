@@ -21,7 +21,7 @@ import unittest
 import zipfile
 import zlib
 
-for setting in ("DATABASE_URL", "POSTGRES_URL", "VERCEL", "ALLOW_SIGNUP"):
+for setting in ("DATABASE_URL", "POSTGRES_URL", "VERCEL", "ALLOW_SIGNUP", "GEMINI_API_KEY", "GOOGLE_API_KEY"):
     os.environ.pop(setting, None)
 WEB = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, WEB)
@@ -39,7 +39,7 @@ PARAM_TABLES = {
     "purchase_id": "procurements", "planting_id": "plantings", "employee_id": "employees", "payslip_id": "payroll",
     "pos_id": "pos_products", "po_id": "preorders", "request_id": "permission_requests", "notification_id": "notifications",
     "payment_id": "supplier_payments", "category_id": "categories", "dept_id": "departments", "plot_id": "plots",
-    "op_id": "users", "admin_id": "users",
+    "op_id": "users", "admin_id": "users", "action_id": "assistant_actions",
 }
 # "entry_id" means a different table on different pages
 ENTRY_TABLES = {"assign_account_entry": "cashbook", "delete_account_entry": "cashbook", "delete_activity": "activities"}
@@ -124,6 +124,26 @@ def value_for(name, alpha_ids):
     return "1"
 
 
+class StandInGemini:
+    """Gemini, for the tests: answers "ok" to everything, so no key or network is ever used. A test can have it ask for look-ups first."""
+
+    def __init__(self):
+        self.ask, self.results = None, []
+
+    def turn(self, system, steps, tools):
+        if self.ask is not None and not any(s.get("type") == "function_result" for s in steps):
+            made = [{"id": f"c{i}", "name": n, "arguments": a} for i, (n, a) in enumerate(self.ask(tools))]
+            return A.assistant.Turn([{"type": "function_call", "id": c["id"], "name": c["name"], "arguments": c["arguments"]} for c in made], made, "", 1, 1)
+        self.results = [json.loads(s["result"][0]["text"]) for s in steps if s.get("type") == "function_result"]
+        return A.assistant.Turn([{"type": "model_output", "content": [{"type": "text", "text": "ok"}]}], [], "ok", 1, 1)
+
+    def transcribe(self, wav):
+        return "hello"
+
+    def speak(self, text):
+        return A.assistant.as_wav(b"\x00\x00" * 240, None, 24000)
+
+
 class BusinessSeparation(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -137,6 +157,9 @@ class BusinessSeparation(unittest.TestCase):
             A.g.user = {"id": alpha_admin, "business_id": cls.alpha_id, "username": "alphaowner", "role": "admin"}
             A.fill_demo_data(x, cls.alpha_id)
             cls.add_every_other_record(x, cls.alpha_id)
+        # Both businesses use the assistant (so its pages and tools are really exercised), with Gemini replaced by a stand-in
+        x.execute("UPDATE businesses SET assistant_enabled=1 WHERE id IN (?, ?)", (cls.alpha_id, cls.beta_id))
+        A.assistant._client = StandInGemini()
         x.commit()
         # What Beta must never see: every name Alpha has given to anything
         cls.markers = {"Alpha Isolation Farm", "alphaowner", "alpha-operator", "alpha-second-admin", "Alpha secret note"}
@@ -166,6 +189,12 @@ class BusinessSeparation(unittest.TestCase):
                     VALUES (?, 'INV-ALPHA-DEL', 10, 'Alpha secret note', 'alphaowner', ?)""", (biz, stamp))
         x.insert("""INSERT INTO stock_adjustments (business_id, kind, item_code, item_name, quantity_before, quantity_after, delta, reason, created_at)
                     VALUES (?, 'inventory_edit', 'X', ?, 5, 4, -1, 'Alpha secret note', ?)""", (biz, item["name"], stamp))
+        # What Alpha has said to the assistant, and a change it prepared and left waiting: Beta must not read or confirm either
+        alpha_user = x.one("SELECT id FROM users WHERE business_id=? AND username='alphaowner'", (biz,))["id"]
+        x.insert("INSERT INTO assistant_messages (business_id, user_id, role, content, created_at) VALUES (?, ?, 'user', 'Alpha secret note', ?)", (biz, alpha_user, stamp))
+        x.insert("""INSERT INTO assistant_actions (business_id, user_id, kind, request, summary, status, created_at, expires_at)
+                    VALUES (?, ?, 'handover', ?, '{"title": "Alpha secret note", "rows": [["Alpha secret note", "x"]]}', 'pending', ?, '2999-01-01 00:00:00')""",
+                 (biz, alpha_user, '{"path": "/invoices/1/delivered", "form": {}, "perm": "sell"}', stamp))
         plot = x.insert("INSERT INTO plots (business_id, department, name, notes, created_at) VALUES (?, 'Greenhouse', 'Alpha Block 7', 'Alpha secret note', ?)", (biz, stamp))
         x.insert("INSERT INTO plot_workers (business_id, plot_id, employee_id) VALUES (?, ?, ?)", (biz, plot, employee["id"]))
         # A sale to deliver today (so the day's delivery list has Alpha's customers on it), with a discounted line
@@ -329,6 +358,54 @@ class BusinessSeparation(unittest.TestCase):
                     before = after
         self.assertEqual(changed, [], "Beta changed Alpha's records:\n" + "\n".join(changed))
         self.assertEqual(crashes, [], "These actions crashed when pointed at another business's records:\n" + "\n".join(crashes))
+
+    def test_assistant_tools_stay_inside_their_business(self):
+        """Beta's admin has Gemini ask every look-up, using Alpha's names to search for, and Alpha's invoice numbers: nothing of Alpha's may come back.
+        (An error may repeat the words that were searched for, so only answers that found something are read.)"""
+        x = db.Database()
+        try:
+            numbers = [r["invoice_no"] for r in x.all("SELECT invoice_no FROM invoices WHERE business_id=? LIMIT 5", (self.alpha_id,))]
+        finally:
+            x.close()
+        terms = sorted(m for m in self.markers if m and " " in m or len(m) > 3)[:12]
+        searches = ("query", "product", "supplier", "employee", "customer", "plot_or_work", "worker", "batch")
+
+        def ask(tools):
+            made = []
+            for t in tools:
+                props = set(t["parameters"]["properties"])
+                for term in terms:
+                    args = {key: term for key in searches if key in props}
+                    if "invoice_no" in props:
+                        args = {"invoice_no": numbers[0] if numbers else "INV-1"}
+                    if args:
+                        made.append((t["name"], args))
+                    if "invoice_no" in props:
+                        break
+                if not props & set(searches) | {"invoice_no"}:
+                    made.append((t["name"], {}))
+            return made
+
+        stand_in = A.assistant._client
+        stand_in.ask = ask
+        try:
+            response = self.beta.post("/assistant/chat", data={"csrf": csrf_of(self.beta), "message": "look at everything"})
+        finally:
+            stand_in.ask = None
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        self.assertGreater(len(stand_in.results), 40, "Gemini was not given enough look-ups for this test to mean anything")
+        answered = [r for r in stand_in.results if r.get("ok")]
+        self.assertTrue(answered, "no look-up answered, so none could have leaked")
+        leaked = sorted({m for m in self.markers if m for r in answered if m in json.dumps(r["data"], default=str)})
+        self.assertEqual(leaked, [], "Beta's assistant looked up Alpha's records: " + ", ".join(leaked))
+        self.assertEqual(self.alpha_assistant_state(), "Alpha secret note", "Alpha's chat changed")
+
+    def alpha_assistant_state(self):
+        x = db.Database()
+        try:
+            return x.one("SELECT content FROM assistant_messages WHERE business_id=? ORDER BY id LIMIT 1", (self.alpha_id,))["content"]
+        finally:
+            x.close()
 
     def test_4_beta_deleting_its_business_leaves_alpha_alone(self):
         before = self.snapshot()

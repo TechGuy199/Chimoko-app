@@ -212,3 +212,14 @@ dialog.tray { border-radius: 24px 24px 0 0; }
 /* Picking invoices for a delivery list: the bar sits just under the compact header, the tick boxes are easy to hit */
 #delivery-pick.picking .pick-bar { top: 64px; }
 .pick-cell input { width: 22px; height: 22px; }
+
+/* ---------- The assistant ---------- */
+/* Its button sits above the tab bar; the chat is a full sheet over the page */
+.assistant-fab { bottom: calc(var(--tabbar-height) + var(--safe-bottom) + 14px); width: 52px; height: 52px; }
+html:has(.cart-bar:not([hidden])) .assistant-fab { bottom: calc(var(--tabbar-height) + var(--safe-bottom) + 76px); }
+.assistant-fab, dialog.assistant { font-size: 15px; line-height: 1.55; letter-spacing: -0.005em; }
+dialog.assistant { z-index: 60; }
+.assistant-head { padding-top: max(10px, env(safe-area-inset-top, 0px)); }
+.assistant-head button, .assistant-mic, .assistant-send { min-width: 44px; min-height: 44px; }
+.assistant-form textarea { font-size: 16px; }
+.assistant-card-buttons .btn { min-height: 44px; }

@@ -18,12 +18,13 @@ import urllib.parse
 import zipfile
 from zoneinfo import ZoneInfo
 
-from flask import Flask, Response, abort, flash, g, redirect, render_template, request, send_from_directory, session, url_for
+from flask import Flask, Response, abort, flash, g, jsonify, redirect, render_template, request, send_from_directory, session, url_for
 from markupsafe import Markup
 from werkzeug.security import check_password_hash, generate_password_hash
 import xlsxwriter
 
 from db import DB_ERRORS, IS_POSTGRES, Database, delete_business, init_schema, mark_startup_done, startup_done, startup_signature
+import assistant
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ON_VERCEL = bool(os.environ.get("VERCEL"))
@@ -236,7 +237,7 @@ def load_user_and_check_csrf():
             """SELECT u.id, u.business_id, u.username, u.role, u.can_sell, u.can_procure, u.can_transfer, u.can_delete, u.theme, u.glass,
                       b.name AS business_name, b.subtitle, b.contact, b.currency, b.low_stock_threshold,
                       b.alert_phone, b.alert_low_stock, b.alert_permission, b.alert_preorders, b.alert_collections, b.alert_deliveries, b.preorder_remind_days,
-                      b.backup_hour, b.last_backup_at, b.last_backup_by, b.demo_expires_at
+                      b.backup_hour, b.last_backup_at, b.last_backup_by, b.demo_expires_at, b.assistant_enabled
                FROM users u JOIN businesses b ON b.id = u.business_id WHERE u.id=?""",
             (uid,),
         )
@@ -277,7 +278,7 @@ def need(perm):
 def template_globals():
     return {
         "csrf_field": csrf_field, "user": g.get("user"), "can": can, "look": appearance_of(g.get("user")), "themes": THEMES,
-        "asset": asset, "csrf_token": csrf_token, "inv_link": inv_link,
+        "asset": asset, "csrf_token": csrf_token, "inv_link": inv_link, "assistant_on": assistant.enabled_for(g.get("user")),
     }
 
 
@@ -380,6 +381,7 @@ def delete_my_login():
     try:
         notify(db, "account", "A login was deleted", f"{g.user['username']} deleted their own login.", url_for("operators"))
         db.execute("DELETE FROM users WHERE id=? AND business_id=?", (g.user["id"], g.user["business_id"]))
+        assistant.forget(db, g.user["business_id"], g.user["id"])
         db.commit()
     except DB_ERRORS:
         db.rollback()
@@ -9718,7 +9720,10 @@ def settings():
         return redirect(url_for("settings"))
 
     departments = db.all("SELECT id, name FROM departments WHERE business_id=? ORDER BY name", (biz,))
-    return render_template("settings.html", departments=departments, whatsapp=whatsapp_service())
+    return render_template(
+        "settings.html", departments=departments, whatsapp=whatsapp_service(),
+        assistant_info={"configured": assistant.configured(), "usage": assistant.usage_today(db, g.user), "limits": assistant.limits(g.user), "model": assistant.MODEL},
+    )
 
 
 @app.post("/settings/departments")
@@ -9898,6 +9903,7 @@ def save_operator():
 def delete_operator(op_id):
     db = get_db()
     db.execute("DELETE FROM users WHERE id=? AND business_id=? AND role='operator'", (op_id, g.user["business_id"]))
+    assistant.forget(db, g.user["business_id"], op_id)
     db.commit()
     flash("Operator account deleted.", "ok")
     return redirect(url_for("operators"))
@@ -9964,9 +9970,91 @@ def delete_admin(admin_id):
         flash("This is the only admin account, so it cannot be deleted. Create another admin first.", "error")
         return back
     db.execute("DELETE FROM users WHERE id=? AND business_id=? AND role='admin'", (admin_id, biz))
+    assistant.forget(db, biz, admin_id)
     db.commit()
     flash(f"Admin '{target['username']}' deleted.", "ok")
     return redirect(url_for("operators"))
+
+
+# --- ASSISTANT ---
+# The chat panel (assistant.js) and its voice. The work is in assistant.py; these only check who is asking and answer as JSON. Every request
+# is a form post (so the app's CSRF check covers it) and every one is limited to the signed-in person's own business.
+def assistant_json(work):
+    try:
+        return jsonify(work())
+    except assistant.Refused as e:
+        return jsonify({"error": e.message}), e.status
+
+
+@app.get("/assistant/state")
+@need(None)
+def assistant_state():
+    if not assistant.enabled_for(g.user):
+        return jsonify({"enabled": False, "can_enable": g.user["role"] == "admin"})
+    return jsonify(dict(assistant.state(get_db(), g.user), enabled=True))
+
+
+@app.post("/assistant/chat")
+@need(None)
+def assistant_chat():
+    return assistant_json(lambda: assistant.converse(get_db(), g.user, request.form.get("message", ""), voice=request.form.get("voice") == "1"))
+
+
+@app.post("/assistant/listen")
+@need(None)
+def assistant_listen():
+    def work():
+        recording = request.files.get("audio")
+        data = recording.read(assistant.MAX_AUDIO_BYTES + 1) if recording else b""
+        return {"text": assistant.listen(get_db(), g.user, data)}
+    return assistant_json(work)
+
+
+@app.post("/assistant/speak")
+@need(None)
+def assistant_speak():
+    try:
+        wav = assistant.speak(get_db(), g.user, request.form.get("text", ""))
+    except assistant.Refused as e:
+        return jsonify({"error": e.message}), e.status
+    return Response(wav, mimetype="audio/wav", headers={"Cache-Control": "no-store"})
+
+
+@app.post("/assistant/actions/<int:action_id>/confirm")
+@need(None)
+def assistant_confirm(action_id):
+    return assistant_json(lambda: assistant.confirm(get_db(), g.user, action_id))
+
+
+@app.post("/assistant/actions/<int:action_id>/cancel")
+@need(None)
+def assistant_cancel(action_id):
+    return assistant_json(lambda: assistant.cancel(get_db(), g.user, action_id))
+
+
+@app.post("/assistant/clear")
+@need(None)
+def assistant_clear():
+    assistant.clear(get_db(), g.user)
+    return jsonify({"ok": True})
+
+
+@app.post("/settings/assistant")
+@need("admin")
+def save_assistant():
+    db = get_db()
+    on = 1 if request.form.get("assistant_enabled") else 0
+    db.execute("UPDATE businesses SET assistant_enabled=? WHERE id=?", (on, g.user["business_id"]))
+    db.commit()
+    flash("The assistant is on: everyone with a login can ask it, within what their account may see." if on else "The assistant is switched off.", "ok")
+    return redirect(url_for("settings"))
+
+
+assistant.bind(
+    app=app, url_for=url_for, now=now, today_str=today_str, add_days=add_days, day_or_none=day_or_none, with_figures=with_figures, sold_url=sold_url,
+    read_discount=read_discount, method_from_text=method_from_text, METHOD_NAMES=METHOD_NAMES, PAYMENT_STATUSES=PAYMENT_STATUSES,
+    financial_standing=financial_standing, account_summary=account_summary,
+)
 
 
 # --- START-UP ---
