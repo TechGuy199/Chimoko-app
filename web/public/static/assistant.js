@@ -186,9 +186,14 @@
     }
 
     // ---------- Talking to the server (a form post, so the app's CSRF check covers it) ----------
+    // The server gives up on a slow question well before this, so it is the answer that arrives. This is for a connection that has gone
+    // quiet, so the panel never sits on "Thinking" for ever (data-timeout, in milliseconds, is there for testing).
     function send(url, form) {
         form.append("csrf", cfg.csrf);
-        return fetch(url, { method: "POST", body: form, credentials: "same-origin", headers: { Accept: "application/json" } }).then(function (r) {
+        const stop = new AbortController();
+        const timer = setTimeout(function () { stop.abort(); }, Number(cfg.timeout) || 100000);
+        return fetch(url, { method: "POST", body: form, credentials: "same-origin", headers: { Accept: "application/json" }, signal: stop.signal }).then(function (r) {
+            clearTimeout(timer);
             if (r.redirected) { addError("You were signed out. Reload the page and sign in again."); return {}; }
             const kind = r.headers.get("content-type") || "";
             if (kind.indexOf("audio/") === 0) return r.blob().then(function (blob) { return { audio: blob }; });
@@ -196,7 +201,11 @@
                 if (data.id && data.status) return { card: data };
                 return data;
             }).catch(function () { return { error: "That did not work (" + r.status + "). Please try again." }; });
-        }).catch(function () { return { error: "No connection. Check the internet and try again." }; });
+        }).catch(function (e) {
+            clearTimeout(timer);
+            if (e && e.name === "AbortError") return { error: "That is taking too long. Please try again in a minute." };
+            return { error: "No connection. Check the internet and try again." };
+        });
     }
 
     function ask(message, voice) {

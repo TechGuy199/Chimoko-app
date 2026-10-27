@@ -19,6 +19,7 @@ import logging
 import os
 import re
 import secrets
+import time
 import types
 import wave
 
@@ -49,6 +50,8 @@ THINKING = os.environ.get("ASSISTANT_THINKING", "low")
 
 MAX_MESSAGE = 1000          # characters in one question
 MAX_ROUNDS = 6              # look-ups Gemini may chain to answer one question
+CALL_SECONDS = 40           # the longest one call to Gemini may take
+QUESTION_SECONDS = 75       # the longest a whole question may take (Vercel allows far longer; a person will not wait that long)
 MAX_OUTPUT_TOKENS = 2000       # the model's thinking counts toward this as well as the answer
 KEEP_MESSAGES = 12          # earlier messages given to Gemini with each question
 SHOW_MESSAGES = 30          # earlier messages shown when the panel is opened
@@ -130,10 +133,16 @@ class Gemini:
 
     def __init__(self, key):
         from google import genai   # only when the assistant is first used, so the rest of the app starts as fast as before
+        from google.genai import types as google_types
 
-        self.api = genai.Client(api_key=key)
+        # The library's own habit is to wait out a rate limit (as long as Google asks, up to four times: a minute or more of "Thinking") and
+        # retry. Here a rate limit is reported at once, and only a server error (not the person's fault, and usually over in a moment) is tried
+        # a second time.
+        self.api = genai.Client(api_key=key, http_options=google_types.HttpOptions(
+            retry_options=google_types.HttpRetryOptions(attempts=1, http_status_codes=[500, 502, 503, 504], initial_delay=0.5, max_delay=2),
+        ))
 
-    def turn(self, system, steps, tools):
+    def turn(self, system, steps, tools, timeout=CALL_SECONDS):
         config = {"max_output_tokens": MAX_OUTPUT_TOKENS}
         if THINKING:   # ASSISTANT_THINKING= (empty) leaves it to the model, for a model that does not take the setting
             config["thinking_level"] = THINKING
@@ -141,7 +150,7 @@ class Gemini:
         if tools:
             request["tools"] = tools
         try:
-            done = self.api.interactions.create(**request)
+            done = self.api.interactions.create(timeout=timeout, **request)
         except Exception as e:
             raise unavailable(e)
         made = list(done.steps or [])
@@ -155,7 +164,7 @@ class Gemini:
     def transcribe(self, wav):
         try:
             done = self.api.interactions.create(
-                model=LISTEN_MODEL, store=False,
+                model=LISTEN_MODEL, store=False, timeout=CALL_SECONDS,
                 input=[
                     {"type": "text", "text": "Write down exactly what is said in this recording, in the language spoken (usually English, sometimes with "
                                             "Bemba or Nyanja words). It is someone talking to a business app: names of people, plants and products are "
@@ -170,7 +179,7 @@ class Gemini:
     def speak(self, text):
         try:
             done = self.api.interactions.create(
-                model=SPEAK_MODEL, store=False, response_format={"type": "audio"},
+                model=SPEAK_MODEL, store=False, timeout=CALL_SECONDS, response_format={"type": "audio"},
                 generation_config={"speech_config": [{"voice": VOICE}]},
                 input=[{"type": "user_input", "content": [{"type": "text", "text": text}]}],
             )
@@ -186,8 +195,12 @@ def unavailable(error):
     """A Gemini failure as something for the person to read; the details (never the chat) go to the server's log."""
     log.warning("Gemini call failed: %s: %s", type(error).__name__, str(error)[:300])
     said = (type(error).__name__ + " " + str(error)).lower()
-    if any(word in said for word in ("429", "quota", "resource_exhausted", "rate limit", "rate_limit", "overloaded", "503")):
-        return Refused("The assistant is busy at the moment. Please try again in a minute.", 503)
+    if "timeout" in said or "timed out" in said:
+        return Refused("The assistant took too long to answer. Please try again.", 503)
+    if any(word in said for word in ("429", "quota", "resource_exhausted", "rate limit", "rate_limit")):
+        return Refused("The assistant has reached Google's rate limit. Please wait a minute and try again (a free Gemini key has low limits).", 503)
+    if any(word in said for word in ("overloaded", "503", "unavailable")):
+        return Refused("Google's service is busy at the moment. Please try again in a minute.", 503)
     if any(word in said for word in ("401", "403", "api key", "api_key", "permission_denied", "unauthenticated")):
         return Refused("Google did not accept the assistant's key. An admin needs to check GEMINI_API_KEY.", 503)
     return Refused("The assistant could not answer just now. Please try again.", 503)
@@ -412,8 +425,12 @@ def converse(db, user, message, voice=False):
     steps.append({"type": "user_input", "content": [{"type": "text", "text": message}]})
     system, spent_in, spent_out, answer = system_prompt(user, voice), 0, 0, ""
     gemini = client()
+    deadline = time.monotonic() + QUESTION_SECONDS
     for _ in range(MAX_ROUNDS):
-        turn = gemini.turn(system, steps, tools)
+        left = deadline - time.monotonic()
+        if left < 5:   # no time for another call: say so, rather than start one that cannot finish
+            break
+        turn = gemini.turn(system, steps, tools, timeout=min(CALL_SECONDS, left))
         spent_in, spent_out = spent_in + turn.tokens_in, spent_out + turn.tokens_out
         steps += turn.steps
         if not turn.calls:

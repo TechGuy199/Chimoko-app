@@ -130,7 +130,7 @@ class StandInGemini:
     def __init__(self):
         self.ask, self.results = None, []
 
-    def turn(self, system, steps, tools):
+    def turn(self, system, steps, tools, timeout=None):
         if self.ask is not None and not any(s.get("type") == "function_result" for s in steps):
             made = [{"id": f"c{i}", "name": n, "arguments": a} for i, (n, a) in enumerate(self.ask(tools))]
             return A.assistant.Turn([{"type": "function_call", "id": c["id"], "name": c["name"], "arguments": c["arguments"]} for c in made], made, "", 1, 1)
