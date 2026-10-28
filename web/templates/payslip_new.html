@@ -10,16 +10,32 @@
         <p>NHIMA: employee {{ '%g'|format(hr.nhima_employee_pct) }}% deducted from pay, employer {{ '%g'|format(hr.nhima_employer_pct) }}% paid on top.</p>
         <p><a href="{{ url_for('hr_settings') }}">Change the rules</a></p>
     </div>
-    <form method="post" id="payslip-form" data-non-working="{{ hr.non_working_days }}">
+    <form method="post" id="payslip-form" data-non-working="{{ hr.non_working_days }}" data-trays-url="{{ url_for('hr_trays') }}" data-currency="{{ user.currency }}">
         {{ csrf_field() }}
         <label>Employee
-            <select name="employee_id" required>
-                {% for e in employees %}<option value="{{ e.id }}">{{ e.full_name }} (basic {{ e.basic_salary|money }})</option>{% endfor %}
+            <select name="employee_id" id="payslip-employee" required>
+                {% for e in employees %}<option value="{{ e.id }}" data-type="{{ e.employment_type }}" {{ 'selected' if chosen == e.id }}>{{ e.full_name }} ({% if e.employment_type == 'Casual Worker' %}casual, {% endif %}basic {{ e.basic_salary|money }})</option>{% endfor %}
             </select>
         </label>
         <label>Pay month <input name="pay_month" id="pay-month" type="month" value="{{ this_month }}" pattern="\d{4}-\d{2}" placeholder="YYYY-MM" required></label>
-        <label>Expected work days (filled in from the pay month) <input name="expected_days" id="expected-days" type="number" min="0.5" step="0.5" required></label>
-        <label>Actual days worked <input name="worked_days" id="worked-days" type="number" min="0" step="0.5" required></label>
+
+        {# A casual worker can be paid for the trays they planted. The choice and the trays appear only for a casual worker. #}
+        <label id="basis-row" hidden>Pay this casual worker for
+            <select name="pay_basis" id="pay-basis" disabled>
+                <option value="trays">Trays planted (at {% if hr.tray_rate %}{{ hr.tray_rate|money }}{% else %}the rate set in HR settings{% endif %} a tray)</option>
+                <option value="days">Days worked (their basic salary, pro rata)</option>
+            </select>
+        </label>
+        <div id="tray-pay" class="rules-summary" hidden aria-live="polite">
+            <p id="tray-summary"></p>
+            <ul id="tray-list" class="muted"></ul>
+            <p class="muted hint">Every tray planted up to the end of this pay month and not paid yet is on this payslip, including earlier months' trays. They are marked paid when it is saved.</p>
+        </div>
+
+        <div id="days-fields">
+            <label>Expected work days (filled in from the pay month) <input name="expected_days" id="expected-days" type="number" min="0.5" step="0.5" required></label>
+            <label>Actual days worked <input name="worked_days" id="worked-days" type="number" min="0" step="0.5" required></label>
+        </div>
 
         <h2 class="spaced">Bonuses &amp; additions</h2>
         <div id="bonus-rows">

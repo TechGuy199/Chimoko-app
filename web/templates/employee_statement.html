@@ -56,7 +56,7 @@
     <div class="table-wrap">
         <table>
             <thead>
-                <tr><th>Month</th><th class="num">Payslips</th><th class="num">Days expected</th><th class="num">Days worked</th><th class="num">Days absent</th><th class="num">Basic earned</th><th class="num">Bonuses</th><th class="num">Other deductions</th><th class="num">NAPSA</th><th class="num">NHIMA</th><th class="num">Net pay</th></tr>
+                <tr><th>Month</th><th class="num">Payslips</th><th class="num">Days expected</th><th class="num">Days worked</th><th class="num">Days absent</th><th class="num">Trays planted</th><th class="num">Basic earned</th><th class="num">Bonuses</th><th class="num">Other deductions</th><th class="num">NAPSA</th><th class="num">NHIMA</th><th class="num">Net pay</th></tr>
             </thead>
             <tbody>
             {% for m in months %}
@@ -66,6 +66,7 @@
                     <td class="num">{{ '%g'|format(m.expected) }}</td>
                     <td class="num">{{ '%g'|format(m.worked) }}</td>
                     <td class="num {{ 'warn' if m.absent > 0 }}">{{ '%g'|format(m.absent) }}</td>
+                    <td class="num">{{ (m.trays|trays) if m.trays else '—' }}</td>
                     <td class="num">{{ m.basic|money }}</td>
                     <td class="num">{{ m.bonuses|money }}</td>
                     <td class="num">{{ m.deductions|money }}</td>
@@ -74,7 +75,7 @@
                     <td class="num">{{ m.net|money }}</td>
                 </tr>
             {% else %}
-                <tr><td colspan="11" class="muted center">No payslips for this employee in this period.</td></tr>
+                <tr><td colspan="12" class="muted center">No payslips for this employee in this period.</td></tr>
             {% endfor %}
             {% if months %}
                 <tr class="total-row">
@@ -83,6 +84,7 @@
                     <td class="num">{{ '%g'|format(totals.expected) }}</td>
                     <td class="num">{{ '%g'|format(totals.worked) }}</td>
                     <td class="num">{{ '%g'|format(totals.absent) }}</td>
+                    <td class="num">{{ (totals.trays|trays) if totals.trays else '—' }}</td>
                     <td class="num">{{ totals.basic|money }}</td>
                     <td class="num">{{ totals.bonuses|money }}</td>
                     <td class="num">{{ totals.deductions|money }}</td>
@@ -96,6 +98,7 @@
                     <td class="num">{{ '%.1f'|format(totals.expected / summary.months) }}</td>
                     <td class="num">{{ '%.1f'|format(totals.worked / summary.months) }}</td>
                     <td class="num">{{ '%.1f'|format(summary.average_absent) }}</td>
+                    <td class="num">{{ ((totals.trays / summary.months)|trays) if totals.trays else '—' }}</td>
                     <td class="num">{{ (totals.basic / summary.months)|money }}</td>
                     <td class="num">{{ (totals.bonuses / summary.months)|money }}</td>
                     <td class="num">{{ (totals.deductions / summary.months)|money }}</td>

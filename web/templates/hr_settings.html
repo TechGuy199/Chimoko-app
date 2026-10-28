@@ -53,4 +53,24 @@
         <button class="btn primary spaced">Save Settings</button>
     </form>
 </div>
+
+<div class="card rules-form">
+    <form method="post" action="{{ url_for('hr_tray_settings') }}">
+        {{ csrf_field() }}
+        <h2>Planting trays</h2>
+        <p class="muted">
+            Used by <strong>Planting Records</strong>. A planting is entered as a number of trays; the seeds planted are the trays multiplied by the holes in each tray.
+            A casual worker is paid for the trays they planted instead of for days worked.
+        </p>
+        <label>Usual holes per tray
+            <input name="holes_per_tray" type="number" min="0" max="{{ max_holes }}" step="1" inputmode="numeric" value="{{ s.holes_per_tray or '' }}" placeholder="for example 242">
+            <small class="muted">Filled into every new planting. Leave it empty if there is no usual size; a planting can always use its own number.</small>
+        </label>
+        <label>Pay for each tray planted
+            <input name="tray_rate" type="number" min="0" step="0.01" inputmode="decimal" value="{{ '%g'|format(s.tray_rate) if s.tray_rate else '' }}" placeholder="0.00">
+            <small class="muted">What a casual worker earns for each tray they planted. Permanent staff are paid their salary and are not paid by the tray. A payslip stores the rate it used, so changing it here affects payslips made from now on.</small>
+        </label>
+        <button class="btn primary spaced">Save Tray Settings</button>
+    </form>
+</div>
 {% endblock %}

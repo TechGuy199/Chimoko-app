@@ -18,7 +18,7 @@
 
 <div class="stats">
     <div class="stat"><span>Seeds planted</span><strong>{{ '{:,}'.format(p.seeds_planted) }}</strong>
-        <small>{% if p.packs_used %}{{ p.packs_used }} pack{{ 's' if p.packs_used != 1 }} used{% else %}no inventory used{% endif %}</small></div>
+        <small>{% if p.trays %}{{ p.trays|trays }} tray{{ 's' if p.trays != 1 }}{% if p.holes_per_tray %} &times; {{ p.holes_per_tray }} holes{% endif %} &middot; {% endif %}{% if p.packs_used %}{{ p.packs_used }} pack{{ 's' if p.packs_used != 1 }} used{% else %}no inventory used{% endif %}</small></div>
     <div class="stat"><span>Seedlings {{ 'counted' if p.actual_ready_on else 'expected' }}</span><strong class="accent">{{ '{:,}'.format(p.seedlings) }}</strong>
         <small>{{ '%g'|format(p.mortality_pct) }}% expected mortality</small></div>
     <div class="stat"><span>Ready</span><strong class="{{ 'ok' if p.stage == 'ready' else 'gold' if p.stage == 'due' }}">{{ p.actual_ready_on or p.ready_on }}</strong>
@@ -93,6 +93,55 @@
     </div>
 </div>
 
+<section class="card block" id="trays">
+    <h2>Trays planted</h2>
+    {% set paid_rows = planted_by|selectattr('state', 'equalto', 'paid')|list %}
+    {% set open_rows = planted_by|rejectattr('state', 'equalto', 'paid')|list %}
+    {% if p.trays %}
+    <p class="muted">
+        {{ p.trays|trays }} tray{{ 's' if p.trays != 1 }} planted{% if p.holes_per_tray %}, with {{ p.holes_per_tray }} holes in each tray ({{ '{:,}'.format((p.trays * p.holes_per_tray)|round|int) }} holes){% endif %}.
+        {% if p.holes_per_tray and (p.trays * p.holes_per_tray)|round|int != p.seeds_planted %}The seeds planted ({{ '{:,}'.format(p.seeds_planted) }}) were entered separately and are not changed by the trays.{% endif %}
+    </p>
+    {% else %}
+    <p class="muted">No trays were recorded for this planting. {% if editable %}Add them below to say who planted them.{% endif %}</p>
+    {% endif %}
+    {% if planted_by %}
+    <div class="table-wrap">
+        <table>
+            <thead><tr><th>Planted by</th><th class="num">Trays</th><th>Pay</th></tr></thead>
+            <tbody>
+            {% for r in planted_by %}
+                <tr>
+                    <td>{{ r.employee_name }}</td><td class="num">{{ r.trays|trays }}</td>
+                    <td>{% if r.state == 'paid' %}<span class="ok">Paid on a payslip</span>
+                        {% elif r.state == 'due' %}<strong class="gold">To be paid</strong>
+                        {% elif r.state == 'salaried' %}<span class="muted">Salaried, not paid by the tray</span>
+                        {% else %}<span class="muted">No longer an employee</span>{% endif %}</td>
+                </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+    {% if editable %}
+    <form method="post" action="{{ url_for('planting_trays_update', planting_id=p.id) }}" class="tray-form">
+        {{ csrf_field() }}
+        <div class="grid">
+            <label>Trays planted
+                <input name="trays_planted" type="number" min="0.01" max="100000" step="any" inputmode="decimal" value="{{ p.trays|trays|replace(',', '') if p.trays else '' }}" data-tray-total>
+            </label>
+            <label>Holes in each tray
+                <input name="holes_per_tray" type="number" min="1" max="{{ max_holes }}" step="1" inputmode="numeric" value="{{ p.holes_per_tray or '' }}">
+            </label>
+        </div>
+        {% if paid_rows %}<p class="muted hint">Trays already paid on a payslip ({{ paid_rows|sum(attribute='trays')|trays }}) are locked and counted in the total.</p>{% endif %}
+        {% set rows = open_rows %}{% set paid = paid_rows|sum(attribute='trays') %}
+        {% include "_tray_rows.html" %}
+        <button class="btn primary">Save trays</button>
+    </form>
+    {% endif %}
+</section>
+
 <section class="card block">
     <h2>Pre-orders for this batch</h2>
     {% if not p.still_in_greenhouse %}
@@ -133,3 +182,4 @@
     </div>
 </section>
 {% endblock %}
+{% block scripts %}<script src="{{ asset('trays.js') }}"></script>{% endblock %}

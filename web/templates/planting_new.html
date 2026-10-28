@@ -24,8 +24,25 @@
         </label>
         <p class="muted" id="stock-note"></p>
 
+        <div class="grid">
+            <label>Trays planted
+                <input name="trays_planted" id="planting-trays" type="number" min="0.01" max="100000" step="any" inputmode="decimal" placeholder="e.g. 27" data-tray-total>
+            </label>
+            <label>Holes in each tray
+                <input name="holes_per_tray" id="planting-holes" type="number" min="1" max="{{ max_holes }}" step="1" inputmode="numeric" value="{{ usual_holes }}"
+                       placeholder="e.g. 242">
+            </label>
+        </div>
+        <p class="muted hint" id="trays-note" aria-live="polite">
+            Trays &times; holes gives the seeds below. {% if usual_holes %}Most trays here have {{ usual_holes }} holes; change the number for a different tray.{% else %}An admin can set the usual number of holes under HR &rarr; Settings.{% endif %}
+        </p>
+
+        <p class="seedling-summary" id="trays-calc" aria-live="polite"></p>
+
+        {% include "_tray_rows.html" %}
+
         <label>Seeds being planted
-            <input name="seeds_planted" id="planting-seeds" type="number" min="1" step="1" inputmode="numeric" required>
+            <input name="seeds_planted" id="planting-seeds" type="number" min="1" step="1" inputmode="numeric" placeholder="trays &times; holes, or type your own">
         </label>
         <p class="seedling-summary" id="packs-note" aria-live="polite"></p>
 
@@ -62,4 +79,4 @@
     </form>
 </section>
 {% endblock %}
-{% block scripts %}<script src="{{ asset('planting.js') }}"></script>{% endblock %}
+{% block scripts %}<script src="{{ asset('trays.js') }}"></script><script src="{{ asset('planting.js') }}"></script>{% endblock %}

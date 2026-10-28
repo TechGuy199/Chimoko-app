@@ -1,0 +1,10 @@
+<div class="tray-row">
+    <select name="planter_id" aria-label="Employee">
+        <option value="">Choose a person</option>
+        {% for e in staff %}
+        <option value="{{ e.id }}" {{ 'selected' if r and r.employee_id == e.id }}>{{ e.full_name }}{% if e.employment_type != 'Casual Worker' %} (salaried){% endif %}</option>
+        {% endfor %}
+    </select>
+    <input name="planter_trays" type="number" min="0.01" max="100000" step="any" inputmode="decimal" placeholder="Trays" aria-label="Trays planted" value="{{ r.trays|trays|replace(',', '') if r else '' }}">
+    <button type="button" class="btn small ghost" data-tray-remove aria-label="Remove this person">&times;</button>
+</div>

@@ -37,7 +37,10 @@ STATUTORY_RATES = ("napsa_employee_pct", "napsa_employer_pct", "nhima_employee_p
 HR_DEFAULTS = {
     "non_working_days": "saturday,sunday", "napsa_employee_pct": 5.0, "napsa_employer_pct": 5.0,
     "nhima_employee_pct": 1.0, "nhima_employer_pct": 1.0, "contribution_base": "basic",
+    "holes_per_tray": 0, "tray_rate": 0.0,   # a planting's usual holes per tray, and what a casual worker is paid for each tray planted
 }
+MAX_TRAY_HOLES = 10_000    # holes in one seedling tray
+MAX_TRAYS = 100_000        # trays in one planting
 
 if ON_VERCEL and not IS_POSTGRES:
     raise RuntimeError("DATABASE_URL is not set. Connect a Postgres database to this Vercel project.")
@@ -451,6 +454,15 @@ def money(value):
     currency = user["currency"] if user else ""
     amount = float(value or 0)
     return f"{currency}{0.0 if abs(amount) < 0.005 else amount:,.2f}"   # never "-0.00" from rounding
+
+
+def tray_figure(value):
+    """A number of trays as people say it: 12, 12.5 (never 12.0 or 12.50)."""
+    value = round(float(value or 0), 2)
+    return f"{value:,.0f}" if value == int(value) else f"{value:,.2f}".rstrip("0")
+
+
+app.add_template_filter(tray_figure, "trays")
 
 
 @app.template_filter("signed")
@@ -3385,7 +3397,7 @@ def procurements_csv():
 # --- HR & PAYROLL (ADMIN) ---
 def hr_settings_for(db, biz):
     saved = db.one(
-        f"SELECT non_working_days, {', '.join(STATUTORY_RATES)}, contribution_base FROM hr_settings WHERE business_id=?", (biz,)
+        f"SELECT non_working_days, {', '.join(STATUTORY_RATES)}, contribution_base, holes_per_tray, tray_rate FROM hr_settings WHERE business_id=?", (biz,)
     )
     rules = dict(HR_DEFAULTS)
     rules.update({key: value for key, value in (saved or {}).items() if value is not None})
@@ -3427,8 +3439,16 @@ def hr():
         (biz,),
     )
     payslips = db.all(
-        """SELECT id, pay_month, employee_name, basic_salary, expected_days, worked_days, napsa_amt, nhima_amt, net_payable
+        """SELECT id, pay_month, employee_name, basic_salary, expected_days, worked_days, trays, napsa_amt, nhima_amt, net_payable
            FROM payroll WHERE business_id=? ORDER BY id DESC LIMIT 500""",
+        (biz,),
+    )
+    # Trays planted by casual workers that no payslip has paid yet
+    unpaid_trays_by_worker = db.all(
+        """SELECT t.employee_id, t.employee_name, SUM(t.trays) AS trays
+           FROM planting_trays t JOIN employees e ON e.id = t.employee_id AND e.business_id = t.business_id
+           WHERE t.business_id=? AND t.paid_payslip_id IS NULL AND e.employment_type='Casual Worker'
+           GROUP BY t.employee_id, t.employee_name ORDER BY t.employee_name""",
         (biz,),
     )
     summary = db.all(
@@ -3439,7 +3459,10 @@ def hr():
            FROM payroll WHERE business_id=? GROUP BY pay_month ORDER BY pay_month DESC""",
         (biz,),
     )
-    return render_template("hr.html", employees=employees, payslips=payslips, summary=summary, today=now().strftime("%Y-%m-%d"))
+    return render_template(
+        "hr.html", employees=employees, payslips=payslips, summary=summary, today=now().strftime("%Y-%m-%d"), tray_owed=unpaid_trays_by_worker,
+        tray_rate=hr_settings_for(db, biz)["tray_rate"],
+    )
 
 
 @app.post("/hr/employees")
@@ -3520,14 +3543,78 @@ def hr_settings():
         return redirect(url_for("hr_settings"))
 
     settings_row = hr_settings_for(db, biz)
-    return render_template("hr_settings.html", s=settings_row, weekdays=WEEKDAYS, non_working=settings_row["non_working_days"].split(","))
+    return render_template("hr_settings.html", s=settings_row, weekdays=WEEKDAYS, non_working=settings_row["non_working_days"].split(","), max_holes=MAX_TRAY_HOLES)
+
+
+@app.post("/hr/settings/trays")
+@need("admin")
+def hr_tray_settings():
+    """The usual holes in a seedling tray (filled into every new planting) and what a casual worker is paid for each tray planted."""
+    db, biz = get_db(), g.user["business_id"]
+    try:
+        holes = number("holes_per_tray", int, default=0)
+        rate = number("tray_rate", default=0.0)
+    except ValueError:
+        holes, rate = -1, -1.0
+    if not 0 <= holes <= MAX_TRAY_HOLES or not 0 <= rate <= 10_000_000:
+        flash(f"Holes per tray must be a whole number up to {MAX_TRAY_HOLES:,} (0 for no usual number), and the pay for each tray cannot be negative.", "error")
+        return redirect(url_for("hr_settings"))
+    rate = round(rate, 2)
+    if db.one("SELECT business_id FROM hr_settings WHERE business_id=?", (biz,)):
+        db.execute("UPDATE hr_settings SET holes_per_tray=?, tray_rate=? WHERE business_id=?", (holes, rate, biz))
+    else:
+        # The row also holds the statutory rules, so a business that has never saved those starts from the defaults
+        d = HR_DEFAULTS
+        db.execute(
+            f"""INSERT INTO hr_settings (business_id, non_working_days, {', '.join(STATUTORY_RATES)}, contribution_base, napsa_pct, nhima_pct,
+                                         napsa_bearer, nhima_bearer, holes_per_tray, tray_rate)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'employee', 'employee', ?, ?)""",
+            (biz, d["non_working_days"], *(d[r] for r in STATUTORY_RATES), d["contribution_base"], d["napsa_employee_pct"], d["nhima_employee_pct"], holes, rate),
+        )
+    db.commit()
+    flash("Planting tray settings saved. A casual worker's unpaid trays are paid at this rate when their payslip is made; payslips already made are unchanged.", "ok")
+    return redirect(url_for("hr_settings"))
+
+
+def unpaid_trays(db, biz, employee_id, month):
+    """The trays a worker planted, on plantings dated up to the end of a pay month, that no payslip has paid yet:
+    ([{id, name, batch_no, planted_on, trays}], their total). Earlier months' unpaid trays are included, so nothing is missed."""
+    rows = db.all(
+        """SELECT t.id, t.trays, p.name, p.batch_no, p.planted_on
+           FROM planting_trays t JOIN plantings p ON p.id = t.planting_id AND p.business_id = t.business_id
+           WHERE t.business_id=? AND t.employee_id=? AND t.paid_payslip_id IS NULL AND p.planted_on <= ?
+           ORDER BY p.planted_on, t.id""",
+        (biz, employee_id, month + "-31"),   # dates are YYYY-MM-DD text, so any day of the month sorts at or before the 31st
+    )
+    return rows, round(sum(r["trays"] for r in rows), 2)
+
+
+@app.get("/hr/trays")
+@need("admin")
+def hr_trays():
+    """The unpaid trays and the pay for them, for the payslip form to show before it is saved."""
+    db, biz = get_db(), g.user["business_id"]
+    month = request.args.get("month", "")
+    employee = db.one("SELECT id, employment_type FROM employees WHERE id=? AND business_id=?", (request.args.get("employee_id", type=int), biz))
+    try:
+        datetime.datetime.strptime(month, "%Y-%m")
+    except ValueError:
+        return jsonify(error="Choose the pay month."), 400
+    if employee is None:
+        return jsonify(error="Choose an employee."), 400
+    rows, total = unpaid_trays(db, biz, employee["id"], month)
+    rate = hr_settings_for(db, biz)["tray_rate"]
+    return jsonify(
+        casual=employee["employment_type"] == "Casual Worker", rate=rate, trays=total, pay=round(total * rate, 2),
+        rows=[{"planting": planting_label(r), "planted_on": r["planted_on"], "trays": r["trays"]} for r in rows],
+    )
 
 
 @app.route("/hr/payslips/new", methods=["GET", "POST"])
 @need("admin")
 def new_payslip():
     db, biz = get_db(), g.user["business_id"]
-    employees = db.all("SELECT id, full_name, basic_salary FROM employees WHERE business_id=? ORDER BY full_name", (biz,))
+    employees = db.all("SELECT id, full_name, basic_salary, employment_type FROM employees WHERE business_id=? ORDER BY full_name", (biz,))
     if not employees:
         flash("Register an employee first.", "error")
         return redirect(url_for("hr"))
@@ -3536,15 +3623,20 @@ def new_payslip():
 
     if request.method == "POST":
         employee = next((e for e in employees if e["id"] == request.form.get("employee_id", type=int)), None)
+        # A casual worker can be paid for the trays they planted instead of for days worked
+        by_tray = bool(employee and employee["employment_type"] == "Casual Worker" and text("pay_basis") == "trays")
         try:
             period = datetime.datetime.strptime(text("pay_month"), "%Y-%m")
-            expected = number("expected_days", default=float(expected_work_days(period.year, period.month, non_working)))
-            worked = number("worked_days")
+            if by_tray:
+                expected = worked = 0.0
+            else:
+                expected = number("expected_days", default=float(expected_work_days(period.year, period.month, non_working)))
+                worked = number("worked_days")
             bonuses, deductions = named_amounts("bonus"), named_amounts("deduction")
         except ValueError:
             flash("Check the pay month (YYYY-MM), the day counts, and that every bonus or deduction has a name and a positive amount.", "error")
             return redirect(url_for("new_payslip"))
-        if employee is None or expected <= 0 or worked < 0:
+        if employee is None or (not by_tray and (expected <= 0 or worked < 0)):
             flash("Choose an employee; expected days must be above zero and days worked cannot be negative.", "error")
             return redirect(url_for("new_payslip"))
         method, _, problem = read_money_method()
@@ -3552,8 +3644,21 @@ def new_payslip():
             flash(problem.replace("the money was paid", "the pay was paid"), "error")
             return redirect(url_for("new_payslip"))
 
-        basic = employee["basic_salary"]
-        calculated_basic = round(basic / expected * worked, 2)
+        tray_rows, trays, tray_rate = [], None, None
+        if by_tray:
+            tray_rows, trays = unpaid_trays(db, biz, employee["id"], period.strftime("%Y-%m"))
+            tray_rate = hr_settings_for(db, biz)["tray_rate"]
+            if not tray_rows and not bonuses:
+                flash(f"{employee['full_name']} has no unpaid trays up to {period.strftime('%Y-%m')}. Trays are recorded on each planting under Planting Records.", "error")
+                return redirect(url_for("new_payslip"))
+            if tray_rows and tray_rate <= 0:
+                flash("Set the pay for each tray under HR & Payroll > Settings first.", "error")
+                return redirect(url_for("new_payslip"))
+            basic = 0.0
+            calculated_basic = round(trays * tray_rate, 2)
+        else:
+            basic = employee["basic_salary"]
+            calculated_basic = round(basic / expected * worked, 2)
         # The employee share comes off their pay; the employer share is a cost on top and never touches net pay
         share = statutory_amounts(hr_set, calculated_basic, sum(bonuses.values()))
         emp_napsa, employer_napsa = share["napsa_employee"], share["napsa_employer"]
@@ -3562,14 +3667,25 @@ def new_payslip():
 
         payslip_id = db.insert(
             """INSERT INTO payroll (business_id, employee_id, employee_name, pay_month, basic_salary, expected_days, worked_days, calculated_basic,
-                                    bonuses_json, deductions_json, napsa_amt, nhima_amt, employer_napsa, employer_nhima, net_payable, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                    bonuses_json, deductions_json, napsa_amt, nhima_amt, employer_napsa, employer_nhima, net_payable, created_at, trays, tray_rate)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 biz, employee["id"], employee["full_name"], period.strftime("%Y-%m"), basic, expected, worked, calculated_basic,
                 json.dumps(bonuses), json.dumps(deductions), emp_napsa, emp_nhima, employer_napsa, employer_nhima, net,
-                now().strftime("%Y-%m-%d %H:%M:%S"),
+                now().strftime("%Y-%m-%d %H:%M:%S"), trays, tray_rate,
             ),
         )
+        if tray_rows:
+            # The payslip takes exactly the trays it was worked out from. If another payslip took any of them meanwhile, nothing is saved.
+            marks = ",".join("?" for _ in tray_rows)
+            taken = db.execute(
+                f"UPDATE planting_trays SET paid_payslip_id=? WHERE business_id=? AND employee_id=? AND paid_payslip_id IS NULL AND id IN ({marks})",
+                [payslip_id, biz, employee["id"]] + [r["id"] for r in tray_rows],
+            ).rowcount
+            if taken != len(tray_rows):
+                db.rollback()
+                flash("The trays changed while the payslip was being made. Nothing was saved; please try again.", "error")
+                return redirect(url_for("new_payslip"))
         record_payslip_money(
             db, biz, payslip_id, employee["full_name"], period.strftime("%Y-%m"), net, emp_napsa + emp_nhima + employer_napsa + employer_nhima,
             method, now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -3577,7 +3693,10 @@ def new_payslip():
         db.commit()
         return redirect(url_for("payslips", id=payslip_id))
 
-    return render_template("payslip_new.html", employees=employees, hr=hr_set, this_month=now().strftime("%Y-%m"), methods=PAYMENT_METHODS)
+    return render_template(
+        "payslip_new.html", employees=employees, hr=hr_set, this_month=now().strftime("%Y-%m"), methods=PAYMENT_METHODS,
+        chosen=request.args.get("employee", type=int),
+    )
 
 
 @app.get("/hr/payslips")
@@ -3591,7 +3710,7 @@ def payslips():
     marks = ",".join("?" for _ in ids)
     slips = db.all(
         f"""SELECT id, employee_name, pay_month, basic_salary, expected_days, worked_days, calculated_basic, bonuses_json, deductions_json,
-                   napsa_amt, nhima_amt, employer_napsa, employer_nhima, net_payable
+                   napsa_amt, nhima_amt, employer_napsa, employer_nhima, net_payable, trays, tray_rate
             FROM payroll WHERE business_id=? AND id IN ({marks}) ORDER BY id""",
         [biz] + ids,
     )
@@ -3607,8 +3726,10 @@ def delete_payslip(payslip_id):
     db = get_db()
     db.execute("DELETE FROM payroll WHERE id=? AND business_id=?", (payslip_id, g.user["business_id"]))
     db.execute("DELETE FROM cashbook WHERE business_id=? AND source='payslip' AND source_id=?", (g.user["business_id"], payslip_id))
+    # The trays that payslip paid are owed again, to be paid on the next payslip
+    db.execute("UPDATE planting_trays SET paid_payslip_id=NULL WHERE business_id=? AND paid_payslip_id=?", (g.user["business_id"], payslip_id))
     db.commit()
-    flash("Payslip deleted, with its pay in Accounts.", "ok")
+    flash("Payslip deleted, with its pay in Accounts. Any trays it paid are unpaid again.", "ok")
     return redirect(url_for("hr"))
 
 
@@ -4022,14 +4143,14 @@ def employee_statement(employee_id):
 
     choice, start, end = statement_months()
     slips = db.all(
-        """SELECT pay_month, expected_days, worked_days, calculated_basic, bonuses_json, deductions_json,
+        """SELECT pay_month, expected_days, worked_days, trays, calculated_basic, bonuses_json, deductions_json,
                   napsa_amt, nhima_amt, employer_napsa, employer_nhima, net_payable
            FROM payroll WHERE employee_id=? AND business_id=? AND pay_month >= ? AND pay_month <= ? ORDER BY pay_month, id""",
         (employee_id, biz, start or "0000-00", end or "9999-99"),
     )
 
     money_keys = ("basic", "bonuses", "deductions", "napsa", "nhima", "employer_napsa", "employer_nhima", "net")
-    blank = dict.fromkeys(("payslips", "expected", "worked", "absent") + money_keys, 0)
+    blank = dict.fromkeys(("payslips", "expected", "worked", "absent", "trays") + money_keys, 0)
     months, totals, named = {}, dict(blank), {"bonus": {}, "deduction": {}}
     for slip in slips:
         bonuses, deductions = json.loads(slip["bonuses_json"] or "{}"), json.loads(slip["deductions_json"] or "{}")
@@ -4037,7 +4158,7 @@ def employee_statement(employee_id):
             for name, amount in items.items():
                 named[kind][name] = named[kind].get(name, 0.0) + (amount or 0.0)
         figures = {
-            "payslips": 1, "expected": slip["expected_days"], "worked": slip["worked_days"],
+            "payslips": 1, "expected": slip["expected_days"], "worked": slip["worked_days"], "trays": slip["trays"] or 0,
             # Absence is counted payslip by payslip: the days expected that were not worked
             "absent": max(0.0, slip["expected_days"] - slip["worked_days"]),
             "basic": slip["calculated_basic"], "bonuses": sum(bonuses.values()), "deductions": sum(deductions.values()),
@@ -6803,13 +6924,13 @@ def insert_planting(db, biz, d):
     planting_id = db.insert(
         """INSERT INTO plantings (business_id, seed_item_id, seed_code, seed_name, name, department, batch_no, source, seeds_planted, packs_used, loose_delta,
                                   seeds_per_pack, mortality_pct, seedlings, seed_unit_cost, cost_per_seedling, price, planted_on, ready_on, actual_ready_on,
-                                  still_in_greenhouse, notes, created_by, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                  still_in_greenhouse, notes, created_by, created_at, trays, holes_per_tray)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             biz, d.get("seed_item_id"), d["seed_code"], d["seed_name"], d["name"], d["department"], d["batch_no"], d["source"], d["seeds"],
             d.get("packs", 0), d.get("loose_delta", 0), d.get("seeds_per_pack"), d["mortality"], d["seedlings"], d["seed_cost"], d["cost_per_seedling"],
             d["price"], d["planted_on"], d["ready_on"], d.get("actual_ready_on"), 1 if d.get("still_in_greenhouse", True) else 0,
-            d.get("notes", ""), g.user["username"], now().strftime("%Y-%m-%d %H:%M:%S"),
+            d.get("notes", ""), g.user["username"], now().strftime("%Y-%m-%d %H:%M:%S"), d.get("trays"), d.get("holes_per_tray"),
         ),
     )
     db.execute("UPDATE plantings SET pos_code=? WHERE id=?", (f"{d['seed_code']}{PLANTING_MARK}{planting_id}", planting_id))
@@ -6818,6 +6939,68 @@ def insert_planting(db, biz, d):
 
 def seed_code_for(name):
     return re.sub(r"[^A-Z0-9]+", "-", name.upper()).strip("-")[:20] or "PLT"
+
+
+def tray_count(raw):
+    """A number of trays: above zero and, because a tray can be part planted, not necessarily whole. Raises ValueError otherwise."""
+    value = float(str(raw).replace(",", ""))
+    if not math.isfinite(value) or not 0 < value <= MAX_TRAYS:
+        raise ValueError(raw)
+    return round(value, 2)
+
+
+def planting_staff(db, biz):
+    """The employees a planting's trays can be given to. Only a name and a kind: what a person is paid is not for the planting pages."""
+    return db.all("SELECT id, full_name, employment_type FROM employees WHERE business_id=? ORDER BY full_name", (biz,))
+
+
+def read_trays_form(db, biz, paid=0.0):
+    """The trays part of the planting form: how many trays, how many holes in each, and who planted them.
+    Returns (info, None) with info = {trays, holes, rows: [(employee, trays)]}, or (None, what is wrong).
+    The trays given to the people are added up, and that sum is the number of trays planted; if a total was typed as well it must agree.
+    paid is the trays already paid on a payslip, which stay as they are: they count towards the total but are not in the rows."""
+    typed, holes = None, None
+    try:
+        if text("trays_planted"):
+            typed = tray_count(text("trays_planted"))
+        if text("holes_per_tray"):
+            holes = number("holes_per_tray", int)
+            if not 1 <= holes <= MAX_TRAY_HOLES:
+                raise ValueError
+    except ValueError:
+        return None, f"Trays planted must be a number above zero, and the holes in a tray a whole number from 1 to {MAX_TRAY_HOLES:,}."
+    staff = {e["id"]: e for e in planting_staff(db, biz)}
+    pairs = [(who.strip(), amount.strip()) for who, amount in zip(request.form.getlist("planter_id"), request.form.getlist("planter_trays")) if who.strip() or amount.strip()]
+    given = {}
+    for who, amount in pairs:
+        employee = staff.get(int(who)) if who.isascii() and who.isdigit() else None
+        if employee is None:
+            return None, "Choose the employee for each row of who planted the trays, or remove the row."
+        if not amount and len(pairs) == 1 and typed:
+            amount = str(typed)   # one person and the total typed: they planted all of it
+        try:
+            share = tray_count(amount)
+        except ValueError:
+            return None, f"Enter how many trays {employee['full_name']} planted (a number above zero), or remove the row."
+        given[employee["id"]] = [employee, round(given[employee["id"]][1] + share, 2) if employee["id"] in given else share]
+    rows = [(employee, share) for employee, share in given.values()]
+    if rows or paid:
+        total = round(paid + sum(share for _, share in rows), 2)
+        if typed is not None and abs(typed - total) > 0.005:
+            return None, f"The trays given to each person add up to {tray_figure(total)}, but {tray_figure(typed)} trays were entered in total. Make them agree, or leave the total empty."
+        typed = total
+    return {"trays": typed, "holes": holes, "rows": rows}, None
+
+
+def save_tray_rows(db, biz, planting_id, rows):
+    """Records who planted how many trays of a planting."""
+    stamp = now().strftime("%Y-%m-%d %H:%M:%S")
+    for employee, share in rows:
+        db.execute(
+            """INSERT INTO planting_trays (business_id, planting_id, employee_id, employee_name, trays, created_by, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (biz, planting_id, employee["id"], employee["full_name"], share, g.user["username"], stamp),
+        )
 
 
 @app.get("/planting")
@@ -6895,7 +7078,7 @@ def planting_new():
         }
     return render_template(
         "planting_new.html", seed_items=seeds, info=info, chosen=request.args.get("item", ""), departments=department_names(db, biz), today=today_str(),
-        release_days=RELEASE_DAYS,
+        release_days=RELEASE_DAYS, staff=planting_staff(db, biz), usual_holes=hr_settings_for(db, biz)["holes_per_tray"] or "", max_holes=MAX_TRAY_HOLES,
     )
 
 
@@ -6924,12 +7107,22 @@ def planting_create():
         flash("Your account cannot record a planting that is not taken from inventory. Ask an admin.", "error")
         return back
 
+    trays_form, problem = read_trays_form(db, biz)
+    if problem:
+        flash(problem, "error")
+        return back
+    trays, holes = trays_form["trays"], trays_form["holes"]
     try:
-        seeds = number("seeds_planted", int)
+        if text("seeds_planted"):
+            seeds = number("seeds_planted", int)
+        elif trays and holes:
+            seeds = int(math.floor(trays * holes + 0.5 + 1e-9))   # trays x holes in each tray; a part-planted tray rounds to whole seeds
+        else:
+            raise ValueError
         if seeds < 1:
             raise ValueError
     except ValueError:
-        flash("Enter how many seeds are being planted (a whole number above zero).", "error")
+        flash("Enter how many seeds are being planted (a whole number above zero), or the trays planted and the holes in each tray: trays x holes gives the seeds.", "error")
         return back
     try:
         mortality = number("mortality_pct")
@@ -7019,8 +7212,9 @@ def planting_create():
             "batch_no": text("batch_no")[:40], "source": "inventory" if item else "manual", "seeds": seeds, "packs": packs, "loose_delta": loose_delta,
             "seeds_per_pack": size, "mortality": mortality, "seedlings": seedlings, "seed_cost": seed_cost, "cost_per_seedling": cost_per_seedling,
             "price": round(price, 2), "planted_on": planted_on, "ready_on": ready_on, "notes": text("notes")[:300],
-            "still_in_greenhouse": checked("still_in_greenhouse"),
+            "still_in_greenhouse": checked("still_in_greenhouse"), "trays": trays, "holes_per_tray": holes if trays else None,
         })
+        save_tray_rows(db, biz, planting_id, trays_form["rows"])
         use_grant(db, grant)
         db.commit()
     except StockError:
@@ -7042,7 +7236,8 @@ def planting_create():
         where = f"It will appear on the POS on {add_days(ready_on, -RELEASE_DAYS)}, a week before it is ready."
     used = f", using {packs} pack(s) from inventory" if item else ""
     spare = f" {loose_left:,} loose seeds are kept for the next planting." if item and loose_left else ""
-    flash(f"Planting recorded: {seeds:,} seeds of {seed_name}{used}. About {seedlings:,} seedlings are expected by {ready_on}.{spare} {where}", "ok")
+    in_trays = f" ({tray_figure(trays)} trays)" if trays else ""
+    flash(f"Planting recorded: {seeds:,} seeds{in_trays} of {seed_name}{used}. About {seedlings:,} seedlings are expected by {ready_on}.{spare} {where}", "ok")
     return redirect(url_for("planting_detail", planting_id=planting_id))
 
 
@@ -7061,7 +7256,52 @@ def planting_detail(planting_id):
     p = get_planting(db, planting_id)
     f = with_figures(db, biz, [p])[0]
     orders = db.all("SELECT * FROM preorders WHERE planting_id=? AND business_id=? ORDER BY id DESC", (planting_id, biz))
-    return render_template("planting_detail.html", p=f, orders=orders, editable=can_plant(), release_days=RELEASE_DAYS, today=today_str())
+    return render_template(
+        "planting_detail.html", p=f, orders=orders, editable=can_plant(), release_days=RELEASE_DAYS, today=today_str(), planted_by=planting_tray_rows(db, biz, planting_id),
+        staff=planting_staff(db, biz), max_holes=MAX_TRAY_HOLES,
+    )
+
+
+def planting_tray_rows(db, biz, planting_id):
+    """Who planted how many trays of a planting, and whether each is paid: on a payslip, still to be paid (a casual worker),
+    or not paid by the tray (permanent staff are on a salary; a person since removed from HR is only a name)."""
+    rows = db.all(
+        """SELECT t.id, t.employee_id, t.employee_name, t.trays, t.paid_payslip_id, e.employment_type
+           FROM planting_trays t LEFT JOIN employees e ON e.id = t.employee_id AND e.business_id = t.business_id
+           WHERE t.business_id=? AND t.planting_id=? ORDER BY t.id""",
+        (biz, planting_id),
+    )
+    for r in rows:
+        r["state"] = "paid" if r["paid_payslip_id"] else ("due" if r["employment_type"] == "Casual Worker" else "salaried" if r["employment_type"] else "gone")
+    return rows
+
+
+@app.post("/planting/<int:planting_id>/trays")
+@need(None)
+def planting_trays_update(planting_id):
+    """Changes who planted how many trays. Trays already paid on a payslip are locked; the rest are replaced by what the form sends."""
+    db, biz = get_db(), g.user["business_id"]
+    get_planting(db, planting_id)
+    back = redirect(url_for("planting_detail", planting_id=planting_id))
+    if not can_plant():
+        flash("Your account cannot edit planting records. Ask an admin.", "error")
+        return back
+    paid = db.one(
+        "SELECT COALESCE(SUM(trays), 0) AS n FROM planting_trays WHERE business_id=? AND planting_id=? AND paid_payslip_id IS NOT NULL", (biz, planting_id)
+    )["n"]
+    info, problem = read_trays_form(db, biz, paid=round(paid, 2))
+    if problem:
+        flash(problem, "error")
+        return back
+    db.execute("DELETE FROM planting_trays WHERE business_id=? AND planting_id=? AND paid_payslip_id IS NULL", (biz, planting_id))
+    save_tray_rows(db, biz, planting_id, info["rows"])
+    db.execute(
+        "UPDATE plantings SET trays=?, holes_per_tray=? WHERE id=? AND business_id=?",
+        (info["trays"], info["holes"] if info["trays"] else None, planting_id, biz),
+    )
+    db.commit()
+    flash("Trays saved." if info["trays"] else "Trays cleared.", "ok")
+    return back
 
 
 @app.post("/planting/<int:planting_id>/update")
@@ -7193,6 +7433,7 @@ def planting_delete(planting_id):
     if f["sold"] or f["pending"] or f["collected"]:
         flash("Seedlings from this batch have been sold or pre-ordered, so the record is kept. Cancel the pre-orders first if it was a mistake.", "error")
         return back
+    unpaid = sum(r["trays"] for r in planting_tray_rows(db, biz, planting_id) if r["state"] == "due")
     try:
         if p["seed_item_id"] and p["packs_used"] is not None:
             db.execute(
@@ -7201,13 +7442,15 @@ def planting_delete(planting_id):
             )
         db.execute("DELETE FROM pos_products WHERE business_id=? AND item_code=?", (biz, p["pos_code"]))
         db.execute("DELETE FROM preorders WHERE planting_id=? AND business_id=?", (planting_id, biz))
+        db.execute("DELETE FROM planting_trays WHERE planting_id=? AND business_id=?", (planting_id, biz))
         db.execute("DELETE FROM plantings WHERE id=? AND business_id=?", (planting_id, biz))
         db.commit()
     except DB_ERRORS:
         db.rollback()
         flash("The record could not be deleted. Please try again.", "error")
         return back
-    flash("The planting record was deleted" + (f" and {p['packs_used']} pack(s) went back into inventory." if p["packs_used"] else "."), "ok")
+    flash("The planting record was deleted" + (f" and {p['packs_used']} pack(s) went back into inventory." if p["packs_used"] else ".")
+          + (f" {tray_figure(unpaid)} trays planted by casual workers were not paid yet, and will not be paid now." if unpaid else ""), "ok")
     return redirect(url_for("planting_list"))
 
 
@@ -9177,15 +9420,29 @@ def planting_book(db, biz):
            FROM seedling_batches WHERE business_id=? ORDER BY id""",
         (biz,),
     )
+    trays = db.all(
+        """SELECT p.planted_on, p.name AS planting, p.batch_no, t.employee_name, t.trays, e.employment_type, pr.pay_month
+           FROM planting_trays t JOIN plantings p ON p.id = t.planting_id AND p.business_id = t.business_id
+                LEFT JOIN employees e ON e.id = t.employee_id AND e.business_id = t.business_id
+                LEFT JOIN payroll pr ON pr.id = t.paid_payslip_id AND pr.business_id = t.business_id
+           WHERE t.business_id=? ORDER BY p.planted_on, t.id""",
+        (biz,),
+    )
     return [
         ("Planting records",
          [("Batch", TEXT), ("Batch No", TEXT), ("Seed", TEXT), ("Seed code", TEXT), ("Department", TEXT), ("Planted on", TEXT), ("Ready on", TEXT),
           ("Actually ready", TEXT), ("Seeds planted", WHOLE), ("Packs used", WHOLE), ("Mortality %", NUMBER), ("Seedlings", WHOLE),
           ("Cost per seedling", NUMBER), ("Price", MONEY), ("Sold", WHOLE), ("Pre-ordered", WHOLE), ("Available", WHOLE), ("In greenhouse", TEXT),
-          ("POS code", TEXT), ("Notes", TEXT), ("Recorded by", TEXT)],
+          ("POS code", TEXT), ("Notes", TEXT), ("Recorded by", TEXT), ("Trays planted", NUMBER), ("Holes per tray", WHOLE)],
          [(p["name"], p["batch_no"], p["seed_name"], p["seed_code"], p["department"], p["planted_on"], p["ready_on"], p["actual_ready_on"],
            p["seeds_planted"], p["packs_used"], p["mortality_pct"], p["seedlings"], p["cost_per_seedling"], p["price"], p["sold"], p["pending"],
-           p["available"], "Yes" if p["still_in_greenhouse"] else "No (record)", p["pos_code"], p["notes"], p["created_by"]) for p in plantings]),
+           p["available"], "Yes" if p["still_in_greenhouse"] else "No (record)", p["pos_code"], p["notes"], p["created_by"], p["trays"],
+           p["holes_per_tray"]) for p in plantings]),
+        ("Trays planted by",
+         [("Planted on", TEXT), ("Planting", TEXT), ("Batch No", TEXT), ("Employee", TEXT), ("Trays", NUMBER), ("Pay", TEXT)],
+         [(r["planted_on"], r["planting"], r["batch_no"], r["employee_name"], r["trays"],
+           f"Paid on the {r['pay_month']} payslip" if r["pay_month"] else ("Not paid yet" if r["employment_type"] == "Casual Worker" else "Salaried" if r["employment_type"] else "No longer an employee"))
+          for r in trays]),
         ("Pre-orders",
          [("Placed", TEXT), ("Customer", TEXT), ("Phone", TEXT), ("Batch", TEXT), ("Qty", WHOLE), ("Unit price", MONEY), ("Total", MONEY),
           ("Status", TEXT), ("Collected", TEXT), ("Approved by", TEXT), ("Invoice No", TEXT)],
@@ -9290,7 +9547,7 @@ def suppliers_book(db, biz):
 
 def payroll_book(db, biz):
     slips = db.all(
-        """SELECT pay_month, employee_name, basic_salary, expected_days, worked_days, calculated_basic, bonuses_json, deductions_json, napsa_amt, nhima_amt,
+        """SELECT pay_month, employee_name, basic_salary, expected_days, worked_days, trays, tray_rate, calculated_basic, bonuses_json, deductions_json, napsa_amt, nhima_amt,
                   employer_napsa, employer_nhima, net_payable, created_at
            FROM payroll WHERE business_id=? ORDER BY pay_month, employee_name""",
         (biz,),
@@ -9301,10 +9558,11 @@ def payroll_book(db, biz):
     )
     return [
         ("Payslips",
-         [("Pay month", TEXT), ("Employee", TEXT), ("Basic salary", MONEY), ("Expected days", NUMBER), ("Days worked", NUMBER), ("Basic for days", MONEY),
+         [("Pay month", TEXT), ("Employee", TEXT), ("Basic salary", MONEY), ("Expected days", NUMBER), ("Days worked", NUMBER), ("Trays planted", NUMBER),
+          ("Pay per tray", MONEY), ("Basic for days or trays", MONEY),
           ("Bonuses", TEXT), ("Deductions", TEXT), ("NAPSA (employee)", MONEY), ("NHIMA (employee)", MONEY), ("NAPSA (employer)", MONEY),
           ("NHIMA (employer)", MONEY), ("Net pay", MONEY), ("Made", TEXT)],
-         [(r["pay_month"], r["employee_name"], r["basic_salary"], r["expected_days"], r["worked_days"], r["calculated_basic"],
+         [(r["pay_month"], r["employee_name"], r["basic_salary"], r["expected_days"], r["worked_days"], r["trays"], r["tray_rate"], r["calculated_basic"],
            joined_amounts(r["bonuses_json"]), joined_amounts(r["deductions_json"]), r["napsa_amt"], r["nhima_amt"], r["employer_napsa"],
            r["employer_nhima"], r["net_payable"], r["created_at"]) for r in slips]),
         ("Employees",
@@ -10053,7 +10311,7 @@ def save_assistant():
 assistant.bind(
     app=app, url_for=url_for, now=now, today_str=today_str, add_days=add_days, day_or_none=day_or_none, with_figures=with_figures, sold_url=sold_url,
     read_discount=read_discount, method_from_text=method_from_text, METHOD_NAMES=METHOD_NAMES, PAYMENT_STATUSES=PAYMENT_STATUSES,
-    financial_standing=financial_standing, account_summary=account_summary,
+    financial_standing=financial_standing, account_summary=account_summary, hr_settings_for=hr_settings_for,
 )
 
 

@@ -1,0 +1,15 @@
+{# Who planted how many trays: a row for each person. Used by the new-planting form and the planting page. Needs staff; rows (the
+   saved ones that can still change) and paid (trays already paid on a payslip, which stay as they are) are optional. #}
+<fieldset class="tray-box" data-trays data-paid="{{ paid|default(0) }}">
+    <legend>Who planted them</legend>
+    <p class="muted hint">Choose each person and the trays they planted. If one person planted them all, choosing the name is enough. The trays below add up to the trays planted.
+        Casual workers are paid for their trays on their payslip; permanent staff are on a salary and are not paid by the tray.</p>
+    <div class="tray-list" data-tray-list>
+        {% for r in rows|default([]) %}
+        {% include "_tray_row.html" %}
+        {% endfor %}
+        {% if not rows|default([]) %}{% set r = None %}{% include "_tray_row.html" %}{% endif %}
+    </div>
+    <template data-tray-blank>{% set r = None %}{% include "_tray_row.html" %}</template>
+    <button type="button" class="btn small" data-tray-add>+ Add a person</button>
+</fieldset>

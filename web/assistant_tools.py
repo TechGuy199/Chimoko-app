@@ -377,12 +377,19 @@ def plantings(ctx, args):
     for f in figures[:2]:
         ctx.source(f["label"], H.url_for("planting_detail", planting_id=f["id"]))
     ctx.source("Planting Records", H.url_for("planting_list"))
+    shown = figures[:limit]
+    planted_by = {}
+    if shown:
+        marks = ",".join("?" for _ in shown)
+        for r in db.all(f"SELECT planting_id, employee_name, trays FROM planting_trays WHERE business_id=? AND planting_id IN ({marks}) ORDER BY id", [biz] + [f["id"] for f in shown]):
+            planted_by.setdefault(r["planting_id"], []).append({"name": clip(r["employee_name"], 60), "trays": r2(r["trays"])})
     return {
         "matching": len(figures), "batches": [
-            {"batch": f["label"], "planted_on": f["planted_on"], "seeds_planted": f["seeds_planted"], "seedlings": f["seedlings"], "ready_on": f["actual_ready_on"] or f["ready_on"],
+            {"batch": f["label"], "planted_on": f["planted_on"], "seeds_planted": f["seeds_planted"], "trays": f["trays"], "holes_per_tray": f["holes_per_tray"], "planted_by": planted_by.get(f["id"]),
+             "seedlings": f["seedlings"], "ready_on": f["actual_ready_on"] or f["ready_on"],
              "stage": f["stage_label"], "days_to_ready": f["days"] if f["stage"] == "growing" else None, "pre_ordered_not_collected": f["pending"], "sold": f["sold"],
              "available": f["available"], "price": r2(f["price"]), "department": f["department"]}
-            for f in figures[:limit]
+            for f in shown
         ],
     }
 
@@ -536,14 +543,15 @@ GUIDE = {
     "collection": "Collections: choose 'Collected on another day' with a day on the POS. Everyone is reminded the day before. 'To be collected' on Sales & Invoices lists them; mark each collected from its invoice.",
     "preorders": "Pre-orders: Planting Records > Up Next & pre-orders. A pre-order holds seedlings from a batch for a customer (with an optional collection day). When the customer collects, press Generate "
                  "invoice: the POS opens with the pre-order in the cart at the agreed price and quantity.",
-    "planting": "Planting Records: each batch of seeds planted in the greenhouse, with mortality, ready date and price. A batch goes on the POS a week before it is ready. Up Next shows batches still growing.",
+    "planting": "Planting Records: each batch of seeds planted in the greenhouse, with mortality, ready date and price. A batch goes on the POS a week before it is ready. Up Next shows batches still growing. "
+                "Enter the trays planted and the holes in each tray (trays x holes gives the seeds) and who planted them.",
     "inventory": "Inventory lists stock items (with cost and selling price) by category; Procurements records purchases from suppliers (which add to stock unless marked as not stock) and what is paid; "
                  "Inventory Analysis shows what was bought and spent. Admins manage suppliers and their payments.",
     "customers": "Customers (admins): each customer's account with their invoices, what they owe and a statement (PDF). Names and phone numbers are matched to avoid duplicates; duplicates can be merged.",
     "who_bought": "Click any product name anywhere in the app to see who bought it: customers, phones, dates, quantities, prices and discounts, with a CSV. A planting record's Sold tile does the same.",
     "accounts": "Accounts (admins): every movement of money in and out, balances for cash, bank and mobile money (counted by hand, then kept up to date), who owes us and whom we owe, profit and the financial standing.",
     "reports": "Reports: sales, purchases and profit by department and period.",
-    "staff": "Staff (admins): employees, payroll, payslips with NAPSA and NHIMA, and statements. Daily Activities records the work done in each plot.",
+    "staff": "Staff (admins): employees, payroll, payslips with NAPSA and NHIMA, and statements. Daily Activities records the work done in each plot. A casual worker can be paid for the trays they planted: set the pay for a tray under HR > Settings, then Compute Payslip.",
     "alerts": "Alerts come in the app and optionally by WhatsApp (Settings): low stock, pre-orders and collections due, deliveries due, and requests for admin permission.",
     "assistant": "The assistant (this chat) can look things up, explain the app and prepare sales, pre-orders, payments and delivery changes for you to confirm. Nothing is done until you press Confirm.",
 }
@@ -688,15 +696,23 @@ def staff(ctx, args):
     if who:
         pay_sql, pay_params = " AND LOWER(employee_name) LIKE ?", [like(who)]
     pay = db.all(
-        f"""SELECT employee_name, calculated_basic, napsa_amt, nhima_amt, net_payable, worked_days, expected_days FROM payroll
+        f"""SELECT employee_name, calculated_basic, napsa_amt, nhima_amt, net_payable, worked_days, expected_days, trays, tray_rate FROM payroll
             WHERE business_id=? AND pay_month=?{pay_sql} ORDER BY employee_name""",
         [biz, month] + pay_params,
     )
+    # Casual workers are paid for the trays they planted: those not on a payslip yet
+    owed = {r["employee_id"]: r["n"] for r in db.all(
+        "SELECT employee_id, SUM(trays) AS n FROM planting_trays WHERE business_id=? AND paid_payslip_id IS NULL GROUP BY employee_id", (biz,)
+    )}
     ctx.source("Payroll", H.url_for("hr"))
     return {
-        "employees": [{"name": clip(p["full_name"], 60), "type": p["employment_type"], "basic_salary": r2(p["basic_salary"]), "started": p["start_date"] or None, "days_a_week": p["expected_days_week"]} for p in people],
-        "payroll_month": month, "paid_this_month": [{"name": clip(p["employee_name"], 60), "basic_for_days_worked": r2(p["calculated_basic"]), "worked_days": p["worked_days"], "of_days": p["expected_days"],
-                                                     "napsa": r2(p["napsa_amt"]), "nhima": r2(p["nhima_amt"]), "net_pay": r2(p["net_payable"])} for p in pay],
+        "employees": [{"name": clip(p["full_name"], 60), "type": p["employment_type"], "basic_salary": r2(p["basic_salary"]), "started": p["start_date"] or None, "days_a_week": p["expected_days_week"],
+                       "unpaid_trays": r2(owed.get(p["id"])) if p["employment_type"] == "Casual Worker" else None} for p in people],
+        "payroll_month": month, "pay_per_tray": r2(H.hr_settings_for(db, biz)["tray_rate"]) or None,
+        "paid_this_month": [{"name": clip(p["employee_name"], 60), "basic_for_days_worked": r2(p["calculated_basic"]) if p["trays"] is None else None,
+                             "worked_days": p["worked_days"] if p["trays"] is None else None, "of_days": p["expected_days"] if p["trays"] is None else None,
+                             "basic_for_trays": r2(p["calculated_basic"]) if p["trays"] is not None else None, "trays_planted": p["trays"], "pay_per_tray": p["tray_rate"] if p["trays"] is not None else None,
+                             "napsa": r2(p["napsa_amt"]), "nhima": r2(p["nhima_amt"]), "net_pay": r2(p["net_payable"])} for p in pay],
         "total_net_pay": r2(sum(p["net_payable"] for p in pay)),
     }
 

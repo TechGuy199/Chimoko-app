@@ -1,11 +1,15 @@
-// Record a planting. Choosing a seed item from inventory turns the seeds being planted into packs used (and so the stock
-// that leaves inventory); the mortality rate turns them into the seedlings to expect.
+// Record a planting. The trays planted times the holes in each tray give the seeds being planted (unless a number of seeds is typed
+// instead). Choosing a seed item from inventory turns the seeds being planted into packs used (and so the stock that leaves
+// inventory); the mortality rate turns them into the seedlings to expect.
 (function () {
     const form = document.getElementById("planting-form");
     if (!form) return;
 
     const item = document.getElementById("planting-item");
     const seeds = document.getElementById("planting-seeds");
+    const trays = document.getElementById("planting-trays");
+    const holes = document.getElementById("planting-holes");
+    const traysCalc = document.getElementById("trays-calc");
     const sizeRow = document.getElementById("size-row");
     const sizeInput = document.getElementById("planting-size");
     const manual = document.getElementById("manual-row");
@@ -25,6 +29,7 @@
     } catch (e) { /* the server still checks everything */ }
     let costEdited = false;
     let nameEdited = false;
+    let seedsTyped = false;   // the seeds were typed, so the trays no longer decide them
 
     function number(input) {
         const value = parseFloat(input.value);
@@ -48,6 +53,23 @@
         const date = new Date(parts[0], parts[1] - 1, parts[2] - days);
         const pad = function (n) { return String(n).padStart(2, "0"); };
         return date.getFullYear() + "-" + pad(date.getMonth() + 1) + "-" + pad(date.getDate());
+    }
+
+    // Trays x holes gives the seeds. A part-planted tray rounds to whole seeds.
+    function fromTrays() {
+        const t = number(trays);
+        const h = number(holes);
+        const product = t > 0 && h > 0 ? Math.floor(t * h + 0.5 + 1e-9) : 0;
+        if (!seedsTyped) seeds.value = product > 0 ? String(product) : "";
+        const typed = parseInt(seeds.value, 10) || 0;
+        if (product <= 0) {
+            traysCalc.textContent = "";
+        } else if (seedsTyped && typed > 0 && typed !== product) {
+            traysCalc.textContent = t.toLocaleString() + " trays \u00d7 " + h.toLocaleString() + " holes = " + product.toLocaleString() +
+                " seeds, but you typed " + typed.toLocaleString() + ", so " + typed.toLocaleString() + " will be recorded. Clear the seeds to use " + product.toLocaleString() + ".";
+        } else {
+            traysCalc.textContent = t.toLocaleString() + " trays \u00d7 " + h.toLocaleString() + " holes = " + product.toLocaleString() + " seeds.";
+        }
     }
 
     function refresh() {
@@ -102,12 +124,21 @@
         summary.textContent = text;
     }
 
+    function onTrays() { fromTrays(); refresh(); }
+    [trays, holes].forEach(function (input) {
+        input.addEventListener("input", onTrays);
+        input.addEventListener("change", onTrays);
+    });
+    seeds.addEventListener("input", function () { seedsTyped = seeds.value.trim() !== ""; fromTrays(); });
     cost.addEventListener("input", function () { costEdited = true; refresh(); });
     nameInput.addEventListener("input", function () { nameEdited = true; });
     item.addEventListener("change", function () { costEdited = false; refresh(); });
-    [seeds, sizeInput, ready, mortality, price].forEach(function (input) {
+    [sizeInput, ready, mortality, price].forEach(function (input) {
         input.addEventListener("input", refresh);
         input.addEventListener("change", refresh);
     });
+    seeds.addEventListener("input", refresh);
+    seeds.addEventListener("change", refresh);
+    fromTrays();
     refresh();
 })();

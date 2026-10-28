@@ -109,6 +109,8 @@ def value_for(name, alpha_ids):
         return "separation-test-2"
     if name == "payment_method":
         return "Cash"
+    if name == "pay_basis":
+        return "trays"
     if name == "payment_status":
         return "Paid"
     if name == "destination":
@@ -195,6 +197,15 @@ class BusinessSeparation(unittest.TestCase):
         x.insert("""INSERT INTO assistant_actions (business_id, user_id, kind, request, summary, status, created_at, expires_at)
                     VALUES (?, ?, 'handover', ?, '{"title": "Alpha secret note", "rows": [["Alpha secret note", "x"]]}', 'pending', ?, '2999-01-01 00:00:00')""",
                  (biz, alpha_user, '{"path": "/invoices/1/delivered", "form": {}, "perm": "sell"}', stamp))
+        # Who planted how many trays of a planting, and what Alpha pays for a tray: Beta must not read, change or pay either
+        x.insert("""INSERT INTO planting_trays (business_id, planting_id, employee_id, employee_name, trays, created_by, created_at)
+                    VALUES (?, ?, ?, ?, 12, 'alphaowner', ?)""", (biz, planting["id"], employee["id"], employee["full_name"], stamp))
+        x.execute("UPDATE employees SET employment_type='Casual Worker' WHERE id=?", (employee["id"],))
+        if x.one("SELECT business_id FROM hr_settings WHERE business_id=?", (biz,)):
+            x.execute("UPDATE hr_settings SET holes_per_tray=242, tray_rate=2.5 WHERE business_id=?", (biz,))
+        else:
+            x.execute("""INSERT INTO hr_settings (business_id, non_working_days, napsa_pct, nhima_pct, napsa_bearer, nhima_bearer, holes_per_tray, tray_rate)
+                         VALUES (?, 'saturday,sunday', 5, 1, 'employee', 'employee', 242, 2.5)""", (biz,))
         plot = x.insert("INSERT INTO plots (business_id, department, name, notes, created_at) VALUES (?, 'Greenhouse', 'Alpha Block 7', 'Alpha secret note', ?)", (biz, stamp))
         x.insert("INSERT INTO plot_workers (business_id, plot_id, employee_id) VALUES (?, ?, ?)", (biz, plot, employee["id"]))
         # A sale to deliver today (so the day's delivery list has Alpha's customers on it), with a discounted line
@@ -358,6 +369,25 @@ class BusinessSeparation(unittest.TestCase):
                     before = after
         self.assertEqual(changed, [], "Beta changed Alpha's records:\n" + "\n".join(changed))
         self.assertEqual(crashes, [], "These actions crashed when pointed at another business's records:\n" + "\n".join(crashes))
+
+    def test_3b_beta_cannot_change_who_planted_alphas_trays(self):
+        """The test above sends a believable form, which names an employee Beta does not have, so it never reaches the change itself. Here Beta
+        names its own employee, and then nobody at all (which clears the trays), on Alpha's planting."""
+        self.beta.post("/hr/employees", data={"csrf": csrf_of(self.beta), "full_name": "Beta Planter", "nrc_number": "1", "basic_salary": "10",
+                                              "employment_type": "Casual Worker"})
+        x = db.Database()
+        try:
+            beta_employee = x.one("SELECT id FROM employees WHERE business_id=? AND full_name='Beta Planter'", (self.beta_id,))["id"]
+        finally:
+            x.close()
+        planting = self.alpha_ids("plantings")[0]
+        before = self.snapshot()
+        self.assertTrue(before["planting_trays"], "Alpha has no trays: add some in add_every_other_record so this is tested")
+        for form in ({"planter_id": [str(beta_employee)], "planter_trays": ["5"], "trays_planted": "", "holes_per_tray": ""},
+                     {"trays_planted": "", "holes_per_tray": ""}):
+            response = self.beta.post(f"/planting/{planting}/trays", data=dict(form, csrf=csrf_of(self.beta)))
+            self.assertEqual(response.status_code, 404)
+        self.assertEqual(self.snapshot(), before)
 
     def test_assistant_tools_stay_inside_their_business(self):
         """Beta's admin has Gemini ask every look-up, using Alpha's names to search for, and Alpha's invoice numbers: nothing of Alpha's may come back.

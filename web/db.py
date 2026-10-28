@@ -222,6 +222,13 @@ SCHEMA = [
         last_id INTEGER, expected DOUBLE PRECISION, set_by TEXT, set_at TEXT
     )""",
     "CREATE INDEX IF NOT EXISTS cashbook_by_source ON cashbook (business_id, source, source_id)",
+    # Planting by tray: who planted how many trays of a planting. A planting can have several rows, one per employee. A casual worker is paid
+    # for the trays (see payroll): paid_payslip_id is the payslip that paid a row, so a tray is paid once, and deleting that payslip frees it.
+    # The employee's name is kept with the row, so it still reads right after they are removed.
+    """CREATE TABLE IF NOT EXISTS planting_trays (
+        id {pk}, business_id INTEGER NOT NULL, planting_id INTEGER NOT NULL, employee_id INTEGER, employee_name TEXT NOT NULL,
+        trays DOUBLE PRECISION NOT NULL, paid_payslip_id INTEGER, created_by TEXT, created_at TEXT
+    )""",
     # The assistant (Gemini). Each person's recent conversation with it, so a chat carries on; kept 30 days, or until they start a new chat.
     """CREATE TABLE IF NOT EXISTS assistant_messages (
         id {pk}, business_id INTEGER NOT NULL, user_id INTEGER NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT
@@ -267,6 +274,8 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS invoices_by_delivery ON invoices (business_id, deliver_on)",
     "CREATE INDEX IF NOT EXISTS assistant_messages_by_user ON assistant_messages (business_id, user_id, id)",
     "CREATE INDEX IF NOT EXISTS assistant_actions_by_user ON assistant_actions (business_id, user_id, status)",
+    "CREATE INDEX IF NOT EXISTS planting_trays_by_planting ON planting_trays (business_id, planting_id)",
+    "CREATE INDEX IF NOT EXISTS planting_trays_by_employee ON planting_trays (business_id, employee_id, paid_payslip_id)",
 ]
 
 # --- Postgres connections, kept between requests ---
@@ -478,6 +487,14 @@ def init_schema():
         for column in ("napsa_employee_pct", "napsa_employer_pct", "nhima_employee_pct", "nhima_employer_pct"):
             add_column(db, "hr_settings", column, "DOUBLE PRECISION")
         add_column(db, "hr_settings", "contribution_base", "TEXT")
+        # Planting by tray: how many holes a tray usually has (a planting starts from it) and what a casual worker is paid for each tray planted
+        add_column(db, "hr_settings", "holes_per_tray", "INTEGER")
+        add_column(db, "hr_settings", "tray_rate", "DOUBLE PRECISION")
+        add_column(db, "plantings", "trays", "DOUBLE PRECISION")
+        add_column(db, "plantings", "holes_per_tray", "INTEGER")
+        # A payslip paid by trays keeps how many and at what rate, as it was worked out
+        add_column(db, "payroll", "trays", "DOUBLE PRECISION")
+        add_column(db, "payroll", "tray_rate", "DOUBLE PRECISION")
         db.execute(
             """UPDATE hr_settings SET
                    napsa_employee_pct = CASE WHEN napsa_bearer = 'employee' THEN napsa_pct ELSE 0 END,

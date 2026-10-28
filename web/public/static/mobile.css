@@ -223,3 +223,8 @@ dialog.assistant { z-index: 60; }
 .assistant-head button, .assistant-mic, .assistant-send { min-width: 44px; min-height: 44px; }
 .assistant-form textarea { font-size: 16px; }
 .assistant-card-buttons .btn { min-height: 44px; }
+
+/* Planting trays: the person on a line of their own, then the trays and the remove button */
+.tray-row { flex-wrap: wrap; }
+.tray-row select { flex: 1 1 100%; }
+.tray-row input { flex: 1 1 0; width: auto; min-width: 0; }

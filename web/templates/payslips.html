@@ -15,10 +15,16 @@
 
     <dl>
         <dt>Employee</dt><dd>{{ slip.employee_name }}</dd>
+        {% if slip.trays is not none %}
+        <dt>Trays planted</dt><dd>{{ slip.trays|trays }}</dd>
+        <dt>Pay for each tray</dt><dd>{{ (slip.tray_rate or 0)|money }}</dd>
+        <dt>Basic pay for the trays</dt><dd>{{ slip.calculated_basic|money }}</dd>
+        {% else %}
         <dt>Full basic salary</dt><dd>{{ slip.basic_salary|money }}</dd>
         <dt>Expected work days</dt><dd>{{ '%g'|format(slip.expected_days) }}</dd>
         <dt>Actual days worked</dt><dd>{{ '%g'|format(slip.worked_days) }}</dd>
         <dt>Pro-rata basic pay</dt><dd>{{ slip.calculated_basic|money }}</dd>
+        {% endif %}
     </dl>
 
     <table>

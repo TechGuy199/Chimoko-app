@@ -71,6 +71,28 @@
     </section>
 </div>
 
+{% if tray_owed %}
+<section class="card block">
+    <h2>Trays planted, not yet paid</h2>
+    <p class="muted">Casual workers are paid for the trays they planted{% if tray_rate %}, at {{ tray_rate|money }} each{% endif %}. Trays are added on each planting under Planting Records.
+        {% if not tray_rate %}<strong class="gold">The pay for each tray is not set yet:</strong> <a href="{{ url_for('hr_settings') }}">set it in HR Settings</a>.{% endif %}</p>
+    <div class="table-wrap">
+        <table>
+            <thead><tr><th>Employee</th><th class="num">Trays</th>{% if tray_rate %}<th class="num">Pay at today's rate</th>{% endif %}<th></th></tr></thead>
+            <tbody>
+            {% for w in tray_owed %}
+                <tr>
+                    <td>{{ w.employee_name }}</td><td class="num">{{ w.trays|trays }}</td>
+                    {% if tray_rate %}<td class="num">{{ (w.trays * tray_rate)|money }}</td>{% endif %}
+                    <td class="num"><a class="btn small" href="{{ url_for('new_payslip', employee=w.employee_id) }}">Make payslip</a></td>
+                </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endif %}
+
 <section class="card block">
     <h2>Payroll History</h2>
     <form id="print-form" method="get" action="{{ url_for('payslips') }}" class="toolbar">
@@ -87,8 +109,12 @@
                     <td>{{ p.pay_month|month }}</td>
                     <td>{{ p.employee_name }}</td>
                     <td class="num">{{ p.basic_salary|money }}</td>
+                    {% if p.trays is not none %}
+                    <td class="num" colspan="2">{{ p.trays|trays }} tray{{ 's' if p.trays != 1 }}</td>
+                    {% else %}
                     <td class="num">{{ '%g'|format(p.expected_days) }}</td>
                     <td class="num">{{ '%g'|format(p.worked_days) }}</td>
+                    {% endif %}
                     <td class="num">{{ p.napsa_amt|money }}</td>
                     <td class="num">{{ p.nhima_amt|money }}</td>
                     <td class="num ok">{{ p.net_payable|money }}</td>

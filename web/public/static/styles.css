@@ -486,6 +486,17 @@ a.rank-name:hover { color: var(--accent); }
 fieldset.collection { margin: 10px 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius-small); }
 fieldset.collection legend { padding: 0 6px; color: var(--text-muted); font-size: 12px; }
 fieldset.collection label { margin-bottom: 6px; }
+/* Planting trays: who planted how many */
+.tray-box { margin: 10px 0 14px; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius-small); }
+.tray-box legend { padding: 0 6px; color: var(--text-muted); font-size: 12px; }
+.tray-box .hint { margin: 0 0 10px; }
+.tray-form { margin-top: 14px; }
+.tray-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; }
+.tray-row { display: flex; gap: 8px; align-items: center; }
+.tray-row select { flex: 1 1 auto; min-width: 0; width: auto; margin: 0; }
+.tray-row input { flex: 0 0 96px; width: 96px; margin: 0; }
+.tray-row .btn { flex: none; }
+input[readonly] { opacity: 0.75; }
 .collect-banner { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 10px 18px; margin-bottom: 18px; }
 .collect-banner p { margin: 4px 0 0; }
 .collect-banner .actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-start; }
@@ -865,6 +876,7 @@ dialog.modal::backdrop { background: rgba(0, 0, 0, 0.45); }
 .seedling-fields legend { padding: 0 6px; color: var(--ok-text); font-size: 12px; font-weight: 650; letter-spacing: 0.04em; text-transform: uppercase; }
 .seedling-fields p { margin: 0 0 10px; font-size: 12px; }
 .seedling-summary { padding: 8px 10px; border-radius: var(--radius-small); background: rgba(var(--ink), 0.05); color: var(--text); }
+.seedling-summary:empty { display: none; }
 .seedling-fields small { display: block; margin-top: 3px; white-space: normal; }
 #seeds-row small { display: block; margin-top: 3px; }
 
