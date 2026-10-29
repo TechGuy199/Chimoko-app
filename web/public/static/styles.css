@@ -1138,6 +1138,23 @@ dialog.assistant[open] { display: flex; animation: assistant-in 0.2s var(--ease)
 .assistant-card.cancelled, .assistant-card.expired { border-color: var(--line-strong); background: transparent; opacity: 0.75; }
 .assistant-card-result { margin: 0 0 8px; font-size: 13.5px; font-weight: 600; }
 .assistant-status { margin: 0; padding: 6px 16px; color: var(--text-muted); font-size: 13px; }
+.assistant-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.assistant-listening { display: flex; align-items: center; gap: 8px; margin: 0 12px 4px; padding: 6px 12px; border-radius: 999px; font-size: 13px;
+    color: var(--text-muted); background: rgba(var(--ink), 0.06); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.assistant-listening::before { content: ""; flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%; background: var(--warn-text); }
+.assistant-listening.awake { color: var(--text); background: color-mix(in srgb, var(--primary) 14%, transparent); }
+.assistant-listening.awake::before { background: var(--primary); animation: assistant-pulse 1.2s ease-in-out infinite; }
+.assistant-listening[hidden] { display: none; }
+.msg-note { align-self: flex-start; margin: -4px 0 0 6px; color: var(--text-muted); font-size: 12.5px; }
+.assistant-memory-list { margin: 0 0 10px; padding: 0; list-style: none; display: grid; gap: 6px; font-size: 13.5px; }
+.assistant-memory-list li { display: flex; align-items: center; gap: 8px; }
+.assistant-memory-list li span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.assistant-memory-list small { color: var(--text-muted); white-space: nowrap; }
+.assistant-memory .check { display: flex; gap: 6px; align-items: flex-start; font-size: 13.5px; }
+.assistant-fab.has-brief::after { content: ""; position: absolute; top: 4px; right: 4px; width: 12px; height: 12px; border-radius: 50%; background: var(--warn-text); border: 2px solid var(--surface); }
+.assistant-bubble { position: fixed; z-index: 60; right: 88px; bottom: 30px; max-width: min(260px, calc(100vw - 120px)); padding: 8px 14px; border: 1px solid var(--line);
+    border-radius: 14px; background: var(--surface); color: var(--text); font: 600 13.5px/1.35 var(--font-family); box-shadow: var(--shadow, 0 6px 20px rgba(0, 0, 0, 0.18)); cursor: pointer; text-align: left; }
+.assistant-bubble[hidden] { display: none; }
 .dots::after { content: ""; display: inline-block; width: 1.2em; text-align: left; animation: assistant-dots 1.2s steps(4, end) infinite; }
 @keyframes assistant-dots { 0% { content: ""; } 25% { content: "."; } 50% { content: ".."; } 75% { content: "..."; } }
 .assistant-form { display: flex; align-items: flex-end; gap: 8px; padding: 10px 12px 12px; border-top: 1px solid var(--line); }

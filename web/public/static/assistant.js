@@ -1,6 +1,8 @@
 // The assistant: a button on every page that opens a chat panel (Gemini, run by assistant.py). You can type or speak, send a photo or a PDF
 // (a receipt, a tally of trays), and it can read its answers aloud. When it prepares a change, a card with Confirm and Cancel is shown:
 // nothing happens until Confirm. A message it writes for a customer comes with Copy and Open in WhatsApp; it never sends anything itself.
+// In the evening it gives a brief without being asked. With Listen on (the browser's own speech recognition, not Gemini), saying its name
+// while the panel is open asks a question out loud, and the browser reads the answer aloud.
 // Loaded once (base.html), so the panel stays open while the pages change underneath it.
 (function () {
     "use strict";
@@ -20,6 +22,7 @@
     let reading = 0;              // which reading aloud is current: a newer one, or Stop, makes an older one give up
     let preparing = false;        // the status line says the voice is being made
     let attachment = null;        // the photo or PDF going with the next question: {blob, name, kind}
+    cfg.name = cfg.name || "Assistant";
 
     function keep(key, value) {
         try {
@@ -57,6 +60,8 @@
         again: "M4 12a8 8 0 0 1 14-5.3M20 4v5h-5M20 12a8 8 0 0 1-14 5.3M4 20v-5h5",
         camera: "M4 8h3l2-3h6l2 3h3a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1Zm8 3a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Z",
         today: "M12 3v2m0 14v2M3 12h2m14 0h2M5.6 5.6 7 7m10 10 1.4 1.4m0-12.8L17 7M7 17l-1.4 1.4M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8Z",
+        ear: "M7 10a5 5 0 0 1 10 0c0 3-3 4-3 7a3 3 0 0 1-6 0m2-7a2 2 0 0 1 4 0",
+        memory: "M7 4h10a1 1 0 0 1 1 1v15l-6-4-6 4V5a1 1 0 0 1 1-1Z",
     };
 
     function button(className, label, iconName, handler) {
@@ -130,6 +135,7 @@
         ui.body.appendChild(node);
         (extra && extra.actions || []).forEach(addCard);
         (extra && extra.drafts || []).forEach(addDraft);
+        (extra && extra.notes || []).forEach(function (note) { ui.body.appendChild(el("p", "msg-note", note)); });
         scrollDown();
         return node;
     }
@@ -240,7 +246,9 @@
         });
     }
 
-    function ask(message, voice) {
+    // opts.heard: the question came from listening, so the browser reads the answer aloud and listens for a follow-up
+    function ask(message, voice, opts) {
+        const heard = !!(opts && opts.heard);
         if (busy || (!message.trim() && !attachment)) return;
         busy = true;
         unlock();
@@ -267,11 +275,244 @@
             status("");
             busy = false;
             ui.send.disabled = ui.mic.disabled = ui.photo.disabled = false;
-            if (r.error) { addError(r.error); return; }
+            if (r.error) { addError(r.error); if (heard) speakAloud(r.error); return; }
             if (!r.reply) return;
-            addMessage("assistant", r.reply, { sources: r.sources, actions: r.actions, drafts: r.drafts });
-            if (voice || keep("assistant.speak") === "1") say(r.reply);
+            addMessage("assistant", r.reply, { sources: r.sources, actions: r.actions, drafts: r.drafts, notes: r.notes });
+            if (heard) speakAloud(r.reply);
+            else if (voice || keep("assistant.speak") === "1") say(r.reply);
         });
+    }
+
+    // ---------- The evening brief: given once a day from the brief hour, without being asked ----------
+    function giveBrief() {
+        if (busy) return;
+        busy = true;
+        ui.send.disabled = ui.mic.disabled = ui.photo.disabled = true;
+        status("Writing your evening brief");
+        send(cfg.brief, new FormData()).then(function (r) {
+            status("");
+            busy = false;
+            ui.send.disabled = ui.mic.disabled = ui.photo.disabled = false;
+            briefBadge(false);
+            if (r.error) { if (!/given already/.test(r.error)) addError(r.error); return; }
+            if (!r.reply) return;
+            addMessage("user", "Evening brief");
+            addMessage("assistant", r.reply, { sources: r.sources, actions: r.actions, drafts: r.drafts, notes: r.notes });
+            if (ear) speakAloud(r.reply);
+            else if (keep("assistant.speak") === "1") say(r.reply);
+        });
+    }
+
+    function briefBadge(on) {
+        fab.classList.toggle("has-brief", on);
+        if (bubble) bubble.hidden = !on;
+    }
+
+    // ---------- What it remembers: each note can be forgotten here, and the evening brief switched off for oneself ----------
+    function showMemory() {
+        if (ui.memory && ui.memory.isConnected) { ui.memory.remove(); ui.memory = null; return; }
+        const box = el("section", "assistant-card assistant-memory");
+        ui.memory = box;
+        box.appendChild(el("h3", "", "What " + cfg.name + " remembers"));
+        box.appendChild(el("p", "msg-note", "Opening"));
+        ui.body.appendChild(box);
+        scrollDown();
+        fetch(cfg.memory, { credentials: "same-origin", headers: { Accept: "application/json" } }).then(function (r) { return r.json(); }).then(function (m) {
+            box.replaceChildren(el("h3", "", "What " + cfg.name + " remembers"));
+            if (m.error) { box.appendChild(el("p", "", m.error)); return; }
+            const list = el("ul", "assistant-memory-list");
+            function line(text, label, url, can) {
+                const li = el("li");
+                li.appendChild(el("span", "", text));
+                if (label) li.appendChild(el("small", "", label));
+                if (can) {
+                    const b = el("button", "btn ghost small", "Forget");
+                    b.type = "button";
+                    b.addEventListener("click", function () {
+                        b.disabled = true;
+                        send(url, new FormData()).then(function (r) { if (r.error) { b.disabled = false; addError(r.error); } else li.remove(); });
+                    });
+                    li.appendChild(b);
+                }
+                list.appendChild(li);
+            }
+            m.notes.forEach(function (n) { line(n.note, n.everyone ? "Everyone" : "Just you", cfg.memory + "/" + n.id + "/delete", n.can_delete); });
+            m.stock.forEach(function (s) { line(s.item + ": " + s.setting, "Restocking", cfg.stockPrefs + s.id + "/delete", s.can_delete); });
+            if (list.children.length) box.appendChild(list);
+            else box.appendChild(el("p", "", "Nothing yet. Tell me a preference, like \"keep answers short\" or \"keep six weeks of fertiliser\", and I will offer to remember it."));
+            box.appendChild(el("p", "msg-note", "Stock is bought to last " + m.keep_days + " days, unless an item says otherwise."));
+            const label = el("label", "check");
+            const tick = el("input");
+            tick.type = "checkbox";
+            tick.checked = m.brief.mine;
+            tick.disabled = !m.brief.business;
+            tick.addEventListener("change", function () {
+                const form = new FormData();
+                form.append("on", tick.checked ? "1" : "0");
+                send(cfg.myBrief, form).then(function (r) { if (r.error) addError(r.error); });
+            });
+            label.appendChild(tick);
+            label.appendChild(el("span", "", m.brief.business ? " Give me the evening brief from " + m.brief.hour + ":00" : " The evening brief is switched off for the business (Settings)."));
+            box.appendChild(label);
+            scrollDown();
+        }).catch(function () { box.appendChild(el("p", "", "Could not open it. Check the connection.")); });
+    }
+
+    // ---------- Listening for the name: the browser's own speech recognition (Gemini's voice is not used for it) ----------
+    // While the panel is open and Listen is on, the browser listens. The name, then a question ("Tendai, what is low?") asks it; the name alone
+    // waits a few seconds for the question. The answer is read aloud by the browser, and a follow-up is waited for without the name. While it
+    // is answering, only the name is taken (it stops talking), so its own voice is never taken for a question.
+    const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    const AWAKE_MS = 8000;
+    const LANGS = ["en-US", "en-GB", "en-ZA", "en-KE", "en-NG", "en-IN", "en-AU", "en-CA", "en-IE", "en-NZ", "en-PH", "en-TZ", "en-GH"];
+    const SPEECH_LANG = LANGS.indexOf(navigator.language) >= 0 ? navigator.language : "en-GB";
+    let ear = null;          // {rec, awake, timer, fails, started} while listening
+    let talking = null;      // what the browser is reading aloud, while it is
+    let resumeEar = false;   // listening paused for a recording with the microphone button
+    let chimes = null;
+
+    function plain(text) {
+        return String(text).toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9' ]+/g, " ").replace(/\s+/g, " ").trim();
+    }
+
+    // What was said around the name (a greeting dropped), or null when the name was not said
+    function aroundName(text) {
+        const t = " " + plain(text) + " ", n = " " + plain(cfg.name) + " ";
+        const at = t.indexOf(n);
+        if (at < 0) return null;
+        return (t.slice(0, at) + " " + t.slice(at + n.length)).replace(/^\s*(hey|hi|hello|ok|okay|yes)\b/, "").trim();
+    }
+
+    function chime() {
+        try {
+            if (!chimes) chimes = new (window.AudioContext || window.webkitAudioContext)();
+            const tone = chimes.createOscillator(), gain = chimes.createGain();
+            tone.frequency.value = 880;
+            gain.gain.setValueAtTime(0.08, chimes.currentTime);
+            gain.gain.exponentialRampToValueAtTime(0.001, chimes.currentTime + 0.18);
+            tone.connect(gain);
+            gain.connect(chimes.destination);
+            tone.start();
+            tone.stop(chimes.currentTime + 0.2);
+        } catch (e) { /* no sound: the words on the screen still say it is listening */ }
+    }
+
+    function paintEar() {
+        if (!ui.ear) return;
+        ui.ear.classList.toggle("on", !!ear);
+        ui.ear.setAttribute("aria-pressed", ear ? "true" : "false");
+        ui.listenBar.hidden = !ear;
+        if (ear) ui.listenBar.textContent = ear.awake ? "Listening: say your question" : "Listening for \u201c" + cfg.name + "\u201d";
+        ui.listenBar.classList.toggle("awake", !!(ear && ear.awake));
+    }
+
+    function startListening() {
+        if (!Recognition || ear || recording) return;
+        const rec = new Recognition();
+        rec.continuous = true;
+        rec.interimResults = true;
+        rec.lang = SPEECH_LANG;
+        ear = { rec: rec, awake: false, timer: null, fails: 0, started: 0 };
+        rec.onresult = function (e) { if (ear && ear.rec === rec) hear(e); };
+        rec.onerror = function (e) {
+            if (e.error === "not-allowed" || e.error === "service-not-allowed") {
+                stopListening(false);
+                addError("The microphone is not allowed for this site, so listening is off. Allow it in the browser to use it.");
+            }
+        };
+        rec.onend = function () {
+            if (!ear || ear.rec !== rec) return;
+            // The browser stops now and then (on a phone after every phrase): it is started again while listening is on, unless it keeps failing
+            ear.fails = Date.now() - ear.started < 1500 ? ear.fails + 1 : 0;
+            if (ear.fails >= 5) {
+                stopListening(false);
+                addError("Listening keeps stopping. This browser's speech recognition needs the internet; turn Listen on again to try again.");
+                return;
+            }
+            setTimeout(function () { if (ear && ear.rec === rec) begin(); }, 250);
+        };
+        begin();
+        keep("assistant.listen", "1");
+        if (keep("assistant.listen.told") !== "1") {
+            keep("assistant.listen.told", "1");
+            addMessage("assistant", "Listening is on. Say \u201c" + cfg.name + "\u201d and then your question, and I will answer out loud. While it is on, this browser sends what the " +
+                "microphone hears to its speech service (Google's, in Chrome) to pick out my name. Tap the ear to stop; it also stops when the panel closes.", { plain: true });
+        }
+        paintEar();
+    }
+
+    function begin() {
+        try { ear.started = Date.now(); ear.rec.start(); } catch (e) { /* already listening */ }
+    }
+
+    // keepChoice: paused (panel closed, page hidden, a recording), not switched off, so it starts again next time
+    function stopListening(keepChoice) {
+        const e = ear;
+        ear = null;
+        if (e) {
+            clearTimeout(e.timer);
+            e.rec.onend = null;
+            try { e.rec.abort(); } catch (x) { /* already stopped */ }
+        }
+        if (!keepChoice) keep("assistant.listen", "0");
+        paintEar();
+    }
+
+    function wake() {
+        if (!ear) return;
+        ear.awake = true;
+        clearTimeout(ear.timer);
+        ear.timer = setTimeout(function () { if (ear) { ear.awake = false; paintEar(); } }, AWAKE_MS);
+        chime();
+        paintEar();
+    }
+
+    function hear(e) {
+        let said = "", partly = "";
+        for (let i = e.resultIndex; i < e.results.length; i++) {
+            if (e.results[i].isFinal) said += e.results[i][0].transcript + " ";
+            else partly += e.results[i][0].transcript;
+        }
+        if (ear.awake && partly) ui.listenBar.textContent = "Hearing: " + partly;
+        said = said.trim();
+        if (!said) return;
+        const rest = aroundName(said);
+        if (talking !== null) {
+            if (rest === null || plain(talking).indexOf(plain(cfg.name)) >= 0) return;
+            stopTalking();
+        }
+        if (busy) return;
+        if (rest !== null && rest.split(" ").length >= 2) { question(rest); return; }
+        if (rest !== null) { wake(); return; }
+        if (ear.awake) question(said);
+    }
+
+    function question(text) {
+        ear.awake = false;
+        clearTimeout(ear.timer);
+        paintEar();
+        ask(text.charAt(0).toUpperCase() + text.slice(1), true, { heard: true });
+    }
+
+    // The browser's own voice, a sentence at a time (some browsers stop a long one part way). When it ends, a follow-up is listened for.
+    function speakAloud(text) {
+        if (!window.speechSynthesis) return;
+        const words = String(text).replace(/\*\*/g, "").replace(/^\s*(?:[-*\u2022]|\d+[.)])\s+/gm, "").replace(/https?:\/\/\S+/g, "").replace(/\s+/g, " ").trim().slice(0, 700);
+        if (!words) return;
+        stopTalking();
+        talking = words;
+        const parts = words.match(/[^.!?]+[.!?]*/g) || [words];
+        parts.forEach(function (part, i) {
+            const u = new SpeechSynthesisUtterance(part.trim());
+            u.lang = SPEECH_LANG;
+            if (i === parts.length - 1) u.onend = u.onerror = function () { if (talking === words) { talking = null; wake(); } };
+            window.speechSynthesis.speak(u);
+        });
+    }
+
+    function stopTalking() {
+        talking = null;
+        if (window.speechSynthesis) window.speechSynthesis.cancel();
     }
 
     // ---------- Speaking ----------
@@ -362,6 +603,8 @@
         }
         unlock();
         stopSpeaking();
+        stopTalking();
+        if (ear) { resumeEar = true; stopListening(true); }
         navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } }).then(function (stream) {
             const Context = window.AudioContext || window.webkitAudioContext;
             const context = new Context();
@@ -384,6 +627,7 @@
             status("Listening");
         }).catch(function () {
             addError("The microphone is not allowed or not available. Allow it for this site in the browser, or type instead.");
+            if (resumeEar) { resumeEar = false; startListening(); }
         });
     }
 
@@ -401,6 +645,7 @@
         ui.mic.replaceChildren(icon(ICONS.mic));
         ui.mic.setAttribute("aria-label", "Speak");
         status("");
+        if (resumeEar && panel && panel.open) { resumeEar = false; startListening(); }
         if (!sendIt) return;
         busy = true;
         ui.send.disabled = ui.mic.disabled = true;
@@ -476,10 +721,11 @@
 
     function build() {
         panel = el("dialog", "assistant");
-        panel.setAttribute("aria-label", "Assistant");
+        panel.setAttribute("aria-label", cfg.name);
         panel.dataset.busy = "1";   // dialog.js closes a dialog when its dark backdrop is clicked; a chat panel has none, so a stray click must not close it
         const head = el("header", "assistant-head");
-        head.appendChild(el("strong", "", "Assistant"));
+        ui.title = el("strong", "assistant-title", cfg.name);
+        head.appendChild(ui.title);
         const tools = el("span", "assistant-head-tools");
         ui.speakToggle = button("assistant-toggle", "Read answers aloud", "speaker", function () {
             const on = keep("assistant.speak") !== "1";
@@ -492,10 +738,16 @@
         ui.speakToggle.setAttribute("aria-pressed", on ? "true" : "false");
         ui.speakToggle.classList.toggle("on", on);
         tools.appendChild(ui.speakToggle);
+        if (Recognition) {
+            ui.ear = button("assistant-ear", "Listen for my name", "ear", function () { if (ear) stopListening(false); else { unlock(); startListening(); } });
+            tools.appendChild(ui.ear);
+        }
         tools.appendChild(button("assistant-today", "What needs attention today", "today", function () { ask("What needs my attention today?", false); }));
+        tools.appendChild(button("assistant-memory-button", "What I remember", "memory", showMemory));
         tools.appendChild(button("assistant-new", "Start a new chat", "again", function () {
             if (recording) stopRecording(false);
             stopSpeaking();
+            stopTalking();
             send(cfg.clear, new FormData()).then(function () { ui.body.replaceChildren(); welcome(); });
         }));
         tools.appendChild(button("assistant-close", "Close the assistant", "close", closePanel));
@@ -509,6 +761,10 @@
         ui.status = el("p", "assistant-status");
         ui.status.hidden = true;
         panel.appendChild(ui.status);
+        ui.listenBar = el("p", "assistant-listening");
+        ui.listenBar.setAttribute("role", "status");
+        ui.listenBar.hidden = true;
+        panel.appendChild(ui.listenBar);
 
         // Not a <form>: dialog.js closes any dialog whose form is submitted, which is right for an edit overlay and wrong for a chat
         ui.chip = el("div", "assistant-chip");
@@ -546,9 +802,20 @@
     }
 
     function welcome() {
-        addMessage("assistant", "Hello " + cfg.user + ". Ask me about sales, stock, customers, deliveries or how to do something in the app. I can prepare sales, pre-orders, " +
-            "purchases, plantings and more for you to confirm. Send a photo of a supplier's receipt or a tally of trays planted and I will fill it in for you. " +
-            "The sun button tells you what needs attention today.", { plain: true });
+        addMessage("assistant", "Hello " + cfg.user + ", I am " + cfg.name + ". Ask me about sales, stock, customers, deliveries, what to restock or how to do something in the app. " +
+            "I can prepare sales, pre-orders, purchases, plantings and more for you to confirm. Send a photo of a supplier's receipt or a tally of trays planted and I will fill it in for you. " +
+            "The sun button tells you what needs attention today. Tell me how you like things and I will remember." +
+            (Recognition ? " Tap the ear and you can just say \u201c" + cfg.name + "\u201d and ask." : ""), { plain: true });
+    }
+
+    function setName(name) {
+        if (!name || name === cfg.name) return;
+        cfg.name = name;
+        if (ui.title) ui.title.textContent = name;
+        if (panel) panel.setAttribute("aria-label", name);
+        fab.setAttribute("aria-label", "Ask " + name);
+        fab.title = "Ask " + name;
+        paintEar();
     }
 
     function load() {
@@ -558,10 +825,13 @@
             ready = true;
             if (!s.enabled) { addError("The assistant is switched off for this business." + (s.can_enable ? " You can switch it on in Settings." : " Ask an admin to switch it on.")); return; }
             if (!s.configured) addError("The assistant is not connected to Gemini yet. An admin needs to add the Gemini key on the server.");
+            setName(s.assistant_name);
             if (!s.messages.length && !s.actions.length) welcome();
             s.messages.forEach(function (m) { addMessage(m.role, m.content, { plain: m.role === "assistant" && /^(Confirmed|Tried to confirm|Cancelled):/.test(m.content) }); });
             s.actions.forEach(addCard);
             scrollDown();
+            briefBadge(!!s.brief_due);
+            if (s.brief_due) giveBrief();
         }).catch(function () { status(""); addError("Could not open the assistant. Check the connection and try again."); });
     }
 
@@ -570,21 +840,49 @@
         if (!panel.open) panel.show();
         fab.classList.add("open");
         fab.setAttribute("aria-expanded", "true");
+        if (bubble) bubble.hidden = true;
         if (!ready) load();
+        else if (fab.classList.contains("has-brief")) giveBrief();
+        if (Recognition && keep("assistant.listen") === "1") startListening();
         setTimeout(function () { ui.input.focus(); }, 50);
     }
 
     function closePanel() {
         if (recording) stopRecording(false);
         stopSpeaking();
+        stopTalking();
+        stopListening(true);
         if (panel && panel.open) panel.close();
         fab.classList.remove("open");
         fab.setAttribute("aria-expanded", "false");
     }
 
-    const fab = button("assistant-fab no-print", "Ask the assistant", "chat", function () {
+    const fab = button("assistant-fab no-print", "Ask " + cfg.name, "chat", function () {
         if (panel && panel.open) closePanel(); else openPanel();
     });
     fab.setAttribute("aria-expanded", "false");
     document.documentElement.appendChild(fab);
+
+    // The evening brief waiting: a dot on the button and a note beside it, until the panel is opened
+    let bubble = null;
+    if (cfg.briefWaiting === "1") {
+        bubble = el("button", "assistant-bubble no-print", "Your evening brief from " + cfg.name + " is ready");
+        bubble.type = "button";
+        bubble.addEventListener("click", openPanel);
+        document.documentElement.appendChild(bubble);
+        fab.classList.add("has-brief");
+    }
+
+    // A page hidden (another tab, the phone locked) stops listening; it starts again when the page is back and the panel still open
+    document.addEventListener("visibilitychange", function () {
+        if (document.hidden) { if (ear) stopListening(true); stopTalking(); }
+        else if (panel && panel.open && Recognition && keep("assistant.listen") === "1") startListening();
+    });
+
+    // An alert's link opens the panel (the evening brief's: /?assistant=brief)
+    const asked = new URLSearchParams(location.search).get("assistant");
+    if (asked) {
+        history.replaceState(null, "", location.pathname + location.search.replace(/([?&])assistant=[^&]*&?/, "$1").replace(/[?&]$/, "") + location.hash);
+        openPanel();
+    }
 })();

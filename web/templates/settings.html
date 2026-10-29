@@ -116,7 +116,8 @@
         An assistant that everyone with a login can ask, by typing, by voice or with a photo: it looks things up in the app (sales, stock, customers, accounts...), explains how to do things, says what needs
         attention today and plans plantings. It can prepare sales, pre-orders, payments, delivery changes, purchases (from a photo of a supplier's receipt), plantings with their trays (from a photo of a tray
         tally), tray payslips, stock transfers, supplier payments and money entries, each of which happens only when the person presses Confirm, and it writes reminders for customers that the person sends
-        themselves. It sees only what the person asking could open themselves: an operator never gets accounts, staff pay or supplier details.
+        themselves. It says what to restock and what to watch out for, gives everyone an evening brief, and remembers the preferences people tell it. It sees only what the person asking could open
+        themselves: an operator never gets accounts, staff pay or supplier details.
     </p>
     <p class="muted">
         <strong>It is run by Google's Gemini, so what it looks up (customer names and phone numbers, sales, and for an admin the accounts), and any photo sent to it, is sent to Google to answer.</strong>
@@ -127,6 +128,61 @@
         <label class="check"><input type="checkbox" name="assistant_enabled" {{ 'checked' if user.assistant_enabled == 1 }}> <span><strong>Switch the assistant on</strong> for this business.</span></label>
         <button class="btn primary">Save</button>
     </form>
+
+    <h3 class="spaced">Its name</h3>
+    <form method="post" action="{{ url_for('save_assistant_name') }}" class="toolbar">
+        {{ csrf_field() }}
+        <input name="assistant_name" value="{{ assistant_name if assistant_name != 'Assistant' else '' }}" maxlength="20" placeholder="Assistant" aria-label="The assistant's name" autocomplete="off">
+        <button class="btn primary">Save name</button>
+    </form>
+    <p class="muted">
+        Everyone in the business sees it. With <strong>Listen</strong> on (the ear button in the assistant's panel, in Chrome, Edge or Android), saying the name while the panel is open asks it a question
+        out loud and it answers aloud. While listening is on, the browser sends what the microphone hears to its own speech service (Google's, in Chrome) to pick out the name. Leave the box empty for "Assistant".
+    </p>
+
+    <h3 class="spaced">Evening brief and restocking</h3>
+    <form method="post" action="{{ url_for('save_assistant_brief') }}">
+        {{ csrf_field() }}
+        <label class="check"><input type="checkbox" name="evening_brief" {{ 'checked' if user.evening_brief != 0 }}> <span><strong>Evening brief</strong>: from {{ brief_hour }}:00 each person's assistant tells them what is due tomorrow and what to restock or watch out for, without being asked. Each person can switch theirs off in the panel.</span></label>
+        <label class="check"><input type="checkbox" name="brief_whatsapp" {{ 'checked' if user.brief_whatsapp != 0 }}> <span><strong>A copy by WhatsApp</strong> to the alert number above, once a day between {{ brief_hour }}:00 and {{ brief_hour + 1 }}:00.</span></label>
+        <label class="spaced">Days of stock to keep (the restock advice buys enough for this, plus a week)
+            <input name="stock_cover_days" type="number" min="1" max="365" step="1" value="{{ user.stock_cover_days or 30 }}" required>
+        </label>
+        <button class="btn primary">Save</button>
+    </form>
+    {% if not cron_ready %}
+    <p class="muted"><strong class="warn">The WhatsApp copy is not set up yet</strong>: add CRON_SECRET (any long random text) under Settings &gt; Environment Variables in Vercel, then redeploy. The brief in the panel works without it.</p>
+    {% endif %}
+
+    <h3 class="spaced">What it remembers</h3>
+    {% set business_notes = assistant_memory.notes | selectattr('everyone') | list %}
+    {% if business_notes or assistant_memory.stock %}
+    <table>
+        <tbody>
+        {% for n in business_notes %}
+            <tr>
+                <td>{{ n.note }}</td>
+                <td class="muted">Everyone</td>
+                <td class="num">
+                    <form method="post" action="{{ url_for('assistant_forget_note', memory_id=n.id) }}">{{ csrf_field() }}<button class="btn danger small">Forget</button></form>
+                </td>
+            </tr>
+        {% endfor %}
+        {% for s in assistant_memory.stock %}
+            <tr>
+                <td>{{ s.item }}: {{ s.setting }}</td>
+                <td class="muted">Restocking</td>
+                <td class="num">
+                    <form method="post" action="{{ url_for('assistant_forget_stock', pref_id=s.id) }}">{{ csrf_field() }}<button class="btn danger small">Forget</button></form>
+                </td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="muted">Nothing for the whole business yet. Tell the assistant a preference (for example "keep 6 weeks of fertiliser" or "never suggest buying rakes") and it offers to remember it.</p>
+    {% endif %}
+    <p class="muted">Each person's own preferences are listed in their panel, under the bookmark button.</p>
     {% endif %}
     <div class="rules-summary spaced">
         {% if assistant_info.configured %}

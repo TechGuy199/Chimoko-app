@@ -246,6 +246,17 @@ SCHEMA = [
         id {pk}, business_id INTEGER NOT NULL, user_id INTEGER NOT NULL, kind TEXT NOT NULL, request TEXT NOT NULL, summary TEXT NOT NULL,
         status TEXT NOT NULL DEFAULT 'pending', created_at TEXT, expires_at TEXT, decided_at TEXT, result TEXT DEFAULT '', link TEXT DEFAULT ''
     )""",
+    # What the assistant was asked to remember: a person's own preference (user_id set) or one for the whole business (user_id NULL, only
+    # from an admin). It is part of what the assistant is told with every question; each can be seen and deleted in the panel and in Settings.
+    """CREATE TABLE IF NOT EXISTS assistant_memory (
+        id {pk}, business_id INTEGER NOT NULL, user_id INTEGER, note TEXT NOT NULL, created_by TEXT, created_at TEXT
+    )""",
+    # How the assistant's restock advice treats one item, as an admin told it: days of stock to keep (NULL = the business's), never to
+    # suggest it, or a supplier to buy it from. item_key is "code:" and the item code for stock, or "plant:" and the plant for seedlings.
+    """CREATE TABLE IF NOT EXISTS stock_preferences (
+        id {pk}, business_id INTEGER NOT NULL, item_key TEXT NOT NULL, item_name TEXT NOT NULL, cover_days INTEGER,
+        never_suggest INTEGER NOT NULL DEFAULT 0, supplier TEXT DEFAULT '', set_by TEXT, set_at TEXT, UNIQUE (business_id, item_key)
+    )""",
     # Which version of the start-up work (the schema above, its migrations and the app's one-off repairs) has been run
     "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRIMARY KEY, value TEXT)",
 ]
@@ -276,6 +287,7 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS assistant_actions_by_user ON assistant_actions (business_id, user_id, status)",
     "CREATE INDEX IF NOT EXISTS planting_trays_by_planting ON planting_trays (business_id, planting_id)",
     "CREATE INDEX IF NOT EXISTS planting_trays_by_employee ON planting_trays (business_id, employee_id, paid_payslip_id)",
+    "CREATE INDEX IF NOT EXISTS assistant_memory_by_business ON assistant_memory (business_id, user_id)",
 ]
 
 # --- Postgres connections, kept between requests ---
@@ -482,6 +494,17 @@ def init_schema():
         add_column(db, "businesses", "alert_deliveries", "INTEGER")
         # The assistant is off for a business until one of its admins switches it on (it sends records to Google); 1 = on
         add_column(db, "businesses", "assistant_enabled", "INTEGER")
+        # The assistant's name, chosen by an admin (NULL = "Assistant"); saying it wakes the panel's listening
+        add_column(db, "businesses", "assistant_name", "TEXT")
+        # Restock advice: the days of stock to keep (NULL = 30). The evening brief (NULL counts as on), its WhatsApp copy to the alert
+        # number (NULL counts as on), and the day that copy last went, so it goes once a day
+        add_column(db, "businesses", "stock_cover_days", "INTEGER")
+        add_column(db, "businesses", "evening_brief", "INTEGER")
+        add_column(db, "businesses", "brief_whatsapp", "INTEGER")
+        add_column(db, "businesses", "brief_sent_on", "TEXT")
+        # Each person's own evening brief: switched off (0) or on (NULL), and the day they were last given it
+        add_column(db, "users", "evening_brief", "INTEGER")
+        add_column(db, "users", "brief_day", "TEXT")
         # Statutory rules became separate employee and employer rates. Settings saved under the old
         # "one rate, paid by one side" rule keep exactly the same effect.
         for column in ("napsa_employee_pct", "napsa_employer_pct", "nhima_employee_pct", "nhima_employer_pct"):

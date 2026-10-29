@@ -236,14 +236,7 @@ def load_user_and_check_csrf():
     sweep_expired_demos()
     uid = session.get("uid")
     if uid:
-        g.user = get_db().one(
-            """SELECT u.id, u.business_id, u.username, u.role, u.can_sell, u.can_procure, u.can_transfer, u.can_delete, u.theme, u.glass,
-                      b.name AS business_name, b.subtitle, b.contact, b.currency, b.low_stock_threshold,
-                      b.alert_phone, b.alert_low_stock, b.alert_permission, b.alert_preorders, b.alert_collections, b.alert_deliveries, b.preorder_remind_days,
-                      b.backup_hour, b.last_backup_at, b.last_backup_by, b.demo_expires_at, b.assistant_enabled
-               FROM users u JOIN businesses b ON b.id = u.business_id WHERE u.id=?""",
-            (uid,),
-        )
+        g.user = user_row(get_db(), uid)
         if g.user is None:
             session.clear()
         elif g.user["demo_expires_at"] and g.user["demo_expires_at"] <= now().strftime("%Y-%m-%d %H:%M:%S"):
@@ -251,6 +244,20 @@ def load_user_and_check_csrf():
             session.clear()
             g.user = None
             flash("Your 24-hour demo has ended. The demo company, its sample data and its login have been deleted.", "notice")
+
+
+def user_row(db, uid):
+    """A login with its business's settings: what g.user holds while they are signed in."""
+    return db.one(
+        """SELECT u.id, u.business_id, u.username, u.role, u.can_sell, u.can_procure, u.can_transfer, u.can_delete, u.theme, u.glass,
+                  u.evening_brief AS my_brief, u.brief_day,
+                  b.name AS business_name, b.subtitle, b.contact, b.currency, b.low_stock_threshold,
+                  b.alert_phone, b.alert_low_stock, b.alert_permission, b.alert_preorders, b.alert_collections, b.alert_deliveries, b.preorder_remind_days,
+                  b.backup_hour, b.last_backup_at, b.last_backup_by, b.demo_expires_at, b.assistant_enabled,
+                  b.assistant_name, b.stock_cover_days, b.evening_brief, b.brief_whatsapp
+           FROM users u JOIN businesses b ON b.id = u.business_id WHERE u.id=?""",
+        (uid,),
+    )
 
 
 def can(perm):
@@ -282,6 +289,8 @@ def template_globals():
     return {
         "csrf_field": csrf_field, "user": g.get("user"), "can": can, "look": appearance_of(g.get("user")), "themes": THEMES,
         "asset": asset, "csrf_token": csrf_token, "inv_link": inv_link, "assistant_on": assistant.enabled_for(g.get("user")),
+        "assistant_name": assistant.name_of(g.user) if g.get("user") else assistant.DEFAULT_NAME,
+        "brief_waiting": bool(g.get("user")) and assistant.brief_due(g.user),
     }
 
 
@@ -10232,6 +10241,7 @@ def settings():
     return render_template(
         "settings.html", departments=departments, whatsapp=whatsapp_service(),
         assistant_info={"configured": assistant.configured(), "usage": assistant.usage_today(db, g.user), "limits": assistant.limits(g.user), "model": assistant.MODEL},
+        assistant_memory=assistant.memory_of(db, g.user), brief_hour=assistant.BRIEF_HOUR, cron_ready=bool(os.environ.get("CRON_SECRET")),
     )
 
 
@@ -10551,6 +10561,130 @@ def assistant_cancel(action_id):
 def assistant_clear():
     assistant.clear(get_db(), g.user)
     return jsonify({"ok": True})
+
+
+@app.post("/assistant/brief")
+@need(None)
+def assistant_brief():
+    return assistant_json(lambda: assistant.give_brief(get_db(), g.user))
+
+
+@app.get("/assistant/memory")
+@need(None)
+def assistant_memory():
+    return assistant_json(lambda: assistant.memory_of(get_db(), g.user))
+
+
+def memory_reply(work, done):
+    """The panel asks for JSON; the Settings page posts a form and goes back to Settings."""
+    if request.headers.get("Accept", "").startswith("application/json"):
+        return assistant_json(work)
+    try:
+        work()
+        flash(done, "ok")
+    except assistant.Refused as e:
+        flash(e.message, "error")
+    return redirect(url_for("settings") + "#assistant")
+
+
+@app.post("/assistant/memory/<int:memory_id>/delete")
+@need(None)
+def assistant_forget_note(memory_id):
+    return memory_reply(lambda: assistant.delete_memory(get_db(), g.user, memory_id), "The assistant has forgotten it.")
+
+
+@app.post("/assistant/stock-preferences/<int:pref_id>/delete")
+@need(None)
+def assistant_forget_stock(pref_id):
+    return memory_reply(lambda: assistant.delete_stock_preference(get_db(), g.user, pref_id), "That restock setting was removed.")
+
+
+@app.post("/assistant/my-brief")
+@need(None)
+def assistant_my_brief():
+    db = get_db()
+    on = request.form.get("on") == "1"
+    db.execute("UPDATE users SET evening_brief=? WHERE id=?", (None if on else 0, g.user["id"]))
+    db.commit()
+    return jsonify({"ok": True, "on": on})
+
+
+@app.post("/settings/assistant/name")
+@need("admin")
+def save_assistant_name():
+    db = get_db()
+    name, problem = assistant.name_check(request.form.get("assistant_name", ""))
+    if problem:
+        flash(problem, "error")
+    else:
+        db.execute("UPDATE businesses SET assistant_name=? WHERE id=?", (None if name == assistant.DEFAULT_NAME else name, g.user["business_id"]))
+        db.commit()
+        flash(f"The assistant is now called {name}, for everyone in the business. With listening on in its panel, saying the name asks it a question.", "ok")
+    return redirect(url_for("settings") + "#assistant")
+
+
+@app.post("/settings/assistant/brief")
+@need("admin")
+def save_assistant_brief():
+    db = get_db()
+    try:
+        keep = number("stock_cover_days", int, 30)
+    except ValueError:
+        keep = 0
+    if not 1 <= keep <= 365:
+        flash("Days of stock to keep must be a whole number from 1 to 365.", "error")
+        return redirect(url_for("settings") + "#assistant")
+    db.execute(
+        "UPDATE businesses SET evening_brief=?, brief_whatsapp=?, stock_cover_days=? WHERE id=?",
+        (1 if request.form.get("evening_brief") else 0, 1 if request.form.get("brief_whatsapp") else 0, keep, g.user["business_id"]),
+    )
+    db.commit()
+    flash("Assistant settings saved.", "ok")
+    return redirect(url_for("settings") + "#assistant")
+
+
+# Once a day (vercel.json, at about the brief hour) Vercel calls this with the CRON_SECRET it was given. Each business with the assistant and
+# the evening brief on gets, once that day: an alert for each person that their brief is waiting in the panel, and the app's short version
+# of it by WhatsApp to the alert number in Settings (unless that copy is switched off).
+@app.get("/cron/evening-brief")
+def cron_evening_brief():
+    secret = os.environ.get("CRON_SECRET", "")
+    if not secret:
+        return jsonify({"error": "CRON_SECRET is not set on the server."}), 503
+    if not hmac.compare_digest(request.headers.get("Authorization", "").encode("utf-8"), f"Bearer {secret}".encode("utf-8")):
+        abort(401)
+    db, today, stamp, done = get_db(), today_str(), now().strftime("%Y-%m-%d %H:%M:%S"), 0
+    for b in db.all("SELECT id, name, alert_phone, brief_whatsapp FROM businesses WHERE assistant_enabled=1 AND demo_expires_at IS NULL AND COALESCE(evening_brief, 1) <> 0"):
+        # Taken first, so a second call the same day (Vercel can repeat one) sends nothing twice
+        if db.execute("UPDATE businesses SET brief_sent_on=? WHERE id=? AND (brief_sent_on IS NULL OR brief_sent_on <> ?)", (today, b["id"], today)).rowcount != 1:
+            db.commit()
+            continue
+        db.commit()
+        users = [u for u in (user_row(db, r["id"]) for r in db.all("SELECT id FROM users WHERE business_id=? ORDER BY id", (b["id"],))) if u and assistant.brief_on(u)]
+        if not users:
+            continue
+        name, sent = assistant.name_of(users[0]), {}
+        for u in users:
+            sent[u["id"]] = db.insert(
+                "INSERT INTO notifications (business_id, for_user_id, kind, title, body, link, created_at) VALUES (?, ?, 'brief', ?, ?, ?, ?)",
+                (b["id"], u["id"], f"Evening brief from {name}", "What is due tomorrow, and what to restock or watch out for. Open it to read it.",
+                 url_for("pos", assistant="brief"), stamp),
+            )
+        db.commit()
+        done += 1
+        admin = next((u for u in users if u["role"] == "admin"), None)
+        if b["brief_whatsapp"] == 0 or not b["alert_phone"] or admin is None:
+            continue
+        try:
+            text = assistant.brief_text(db, admin, one_line=True)
+        except Exception:
+            app.logger.exception("The evening brief for business %s could not be written", b["id"])
+            db.rollback()
+            continue
+        status, detail = send_whatsapp(b["alert_phone"], f"{b['name']}: {text}")
+        db.execute("UPDATE notifications SET wa_status=?, wa_error=? WHERE id=?", (status, detail, sent[admin["id"]]))
+        db.commit()
+    return jsonify({"businesses": done})
 
 
 @app.post("/settings/assistant")

@@ -39,7 +39,7 @@ PARAM_TABLES = {
     "purchase_id": "procurements", "planting_id": "plantings", "employee_id": "employees", "payslip_id": "payroll",
     "pos_id": "pos_products", "po_id": "preorders", "request_id": "permission_requests", "notification_id": "notifications",
     "payment_id": "supplier_payments", "category_id": "categories", "dept_id": "departments", "plot_id": "plots",
-    "op_id": "users", "admin_id": "users", "action_id": "assistant_actions",
+    "op_id": "users", "admin_id": "users", "action_id": "assistant_actions", "memory_id": "assistant_memory", "pref_id": "stock_preferences",
 }
 # "entry_id" means a different table on different pages
 ENTRY_TABLES = {"assign_account_entry": "cashbook", "delete_account_entry": "cashbook", "delete_activity": "activities"}
@@ -197,6 +197,10 @@ class BusinessSeparation(unittest.TestCase):
         x.insert("""INSERT INTO assistant_actions (business_id, user_id, kind, request, summary, status, created_at, expires_at)
                     VALUES (?, ?, 'handover', ?, '{"title": "Alpha secret note", "rows": [["Alpha secret note", "x"]]}', 'pending', ?, '2999-01-01 00:00:00')""",
                  (biz, alpha_user, '{"path": "/invoices/1/delivered", "form": {}, "perm": "sell"}', stamp))
+        # What Alpha's assistant remembers (a note for the whole business, and a restock setting): Beta must not read or forget either
+        x.insert("INSERT INTO assistant_memory (business_id, user_id, note, created_by, created_at) VALUES (?, NULL, 'Alpha secret note', 'alphaowner', ?)", (biz, stamp))
+        x.insert("""INSERT INTO stock_preferences (business_id, item_key, item_name, cover_days, never_suggest, supplier, set_by, set_at)
+                    VALUES (?, 'code:ALPHA', 'Alpha secret note', 40, 0, '', 'alphaowner', ?)""", (biz, stamp))
         # Who planted how many trays of a planting, and what Alpha pays for a tray: Beta must not read, change or pay either
         x.insert("""INSERT INTO planting_trays (business_id, planting_id, employee_id, employee_name, trays, created_by, created_at)
                     VALUES (?, ?, ?, ?, 12, 'alphaowner', ?)""", (biz, planting["id"], employee["id"], employee["full_name"], stamp))

@@ -1,6 +1,7 @@
 """What the assistant (assistant.py) may do, as tools Gemini can choose from.
 
-Every tool is read-only, except the prepare_* ones, which only write a card for the person to confirm. A tool never sees more than the signed-in
+Every tool is read-only, except the prepare_* ones, which only write a card for the person to confirm, and the ones that save what the person
+asked to be remembered (the assistant's own memory, shown to them as it is saved). A tool never sees more than the signed-in
 person could open in the app: each query is scoped to their business (ctx.biz), and a tool for an admin-only part of the app (admin=True) is
 not even offered to an operator. Lists are capped, text from the records is shortened, and links are made here, never by Gemini.
 """
@@ -8,7 +9,7 @@ import datetime
 import json
 import math
 
-from assistant import H, ToolError, clip, tool
+from assistant import H, ToolError, clip, name_check, tool
 
 # ---------- Descriptions of what a tool takes (kept terse: every call to the model carries all of them) ----------
 def S(description=None):
@@ -554,9 +555,12 @@ GUIDE = {
     "reports": "Reports: sales, purchases and profit by department and period.",
     "staff": "Staff (admins): employees, payroll, payslips with NAPSA and NHIMA, and statements. Daily Activities records the work done in each plot. A casual worker can be paid for the trays they planted: set the pay for a tray under HR > Settings, then Compute Payslip.",
     "alerts": "Alerts come in the app and optionally by WhatsApp (Settings): low stock, pre-orders and collections due, deliveries due, and requests for admin permission.",
-    "assistant": "The assistant (this chat) can look things up, explain the app, say what needs attention today (the sun button) and plan plantings. It prepares sales, pre-orders, payments, "
-                 "delivery changes, purchases, plantings with trays, tray payslips, stock transfers, supplier payments and money entries for you to confirm; nothing is done until you press Confirm. "
-                 "The camera button sends a photo or PDF: a supplier's receipt becomes a purchase, a tally of trays a planting. It writes customer reminders for you to copy or open in WhatsApp.",
+    "assistant": "The assistant (this chat) can look things up, explain the app, say what needs attention today (the sun button), what to restock and what to watch out for, and plan plantings. "
+                 "It prepares sales, pre-orders, payments, delivery changes, purchases, plantings with trays, tray payslips, stock transfers, supplier payments and money entries for you to confirm; "
+                 "nothing is done until you press Confirm. The camera button sends a photo or PDF: a supplier's receipt becomes a purchase, a tally of trays a planting. It writes customer "
+                 "reminders for you to copy or open in WhatsApp. Tell it a preference and it remembers it (the bookmark button lists what it remembers, to delete any). Every evening it "
+                 "gives a brief of tomorrow and of what to restock. An admin can give it a name (Settings); with the ear button on, saying the name while the panel is open asks it a question "
+                 "out loud, hands-free.",
 }
 
 
@@ -1294,9 +1298,11 @@ def prepare_money_entry(ctx, args):
 
 
 # ================= The day, the planting planner, and messages to customers =================
-@tool("What needs attention today: deliveries and collections due, pre-orders to collect, batches ready, low stock, and for admins money owed and trays to pay. For 'what should I do today?'.")
+@tool("What needs attention today (or by tomorrow): deliveries and collections due, pre-orders to collect, batches ready, low stock, and for admins money owed and trays to pay.",
+      {"day": E("today", "tomorrow")})
 def attention_today(ctx, args):
-    db, biz, today, user = ctx.db, ctx.biz, ctx.today, ctx.user
+    db, biz, user = ctx.db, ctx.biz, ctx.user
+    today = H.add_days(ctx.today, 1) if args.get("day") == "tomorrow" else ctx.today   # everything due by then, and anything overdue
     soon = H.add_days(today, 2)
 
     def handovers(column, done):
@@ -1305,7 +1311,7 @@ def attention_today(ctx, args):
                 AND {done} IS NULL AND COALESCE(payment_status, '') <> 'Cancelled' ORDER BY {column}, id LIMIT 8""",
             (biz, today),
         )
-        return [{"invoice": r["invoice_no"], "customer": clip(r["customer_name"], 50), "overdue": r["day"] < today} for r in rows]
+        return [{"invoice": r["invoice_no"], "customer": clip(r["customer_name"], 50), "on": r["day"], "overdue": r["day"] < ctx.today} for r in rows]
 
     collect = db.all(
         """SELECT po.customer_name, po.qty, po.collect_on, p.name AS plant FROM preorders po JOIN plantings p ON p.id = po.planting_id
@@ -1318,7 +1324,7 @@ def attention_today(ctx, args):
     threshold = user["low_stock_threshold"]
     low = db.all("SELECT name, quantity FROM pos_products WHERE business_id=? AND quantity < ? ORDER BY quantity, name LIMIT 8", (biz, threshold))
     out = {
-        "today": today, "deliveries_due": handovers("deliver_on", "delivered_at"), "collections_due": handovers("collect_on", "collected_at"),
+        "due_by": today, "deliveries_due": handovers("deliver_on", "delivered_at"), "collections_due": handovers("collect_on", "collected_at"),
         "preorders_to_collect_by": {"until": soon, "list": [{"customer": clip(r["customer_name"], 50), "qty": r["qty"], "plant": clip(r["plant"], 50), "on": r["collect_on"]} for r in collect]},
         "batches_ready": [{"batch": f["label"], "free": f["available"], "preordered": f["pending"]} for f in ready[:8]],
         "batches_ready_within_a_week": [{"batch": f["label"], "in_days": f["days"]} for f in coming[:8]],
@@ -1416,3 +1422,406 @@ def draft_message(ctx, args):
     ctx.draft(f"Message to {clip(name, 60)}", text, phone)
     return {"drafted": True, "to": name, "phone": phone or None,
             "say": "Say the message is ready below to copy or open in WhatsApp" + ("" if phone else " (no phone number is recorded, so it can only be copied)") + ". Nothing was sent."}
+
+
+# ================= Restock advice and what to watch out for =================
+# Worked out here, not by the model, so the numbers are the same every time and match the records. The model explains them.
+WATCH_DAYS = 90          # the sales and use looked at to see how fast something goes
+MIN_HISTORY = 14         # days of records needed before that speed is trusted
+DEFAULT_COVER = 30       # days of stock to keep, unless the business or the item says otherwise
+SPARE_DAYS = 7           # bought on top of those days: the time it takes to buy again
+SHELF_DAYS = 7           # a POS shelf with less than this left is filled from the store (to last twice as long)
+SEEDLING_MARK = "-SDL"   # in the POS code of seedlings (a planting's, or seed sown straight from the inventory)
+
+
+def days_between(first, last):
+    return (datetime.date.fromisoformat(last[:10]) - datetime.date.fromisoformat(first[:10])).days
+
+
+def per_day(used90, used30, history):
+    """Units a day. With a month of records or more, the average of the last 30 days and the whole period, so a change shows soon
+    but one busy week does not decide it."""
+    if history >= 30:
+        return (used30 / 30 + used90 / min(history, WATCH_DAYS)) / 2
+    return used90 / max(history, 1)
+
+
+def stock_preferences_of(ctx):
+    return {r["item_key"]: r for r in ctx.db.all("SELECT * FROM stock_preferences WHERE business_id=?", (ctx.biz,))}
+
+
+def bought_line(last):
+    return {"from": clip(last["supplier_name"], 50), "on": last["purchase_date"], "unit_cost": r2(last["unit_cost"])} if last else None
+
+
+def stock_report(ctx, focus="all", only="", limit=6):
+    """The restock advice and the warnings, as stock_watch gives them (the evening brief uses it too)."""
+    db, biz, today = ctx.db, ctx.biz, ctx.today
+    since90, since60, since30 = (H.add_days(today, -n) for n in (WATCH_DAYS, 60, 30))
+    prefs = stock_preferences_of(ctx)
+    keep_days = ctx.user["stock_cover_days"] or DEFAULT_COVER
+    wanted = (only or "").lower()
+
+    def chosen(name, code=""):
+        return not wanted or wanted in (name or "").lower() or wanted.upper() == (code or "")
+
+    # What went out: sales and farm use, by item code (seedlings' codes too: their plants are worked out below)
+    used = {r["code"]: r for r in db.all(
+        """SELECT ii.item_code AS code, MIN(i.created_at) AS first, MAX(i.created_at) AS last,
+                  SUM(CASE WHEN i.created_at >= ? THEN ii.qty ELSE 0 END) AS used90, SUM(CASE WHEN i.created_at >= ? THEN ii.qty ELSE 0 END) AS used30,
+                  SUM(CASE WHEN i.created_at >= ? AND i.kind = 'SALE' THEN ii.qty ELSE 0 END) AS sold30
+           FROM invoice_items ii JOIN invoices i ON i.id = ii.invoice_id
+           WHERE ii.business_id=? AND i.kind IN ('SALE', 'FARM_USE') AND COALESCE(i.payment_status, '') <> 'Cancelled' GROUP BY ii.item_code""",
+        (since90, since30, since30, biz))}
+    # Seed is used by planting it: counted in seeds, from plantings that took it from the inventory and from seed sown straight to the POS
+    sown = {}
+    for r in db.all("SELECT seed_item_id AS id, planted_on AS day, seeds_planted AS seeds FROM plantings WHERE business_id=? AND seed_item_id IS NOT NULL AND source='inventory'", (biz,)) \
+            + db.all("SELECT seed_item_id AS id, created_at AS day, seeds_sown AS seeds FROM seedling_batches WHERE business_id=? AND seed_item_id IS NOT NULL", (biz,)):
+        if not r["day"]:
+            continue
+        s = sown.setdefault(r["id"], {"first": r["day"], "last": r["day"], "used90": 0, "used30": 0})
+        s["first"], s["last"] = min(s["first"], r["day"]), max(s["last"], r["day"])
+        s["used90"] += r["seeds"] if r["day"] >= since90 else 0
+        s["used30"] += r["seeds"] if r["day"] >= since30 else 0
+    bought = {}
+    for r in db.all("SELECT item_code, supplier_name, purchase_date, unit_cost FROM procurements WHERE business_id=? AND item_code IS NOT NULL ORDER BY purchase_date, id", (biz,)):
+        bought.setdefault(r["item_code"], []).append(r)
+    store = {r["item_code"]: r for r in db.all(
+        "SELECT id, item_code, name, category, quantity, unit_cost, price, purchase_date, expiry_date, seeds_per_pack, loose_seeds, unit FROM products WHERE business_id=?", (biz,))}
+    shelf = {r["item_code"]: r for r in db.all("SELECT item_code, name, category, quantity, price FROM pos_products WHERE business_id=?", (biz,))
+             if SEEDLING_MARK not in (r["item_code"] or "") and (r["category"] or "") != "Seedlings"}
+
+    buy, move, plant, watch, unsure, skipped = [], [], [], [], [], 0
+    for code in sorted(set(store) | set(shelf)):
+        p, s = store.get(code), shelf.get(code)
+        name = (p or s)["name"]
+        if not chosen(name, code):
+            continue
+        pref = prefs.get("code:" + code)
+        seed = bool(p) and H.is_seed_category(p["category"]) and bool(p["seeds_per_pack"])
+        u, sw = used.get(code), (sown.get(p["id"]) if p else None)
+        in_store, on_shelf = (p["quantity"] if p else 0) or 0, (s["quantity"] if s else 0) or 0
+        buys = bought.get(code, [])
+        last = buys[-1] if buys else None
+        cost = (last["unit_cost"] if last else 0) or (p["unit_cost"] if p else 0) or 0
+        if seed:   # worked out in seeds, shown in packs
+            size = p["seeds_per_pack"]
+            total = in_store * size + (p["loose_seeds"] or 0)
+            used90 = (sw or {}).get("used90", 0) + ((u["used90"] or 0) if u else 0) * size
+            used30 = (sw or {}).get("used30", 0) + ((u["used30"] or 0) if u else 0) * size
+        else:
+            size, total = 1, in_store + on_shelf
+            used90, used30 = ((u["used90"] or 0) if u else 0), ((u["used30"] or 0) if u else 0)
+        firsts = [x for x in ((u or {}).get("first"), (sw or {}).get("first"), buys[0]["purchase_date"] if buys else None, p["purchase_date"] if p else None) if x]
+        history = min(WATCH_DAYS, days_between(min(firsts), today)) if firsts else 0
+        lasts = [x for x in ((u or {}).get("last"), (sw or {}).get("last")) if x]
+        rate = per_day(used90, used30, history) if used90 else 0
+        unit = "packs" if seed else ((p["unit"] if p else "") or "units")
+        never = bool(pref and pref["never_suggest"])
+        skipped += never
+
+        # ----- running low: what to buy -----
+        if rate > 0 and not never and focus != "watch":
+            if history < MIN_HISTORY:
+                if total / rate < keep_days:
+                    unsure.append({"item": clip(name, 60), "why": f"only {history} days of records, too soon to say how fast it goes; ask how much they want to keep"})
+            else:
+                target = pref["cover_days"] if pref and pref["cover_days"] else keep_days
+                days_left = total / rate
+                if days_left < target:
+                    need = math.ceil((rate * (target + SPARE_DAYS) - total) / size - 1e-9)
+                    if need > 0:
+                        buy.append({
+                            "item": clip(name, 60), "code": code, "have": round(total / size, 1) if seed else total, "unit": unit,
+                            "in_store": in_store if s else None, "on_pos": on_shelf if s else None,
+                            "use_per_day": round(rate / size, 2), "days_left": int(days_left), "runs_out_about": H.add_days(today, int(days_left)),
+                            "buy": need, "for_days": target, "about": r2(need * cost) if cost else None, "last_bought": bought_line(last),
+                            "buy_from": (pref["supplier"] or None) if pref else None,
+                            "urgency": "now" if days_left < 7 else ("soon" if days_left < 14 else "this month"),
+                        })
+            # ----- a POS shelf running low while the store has some: move it, do not buy it -----
+            if s and p and in_store > 0 and not seed and u and history >= MIN_HISTORY:
+                pos_rate = (u["sold30"] or 0) / min(30, history)
+                if pos_rate > 0 and on_shelf / pos_rate < SHELF_DAYS:
+                    qty = min(in_store, math.ceil(pos_rate * SHELF_DAYS * 2) - on_shelf)
+                    if qty > 0:
+                        move.append({"item": clip(name, 60), "code": code, "on_pos": on_shelf, "in_store": in_store, "pos_days_left": int(on_shelf / pos_rate), "move": qty})
+        if focus == "restock":
+            continue
+
+        # ----- watch out -----
+        expires = p["expiry_date"] if p else None
+        if expires and H.day_or_none(expires) and total > 0:
+            left_days = days_between(today, expires)
+            if left_days < 0:
+                watch.append({"type": "expired", "item": clip(name, 60), "expired_on": expires, "in_stock": round(total / size, 1) if seed else total})
+            elif left_days <= 30:
+                likely = math.ceil((total - rate * left_days) / size - 1e-9)
+                if likely > 0:
+                    watch.append({"type": "expiring", "item": clip(name, 60), "expires": expires, "in_stock": round(total / size, 1) if seed else total,
+                                  "likely_left_then": likely, "unit": unit})
+        if total > 0 and not never and firsts and min(firsts) < since60 and (not lasts or max(lasts) < since60):
+            watch.append({"type": "not_selling", "item": clip(name, 60), "in_stock": round(total / size, 1) if seed else total, "unit": unit,
+                          "last_sold_or_used": max(lasts)[:10] if lasts else None, "tied_up": r2(total / size * cost) if cost else None})
+        if len(buys) >= 2 and buys[-1]["purchase_date"] and buys[-1]["purchase_date"] >= since90:
+            before = [b["unit_cost"] for b in buys[-4:-1] if b["unit_cost"]]
+            was = sum(before) / len(before) if before else 0
+            if was > 0 and buys[-1]["unit_cost"] >= was * 1.10:
+                watch.append({"type": "price_up", "item": clip(name, 60), "now": r2(buys[-1]["unit_cost"]), "before": r2(was),
+                              "up_pct": round((buys[-1]["unit_cost"] - was) / was * 100), "supplier": clip(buys[-1]["supplier_name"], 50), "on": buys[-1]["purchase_date"]})
+        price = (s["price"] if s else 0) or (p["price"] if p else 0) or 0
+        if not seed and cost > 0 and price > 0 and (total > 0 or rate > 0):
+            if price <= cost:
+                watch.append({"type": "below_cost", "item": clip(name, 60), "price": r2(price), "cost": r2(cost)})
+            elif (price - cost) / price < 0.10:
+                watch.append({"type": "thin_margin", "item": clip(name, 60), "price": r2(price), "cost": r2(cost), "margin_pct": round((price - cost) / price * 100, 1)})
+
+    # ----- seedlings: planted, not bought, so the time they take to grow counts -----
+    batches = H.with_figures(db, biz, db.all("SELECT * FROM plantings WHERE business_id=? ORDER BY planted_on, id", (biz,)))
+    plants = {}
+    for b in batches:
+        plants.setdefault(" ".join((b["name"] or "").lower().split()), []).append(b)
+    holes_usual = H.hr_settings_for(db, biz)["holes_per_tray"] or None
+    for key, group in sorted(plants.items()):
+        name = group[-1]["name"]
+        if not key or not chosen(name):
+            continue
+        live = [b for b in group if b["still_in_greenhouse"]]
+        if focus != "restock":
+            for b in live:
+                over = b["pending"] + b["sold"] - b["seedlings"]
+                if over > 0:
+                    watch.append({"type": "overbooked", "item": b["label"], "seedlings": b["seedlings"], "sold": b["sold"], "preordered": b["pending"], "short_by": over})
+        if focus == "watch":
+            continue
+        pref = prefs.get("plant:" + key)
+        if pref and pref["never_suggest"]:
+            skipped += 1
+            continue
+        sales = [used[b["pos_code"]] for b in group if b["pos_code"] in used]
+        used90 = sum(r["used90"] or 0 for r in sales)
+        if not used90:
+            continue
+        used30 = sum(r["used30"] or 0 for r in sales)
+        # Counted from the first sale: a batch cannot sell before it is ready, so the growing weeks are not days of no demand
+        history = min(WATCH_DAYS, days_between(min(r["first"] for r in sales), today))
+        if history < MIN_HISTORY:
+            unsure.append({"item": clip(name, 60) + " seedlings", "why": f"only {history} days of records; ask how many they sell"})
+            continue
+        rate = per_day(used90, used30, history)
+        free = sum(b["available"] for b in live)
+        recent = group[-10:]
+        spans = [days_between(b["planted_on"], b["ready_on"]) for b in recent if H.day_or_none(b["planted_on"] or "") and H.day_or_none(b["ready_on"] or "")]
+        grow = round(sum(spans) / len(spans)) if spans else None
+        target = pref["cover_days"] if pref and pref["cover_days"] else keep_days
+        need = rate * ((grow or 0) + target) - free
+        if need < 1:
+            continue
+        mortality = sum(b["mortality_pct"] or 0 for b in recent) / len(recent)
+        seedlings = math.ceil(need - 1e-9)
+        seeds = math.ceil(seedlings / (1 - min(mortality, 95) / 100) - 1e-9)
+        lasts_days = free / rate
+        holes = holes_usual or next((b["holes_per_tray"] for b in reversed(group) if b["holes_per_tray"]), None)
+        entry = {
+            "plant": clip(name, 60), "sell_per_day": round(rate, 1), "free_seedlings_now": free, "free_last_days": int(lasts_days),
+            "grow_days": grow, "plant_by": H.add_days(today, max(0, int(lasts_days - (grow or 0)))), "late": bool(grow) and lasts_days < grow,
+            "plant_seedlings": seedlings, "for_days": target, "mortality_pct": round(mortality, 1), "seeds": seeds,
+            "trays": math.ceil(seeds / holes - 1e-9) if holes else None, "holes_per_tray": holes,
+        }
+        if grow is None:
+            entry["note"] = "no growing time recorded yet: ask how long it takes"
+        seed_items = {b["seed_item_id"] for b in group if b["seed_item_id"]}
+        stock = [r for r in store.values() if r["id"] in seed_items and r["seeds_per_pack"]]
+        if stock:
+            have = sum((r["quantity"] or 0) * r["seeds_per_pack"] + (r["loose_seeds"] or 0) for r in stock)
+            entry["seed_in_stock"] = have
+            if have < seeds:
+                r = stock[0]
+                packs = math.ceil((seeds - have) / r["seeds_per_pack"] - 1e-9)
+                entry["seed_short_packs"] = packs
+                same = next((x for x in buy if x["code"] == r["item_code"]), None)
+                if same:
+                    same["buy"] = max(same["buy"], packs)
+                    same["for_planting"] = clip(name, 60)
+                elif not (prefs.get("code:" + r["item_code"]) or {}).get("never_suggest"):
+                    last = (bought.get(r["item_code"]) or [None])[-1]
+                    cost = (last["unit_cost"] if last else 0) or r["unit_cost"] or 0
+                    buy.append({"item": clip(r["name"], 60), "code": r["item_code"], "have": round(have / r["seeds_per_pack"], 1), "unit": "packs",
+                                "buy": packs, "for_planting": clip(name, 60), "about": r2(packs * cost) if cost else None, "last_bought": bought_line(last),
+                                "urgency": "now" if entry["late"] or entry["plant_by"] <= H.add_days(today, 7) else "soon", "days_left": 0})
+        plant.append(entry)
+
+    # ----- losses well above usual (disease, damage, mortality...) -----
+    if focus != "restock":
+        for r in db.all(
+            """SELECT item_name, SUM(CASE WHEN created_at >= ? THEN -delta ELSE 0 END) AS recent, SUM(CASE WHEN created_at < ? THEN -delta ELSE 0 END) AS earlier,
+                      MAX(reason) AS reason FROM stock_adjustments WHERE business_id=? AND delta < 0 AND created_at >= ? GROUP BY item_name""",
+            (since30, since30, biz, since90),
+        ):
+            recent, usual = r["recent"] or 0, (r["earlier"] or 0) / 2
+            if chosen(r["item_name"]) and recent >= 5 and recent > 2 * usual:
+                watch.append({"type": "losses", "item": clip(r["item_name"], 60), "lost_last_30_days": recent, "usual_a_month": round(usual, 1), "reason": clip(r["reason"], 60)})
+
+    order = {"now": 0, "soon": 1, "this month": 2}
+    buy.sort(key=lambda x: (order[x["urgency"]], x.get("days_left", 0)))
+    plant.sort(key=lambda x: x["plant_by"])
+    move.sort(key=lambda x: x["pos_days_left"])
+    kinds = ("expired", "overbooked", "below_cost", "expiring", "losses", "price_up", "thin_margin", "not_selling")
+    watch.sort(key=lambda x: (kinds.index(x["type"]), -(x.get("tied_up") or 0)))
+    ctx.source("Inventory", H.url_for("inventory"))
+    out = {"basis": f"speed from sales and farm use of the last {WATCH_DAYS} days; enough is bought for {keep_days} days (unless an item says otherwise) plus {SPARE_DAYS} spare"}
+    if focus != "watch":
+        out.update(buy={"count": len(buy), "items": buy[:limit]}, move_to_pos={"count": len(move), "items": move[:limit]}, plant={"count": len(plant), "items": plant[:limit]})
+    if focus != "restock":
+        out["watch"] = {"count": len(watch), "items": watch[:limit + 2]}
+    if unsure:
+        out["ask"] = unsure[:3]
+    if skipped:
+        out["left_out_by_preference"] = skipped
+    out["say"] = ("The app worked these numbers out: do not recalculate them. Most urgent first. Offer to prepare the purchase, transfer or planting. "
+                  "If 'ask' has something, end with one short question about it and offer to remember the answer.")
+    return out
+
+
+@tool("What to restock (how much, from whom, cost), POS shelves to fill from the store, seedlings to plant in time, and warnings: expiring, not selling, prices up, low margins, losses, "
+      "over-promised batches.",
+      {"focus": E("all", "restock", "watch"), "item": S("Only this item or plant"), "limit": LIMIT})
+def stock_watch(ctx, args):
+    return stock_report(ctx, choice(args, "focus", ("all", "restock", "watch"), "all"), text_of(args, "item", 60), whole(args, "limit", 6, 1, 15))
+
+
+# ================= What the person asks to be remembered =================
+# The only things the assistant writes itself: its own memory, which the person sees in the chat as it is saved and can delete in the panel or Settings.
+MAX_NOTES_PERSON = 20
+MAX_NOTES_BUSINESS = 40
+NOTE_CHARS = 200
+
+
+@tool("Remember a lasting preference the person told you (never one from a record). for_everyone (admins): for the whole business. Restock settings: stock_preference.",
+      {"note": S(), "for_everyone": B()}, required=["note"])
+def remember_this(ctx, args):
+    note = " ".join(str(args.get("note") or "").split())[:NOTE_CHARS]
+    if len(note) < 3:
+        raise ToolError("What should be remembered?")
+    everyone = bool(args.get("for_everyone"))
+    if everyone and ctx.user["role"] != "admin":
+        raise ToolError("Only an admin can set something for the whole business. It can be remembered for this person only.")
+    db, biz = ctx.db, ctx.biz
+    if everyone:
+        mine = db.all("SELECT note FROM assistant_memory WHERE business_id=? AND user_id IS NULL", (biz,))
+    else:
+        mine = db.all("SELECT note FROM assistant_memory WHERE business_id=? AND user_id=?", (biz, ctx.user["id"]))
+    if any(m["note"].lower() == note.lower() for m in mine):
+        return {"remembered": True, "already": True}
+    if len(mine) >= (MAX_NOTES_BUSINESS if everyone else MAX_NOTES_PERSON):
+        raise ToolError("The memory is full. Ask the person which saved preference to forget first (they are listed in your instructions).")
+    db.insert("INSERT INTO assistant_memory (business_id, user_id, note, created_by, created_at) VALUES (?, ?, ?, ?, ?)",
+              (biz, None if everyone else ctx.user["id"], note, ctx.user["username"], H.now().strftime("%Y-%m-%d %H:%M:%S")))
+    db.commit()
+    ctx.notes.append(("Remembered for everyone: " if everyone else "Remembered: ") + note)
+    return {"remembered": True, "for": "the whole business" if everyone else "this person"}
+
+
+@tool("Forget a saved preference by its number.", {"number": N()}, required=["number"])
+def forget_this(ctx, args):
+    number = number_of(args.get("number"), int)
+    row = ctx.db.one("SELECT * FROM assistant_memory WHERE id=? AND business_id=?", (number, ctx.biz)) if number else None
+    if row is None or (row["user_id"] is not None and row["user_id"] != ctx.user["id"]):
+        raise ToolError("No saved preference has that number.")
+    if row["user_id"] is None and ctx.user["role"] != "admin":
+        raise ToolError("That one is for the whole business: only an admin can remove it.")
+    ctx.db.execute("DELETE FROM assistant_memory WHERE id=?", (row["id"],))
+    ctx.db.commit()
+    ctx.notes.append("Forgotten: " + row["note"])
+    return {"forgotten": row["note"]}
+
+
+def preference_item(ctx, term):
+    """(item_key, name) for what a restock preference is about: an inventory or POS item, or a plant's seedlings."""
+    db, biz, key = ctx.db, ctx.biz, " ".join(term.lower().split())
+
+    def fits(exact):
+        """Everything the term names, exactly or (exact=False) as part of a name: inventory, POS (not seedlings), plants."""
+        if exact:
+            where, params = "(UPPER(item_code) = ? OR LOWER(name) = ?)", (term.upper(), key)
+        else:
+            where, params = "(UPPER(item_code) LIKE ? OR LOWER(name) LIKE ?)", (like(term).upper(), like(term))
+        out = {}
+        for table in ("products", "pos_products"):
+            for r in db.all(f"SELECT item_code, name FROM {table} WHERE business_id=? AND item_code NOT LIKE ? AND {where} LIMIT 8", (biz, "%" + SEEDLING_MARK + "%") + params):
+                out.setdefault("code:" + r["item_code"], r["name"])
+        for r in db.all("SELECT DISTINCT name FROM plantings WHERE business_id=? AND " + ("LOWER(name) = ?" if exact else "LOWER(name) LIKE ?") + " LIMIT 8",
+                        (biz, key if exact else like(term))):
+            out.setdefault("plant:" + " ".join(r["name"].lower().split()), r["name"] + " seedlings")
+        return out
+
+    found = fits(True) or fits(False)
+    if len(found) == 1:
+        return next(iter(found.items()))
+    if found:
+        raise ToolError("More than one fits '" + term + "': " + "; ".join(found.values()) + ". Ask which one.")
+    raise ToolError(f"Nothing in the inventory, on the POS or in the plantings is called '{term}'.")
+
+
+def preference_words(p):
+    parts = []
+    if p.get("never_suggest"):
+        parts.append("never suggest it")
+    if p.get("cover_days"):
+        parts.append(f"keep about {p['cover_days']} days")
+    if p.get("supplier"):
+        parts.append("buy from " + p["supplier"])
+    return ", ".join(parts) or "no setting"
+
+
+@tool("Save a restock setting the person gave for an item or a plant's seedlings: days of stock to keep, never suggest, or supplier. No item: days for everything. clear removes it.",
+      {"item": S(), "keep_days": N(), "never_suggest": B(), "supplier": S(), "clear": B()}, admin=True)
+def stock_preference(ctx, args):
+    db, biz, who, stamp = ctx.db, ctx.biz, ctx.user["username"], H.now().strftime("%Y-%m-%d %H:%M:%S")
+    days = number_of(args.get("keep_days"), int)
+    if days is not None and not 1 <= days <= 365:
+        raise ToolError("Days of stock must be from 1 to 365.")
+    term = text_of(args, "item", 80)
+    if not term:
+        if days is None:
+            raise ToolError("Which item, or how many days of stock for everything?")
+        db.execute("UPDATE businesses SET stock_cover_days=? WHERE id=?", (days, biz))
+        db.commit()
+        ctx.notes.append(f"Remembered for everyone: keep about {days} days of stock")
+        return {"saved": True, "keep_days_for_everything": days}
+    key, name = preference_item(ctx, term)
+    row = db.one("SELECT * FROM stock_preferences WHERE business_id=? AND item_key=?", (biz, key))
+    if args.get("clear"):
+        if row:
+            db.execute("DELETE FROM stock_preferences WHERE id=?", (row["id"],))
+            db.commit()
+            ctx.notes.append(f"Forgotten: the restock setting for {name}")
+        return {"cleared": name}
+    supplier, never = text_of(args, "supplier", 60), args.get("never_suggest")
+    if days is None and never is None and not supplier:
+        raise ToolError("What should be saved: days of stock to keep, never suggest it, or a supplier?")
+    new = {
+        "cover_days": days if days is not None else (row["cover_days"] if row else None),
+        "never_suggest": (1 if never else 0) if never is not None else (row["never_suggest"] if row else 0),
+        "supplier": supplier or (row["supplier"] if row else ""),
+    }
+    if row:
+        db.execute("UPDATE stock_preferences SET item_name=?, cover_days=?, never_suggest=?, supplier=?, set_by=?, set_at=? WHERE id=?",
+                   (name, new["cover_days"], new["never_suggest"], new["supplier"], who, stamp, row["id"]))
+    else:
+        db.insert("""INSERT INTO stock_preferences (business_id, item_key, item_name, cover_days, never_suggest, supplier, set_by, set_at)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)""", (biz, key, name, new["cover_days"], new["never_suggest"], new["supplier"], who, stamp))
+    db.commit()
+    ctx.notes.append(f"Remembered for everyone: {name}: " + preference_words(new))
+    return {"saved": True, "item": name, **new}
+
+
+@tool("Prepare a new name for the assistant (everyone sees it), for the person to confirm.", {"name": S()}, required=["name"], admin=True)
+def prepare_assistant_name(ctx, args):
+    name, problem = name_check(text_of(args, "name", 40))
+    if problem:
+        raise ToolError(problem)
+    title = f"Call the assistant {name}"
+    rows = [["Name", name], ["Who sees it", "Everyone in the business"]]
+    ctx.propose("name", "admin", title, rows, "/settings/assistant/name", {"assistant_name": name})
+    return shown(title, rows)
