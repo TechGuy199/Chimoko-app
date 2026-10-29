@@ -84,8 +84,17 @@
         <h2>Planting Records</h2>
         <p>Each row is one batch of seeds planted. Imported batches appear under Planting Records and go on the POS a week before they are ready, exactly like a planting entered by hand.</p>
         <ul class="muted">
-            <li><strong>Required:</strong> Seeds Planted, Ready On (the expected date), Mortality (the expected percentage), and a Name or an Item Code.</li>
+            <li><strong>Required:</strong> Ready On (the expected date), Mortality (the expected percentage), a Name or an Item Code, and the seeds: Seeds Planted, or Trays Planted with Holes Per Tray.</li>
             <li><strong>Optional:</strong> Planted On (blank means today), Selling Price, Seed Cost, Department, Batch No, Actual Ready Date, Notes.</li>
+            <li>
+                <strong>Trays:</strong> Trays Planted &times; Holes Per Tray gives the seeds (a blank Holes Per Tray uses the usual number set under HR &amp; Payroll &rarr; Settings, and a Seeds Planted you
+                type is kept as it is). <strong>Planted By</strong> is the employee who planted those trays. When several people planted one batch, give a row for each person, with the same
+                Name, Planted On and Batch No: the rows are joined into one batch and their trays added up. Casual workers are paid for their trays on their payslip.
+            </li>
+            <li>
+                Each Planted By name is matched to the employees in HR &amp; Payroll (the ones registered, or brought in by Salaries &amp; Wages). A name that is only <em>close</em> to an employee's
+                (a small typo, or the names the other way round) is shown in a box for you to confirm before anything is saved, and so is a name nobody has.
+            </li>
             <li>
                 Seedlings expected = Seeds Planted less the Mortality. <strong>Selling Price and Seed Cost are both optional</strong> — leave them
                 blank for old records from before seeds were priced; the batch is saved with a cost and price of 0, which you can fill in later if you need to.
@@ -99,8 +108,9 @@
             <li>A row identical to a batch that is already recorded (name, planting date, batch and seeds) is rejected, which protects against importing a file twice.</li>
         </ul>
         <p><a href="{{ url_for('import_template', kind='planting') }}">Download the planting records template</a></p>
-        <form method="post" action="{{ url_for('import_planting') }}" enctype="multipart/form-data" data-full-reload>
+        <form method="post" action="{{ url_for('import_planting') }}" enctype="multipart/form-data" data-full-reload data-name-check>
             {{ csrf_field() }}
+            <input type="hidden" name="name_choices" value="">
             <label>CSV file <input type="file" name="file" accept=".csv,text/csv" required></label>
             <div class="grid">
                 <label>Treat as a record only, planted from <input name="record_only_from" type="date"></label>
@@ -121,7 +131,9 @@
             <li><strong>Required:</strong> Employee Name, Pay Month, Basic Salary.</li>
             <li><strong>Optional:</strong> NRC Number, Employment Type, Expected Days, Worked Days, Bonuses, Deductions, Employee NAPSA, Employee NHIMA, Employer NAPSA, Employer NHIMA, Net Pay.</li>
             <li>Name each bonus or deduction with its own column, headed like <strong>Bonus: Transport</strong> or <strong>Deduction: Advance</strong>. Add as many as you need.</li>
-            <li>Employees are matched by NRC Number when the file has one, otherwise by name. Anyone not yet registered is registered with the salary in the file.</li>
+            <li>Employees are matched by NRC Number when the file has one, otherwise by name. Anyone not yet registered is registered with the salary in the file.
+                A name that is only <em>close</em> to a registered employee's (a small typo, or the names the other way round) is shown in a box for you to confirm first, so it
+                does not become a second person.</li>
             <li>Blank Expected Days are counted from the pay month and your HR settings; blank Worked Days mean a full month.</li>
             <li>Blank NAPSA and NHIMA cells, for the employee and for the employer, are worked out from the statutory rules in HR Settings. Amounts you provide are kept as they are.</li>
             <li>Blank Net Pay is calculated. A Net Pay you provide is stored as given, even if it differs from the calculation.</li>
@@ -129,8 +141,9 @@
             <li>An employee who already has a payslip for that month is rejected, which protects against importing a file twice.</li>
         </ul>
         <p><a href="{{ url_for('import_template', kind='payroll') }}">Download the salaries &amp; wages template</a></p>
-        <form method="post" action="{{ url_for('import_payroll') }}" enctype="multipart/form-data" data-full-reload>
+        <form method="post" action="{{ url_for('import_payroll') }}" enctype="multipart/form-data" data-full-reload data-name-check>
             {{ csrf_field() }}
+            <input type="hidden" name="name_choices" value="">
             <label>CSV file <input type="file" name="file" accept=".csv,text/csv" required></label>
             <label class="check"><input type="checkbox" name="allow_repeats"> Allow extra payslips for a month that already has one</label>
             <p class="muted">Tick this for weekly or fortnightly wages, where one employee has several payslips in the same month.</p>
@@ -148,4 +161,17 @@
 </div>
 
 <p class="muted">Dates can be written as 2026-10-01 or 01/10/2026 (day first). Amounts may include commas or a currency prefix.</p>
+
+<dialog class="modal modal-wide" id="name-check" aria-labelledby="name-check-title">
+    <div class="modal-body">
+        <h2 id="name-check-title">Confirm these names</h2>
+        <p class="muted" data-name-intro></p>
+        <div data-name-list></div>
+        <div class="toolbar">
+            <button type="button" class="btn success" data-name-confirm>Confirm and import</button>
+            <button type="button" class="btn ghost" data-modal-close>Cancel</button>
+        </div>
+    </div>
+</dialog>
 {% endblock %}
+{% block scripts %}<script src="{{ asset('import_names.js') }}"></script>{% endblock %}

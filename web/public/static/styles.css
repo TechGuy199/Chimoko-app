@@ -491,6 +491,10 @@ fieldset.collection label { margin-bottom: 6px; }
 .tray-box legend { padding: 0 6px; color: var(--text-muted); font-size: 12px; }
 .tray-box .hint { margin: 0 0 10px; }
 .tray-form { margin-top: 14px; }
+.name-q { margin: 0 0 16px; padding-bottom: 14px; border-bottom: 1px solid var(--line); }
+.name-q p { margin: 0 0 6px; }
+.name-q label.check { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 6px 0; }
+.name-q select { flex: 1 1 180px; min-width: 0; width: auto; }
 .tray-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; }
 .tray-row { display: flex; gap: 8px; align-items: center; }
 .tray-row select { flex: 1 1 auto; min-width: 0; width: auto; margin: 0; }

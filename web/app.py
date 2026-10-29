@@ -6157,8 +6157,9 @@ class ImportProblem(Exception):
     pass
 
 
-def read_csv_upload(columns, required):
-    """Returns the uploaded file's rows as dicts keyed by field name, each with its spreadsheet row number in '_row'."""
+def read_csv_upload(columns, required, one_of=()):
+    """Returns the uploaded file's rows as dicts keyed by field name, each with its spreadsheet row number in '_row'.
+    required headings must all be there; of one_of, at least one must be."""
     upload = request.files.get("file")
     if upload is None or not upload.filename:
         raise ImportProblem("Choose a CSV file first.")
@@ -6182,6 +6183,9 @@ def read_csv_upload(columns, required):
     missing = [columns[field][0].title() for field in required if field not in fields]
     if missing:
         raise ImportProblem("The file is missing these column headings: " + ", ".join(missing) + ". Download the template to see the expected layout.")
+    if one_of and not any(field in fields for field in one_of):
+        raise ImportProblem("The file needs at least one of these column headings: " + ", ".join(columns[field][0].title() for field in one_of)
+                            + ". Download the template to see the expected layout.")
 
     records = []
     for row_no, cells in enumerate(rows[1:], start=2):
@@ -6232,6 +6236,81 @@ def parse_date(raw):
     raise ValueError(raw)
 
 
+def tidy_nrc(value):
+    return re.sub(r"\s+", "", value or "").upper()
+
+
+def match_person(staff, name, nrc=""):
+    """How a name (and NRC) in an import file relates to the registered employees. Returns (how, employees):
+    "same"  - the NRC, or the whole name, is exactly one employee's
+    "many"  - the name is exactly several employees' (an NRC tells them apart)
+    "close" - no exact match, but the name is close to some employee's (best first): the person has to say whether it is them
+    "none"  - nobody by that name
+    When the file gives an NRC that is nobody's, only employees with no NRC recorded could be this person, and never without being asked."""
+    key, nrc = name_key(name), tidy_nrc(nrc)
+    if nrc:
+        same = [e for e in staff if tidy_nrc(e["nrc_number"]) == nrc]
+        if same:
+            return ("same", same) if len(same) == 1 else ("many", same)
+    pool = [e for e in staff if not nrc or not tidy_nrc(e["nrc_number"])]
+    exact = [e for e in pool if name_key(e["full_name"]) == key]
+    if exact and not nrc:
+        return ("same", exact) if len(exact) == 1 else ("many", exact)
+    near = sorted(
+        (e for e in pool if e not in exact and names_alike(key, name_key(e["full_name"]))),
+        key=lambda e: -difflib.SequenceMatcher(None, key, name_key(e["full_name"])).ratio(),
+    )
+    found = (exact + near)[:3]
+    return ("close", found) if found else ("none", [])
+
+
+def person_question(key, name, how, found, rows):
+    """What the dialog box on the Import page asks about a name: who it might be, and the file rows it is on."""
+    return {
+        "key": key, "name": name, "how": how, "rows": rows,
+        "candidates": [{"id": e["id"], "name": e["full_name"], "type": e["employment_type"] or "", "nrc": e["nrc_number"] or ""} for e in found],
+    }
+
+
+def read_name_choices(staff, allow_skip):
+    """What was answered in that dialog box: {key: ("use", employee) | ("new",) | ("skip",)}. An answer that is not understood, or that
+    names someone who is not one of this business's employees, counts as no answer at all."""
+    try:
+        raw = json.loads(request.form.get("name_choices") or "{}")
+    except ValueError:
+        return {}
+    by_id = {e["id"]: e for e in staff}
+    choices = {}
+    for key, answer in (raw.items() if isinstance(raw, dict) else ()):
+        if not isinstance(answer, str):
+            continue
+        if answer == "new":
+            choices[key] = ("new",)
+        elif answer == "skip" and allow_skip:
+            choices[key] = ("skip",)
+        elif answer.startswith("use:") and answer[4:].isascii() and answer[4:].isdigit() and int(answer[4:]) in by_id:
+            choices[key] = ("use", by_id[int(answer[4:])])
+    return choices
+
+
+def name_check_reply(kind, asked, staff):
+    """The answer to the Import page's check before anything is saved: the names to confirm, and everyone a name could be given to."""
+    return jsonify(
+        kind=kind, questions=[dict(q, rows=len(q["rows"])) for q in asked.values()],
+        people=[{"id": e["id"], "name": e["full_name"]} for e in staff],
+    )
+
+
+def unconfirmed_names(asked):
+    """Why an import stops when the dialog box was not answered (JavaScript off, or the file posted without it): never a guess."""
+    return [
+        f"'{q['name']}' (row{'s' if len(q['rows']) > 1 else ''} {', '.join(str(r) for r in q['rows'][:5])}{', ...' if len(q['rows']) > 5 else ''}) "
+        "is not exactly the name of an employee, and nobody confirmed who it is. The Import page asks about such names in a dialog box before "
+        "importing: try again with JavaScript on, or write the name as it is registered in HR & Payroll."
+        for q in asked.values()
+    ]
+
+
 def import_errors(kind, errors):
     return render_template(
         "import.html", max_rows=IMPORT_MAX_ROWS, error_kind=kind, errors=errors[:IMPORT_MAX_ERRORS_SHOWN], error_count=len(errors), methods=PAYMENT_METHODS,
@@ -6250,7 +6329,7 @@ def import_template(kind):
     if kind not in IMPORT_TEMPLATES:
         abort(404)
     header, example = IMPORT_TEMPLATES[kind]
-    return csv_response(f"{kind}-import-template.csv", header, [example])
+    return csv_response(f"{kind}-import-template.csv", header, example if example and isinstance(example[0], (list, tuple)) else [example])
 
 
 @app.post("/import/purchases")
@@ -6626,11 +6705,11 @@ def import_payroll():
     allow_repeats = bool(request.form.get("allow_repeats"))
     hr_set = hr_settings_for(db, biz)
     non_working = hr_set["non_working_days"].split(",")
-    staff = db.all("SELECT id, full_name, nrc_number FROM employees WHERE business_id=?", (biz,))
+    staff = db.all("SELECT id, full_name, nrc_number, employment_type FROM employees WHERE business_id=?", (biz,))
     already_paid = {(r["employee_id"], r["pay_month"]) for r in db.all("SELECT employee_id, pay_month FROM payroll WHERE business_id=?", (biz,))}
-
-    def tidy_nrc(value):
-        return re.sub(r"\s+", "", value).upper()
+    check = request.form.get("check") == "1"   # the Import page asks first which names need confirming; nothing is saved
+    choices = read_name_choices(staff, allow_skip=False)
+    asked = {}
 
     def optional_amount(rec, field, label, problems, minimum=0.0):
         """A blank cell means 'work it out'; anything else must be a valid amount."""
@@ -6691,19 +6770,23 @@ def import_payroll():
             if value:
                 named[kind][label] = round(named[kind].get(label, 0.0) + value, 2)
 
-        # Find the employee by NRC when the file has one, otherwise by name; unknown people are registered
+        # Find the employee by NRC when the file has one, otherwise by name. A name that is only close to an employee's is asked about in a
+        # dialog box on the Import page (is it them, or someone new?); anyone with no close match is registered
         employee_id, hire_key = None, None
         if name:
-            if nrc:
-                matches = [e for e in staff if tidy_nrc(e["nrc_number"] or "") == nrc]
-            else:
-                matches = [e for e in staff if " ".join(e["full_name"].lower().split()) == " ".join(name.lower().split())]
-            if len(matches) > 1:
+            how, found = match_person(staff, name, nrc)
+            pkey = name_key(name) + "|" + nrc
+            answer = choices.get(pkey)
+            if how == "same":
+                employee_id, name = found[0]["id"], found[0]["full_name"]   # the payslip carries the name the employee is registered under
+            elif how == "many":
                 problems.append(f"more than one employee matches '{name}'; add an NRC Number column to tell them apart")
-            elif matches:
-                employee_id = matches[0]["id"]
-            else:
+            elif how == "none" or (answer and answer[0] == "new"):
                 hire_key = nrc or " ".join(name.lower().split())
+            elif answer:
+                employee_id, name = answer[1]["id"], answer[1]["full_name"]
+            else:
+                asked.setdefault(pkey, person_question(pkey, name, how, found, []))["rows"].append(rec["_row"])
 
         if period and employee_id and not allow_repeats and (employee_id, period.strftime("%Y-%m")) in already_paid:
             problems.append(f"{name} already has a payslip for {period.strftime('%B %Y')} (was this file imported before?)")
@@ -6736,7 +6819,11 @@ def import_payroll():
         })
 
     if errors:
-        return import_errors("salaries and wages", errors)
+        return jsonify(questions=[]) if check else import_errors("salaries and wages", errors)
+    if check:
+        return name_check_reply("payroll", asked, staff)
+    if asked:
+        return import_errors("salaries and wages", unconfirmed_names(asked))
 
     stamp = now().strftime("%Y-%m-%d %H:%M:%S")
     try:
@@ -7771,11 +7858,130 @@ PLANTING_COLUMNS = {
     "batch_no": ("batch no", "batch number", "batch"),
     "still_in_greenhouse": ("still in greenhouse", "in greenhouse", "still present", "currently in greenhouse", "in the greenhouse"),
     "notes": ("notes", "note", "comments"),
+    "trays": ("trays planted", "trays", "number of trays", "no of trays", "tray count"),
+    "holes": ("holes per tray", "holes", "holes in each tray", "cells per tray", "cells"),
+    "planted_by": ("planted by", "planter", "planters", "worker", "worker name", "employee", "employee name", "staff"),
 }
 IMPORT_TEMPLATES["planting"] = (
-    ["Item Code", "Name", "Seeds Planted", "Planted On", "Ready On", "Mortality", "Seed Cost", "Selling Price", "Department", "Batch No", "Actual Ready Date", "Still In Greenhouse", "Notes"],
-    ["TOM-001", "Tomato seedlings", 2000, "2026-10-01", "2026-11-05", 15, "", "", "Greenhouse", "B-22", "", "Yes", "Tray block A"],
+    ["Item Code", "Name", "Seeds Planted", "Trays Planted", "Holes Per Tray", "Planted By", "Planted On", "Ready On", "Mortality", "Seed Cost", "Selling Price", "Department",
+     "Batch No", "Actual Ready Date", "Still In Greenhouse", "Notes"],
+    [
+        # One batch planted by two people: a row for each, the same name, planting date and batch number. Seeds are trays x holes.
+        ["TOM-001", "Tomato seedlings", "", 5, 242, "Mary Banda", "2026-10-01", "2026-11-05", 15, "", "", "Greenhouse", "B-22", "", "Yes", "Tray block A"],
+        ["TOM-001", "Tomato seedlings", "", 3, 242, "John Phiri", "2026-10-01", "2026-11-05", 15, "", "", "Greenhouse", "B-22", "", "Yes", "Tray block A"],
+        # A batch with seeds only, as before
+        ["LET-001", "Lettuce seedlings", 3000, "", "", "", "2026-10-02", "2026-11-10", 10, "", "", "Greenhouse", "B-23", "", "Yes", ""],
+    ],
 )
+
+
+def import_trays(raw):
+    """A number of trays in an import file: above zero, part trays allowed."""
+    value = round(parse_amount(raw), 2)
+    if not 0 < value <= MAX_TRAYS:
+        raise ValueError(raw)
+    return value
+
+
+PLANTING_BATCH_FIELDS = (
+    ("item_code", "Item Code"), ("name", "Name"), ("seeds", "Seeds Planted"), ("holes", "Holes Per Tray"), ("planted_on", "Planted On"), ("ready_on", "Ready On"),
+    ("actual_ready_on", "Actual Ready Date"), ("mortality", "Mortality"), ("price", "Selling Price"), ("seed_cost", "Seed Cost"), ("department", "Department"),
+    ("batch_no", "Batch No"), ("still_in_greenhouse", "Still In Greenhouse"), ("notes", "Notes"),
+)
+
+
+def same_cell(field, a, b):
+    """Two cells of one batch that say the same thing: 15 and 15.0, or the same date."""
+    if field in ("planted_on", "ready_on", "actual_ready_on"):
+        return (day_or_none(a) or a.lower()) == (day_or_none(b) or b.lower())
+    if field in ("seeds", "holes", "mortality", "price", "seed_cost"):
+        try:
+            return parse_amount(a) == parse_amount(b)
+        except ValueError:
+            pass
+    return " ".join(a.lower().split()) == " ".join(b.lower().split())
+
+
+def join_batch_rows(rows, usual_holes):
+    """One batch listed on several rows (a row for each person who planted part of it) made into the one record the rest of the import
+    works on. Returns (record, problems). The trays are added up; the seeds are what was given, or trays x holes."""
+    problems = []
+    rec = dict(rows[0])
+    for field, label in PLANTING_BATCH_FIELDS:
+        filled = [r[field].strip() for r in rows if r[field].strip()]
+        if not filled:
+            continue
+        rec[field] = filled[0]
+        if any(not same_cell(field, filled[0], value) for value in filled[1:]):
+            problems.append(f"{label} is not the same on every row of this batch")
+    named = any(r["planted_by"].strip() for r in rows)
+    shares, total = {}, 0.0
+    for r in rows:
+        who, raw = r["planted_by"].strip(), r["trays"].strip()
+        if not raw:
+            if who:
+                problems.append(f"row {r['_row']}: give the Trays Planted by {who}")
+            continue
+        try:
+            trays = import_trays(raw)
+        except ValueError:
+            problems.append(f"row {r['_row']}: trays planted '{raw}' is not a number above zero")
+            continue
+        total += trays
+        if who:
+            share = shares.setdefault(name_key(who), [clean_name(who, 100), 0.0, []])
+            share[1] = round(share[1] + trays, 2)
+            share[2].append(r["_row"])
+        elif named:
+            problems.append(f"row {r['_row']}: has trays but no Planted By, while other rows of this batch say who planted")
+    total = round(total, 2)
+    holes = None
+    if rec["holes"]:
+        try:
+            holes = parse_whole(rec["holes"])
+            if not 1 <= holes <= MAX_TRAY_HOLES:
+                raise ValueError
+        except ValueError:
+            problems.append(f"holes per tray '{rec['holes']}' is not a whole number from 1 to {MAX_TRAY_HOLES:,}")
+    elif usual_holes:
+        holes = usual_holes
+    if total and not rec["seeds"] and not problems:
+        if holes:
+            rec["seeds"] = str(int(math.floor(total * holes + 0.5 + 1e-9)))
+        else:
+            problems.append("give Seeds Planted, or Holes Per Tray (the usual number can be set under HR & Payroll > Settings)")
+    rec["_trays"] = total or None
+    rec["_holes"] = holes if total else None
+    rec["_planters"] = [(key, name, n, found_rows) for key, (name, n, found_rows) in shares.items()]
+    return rec, problems
+
+
+def group_tray_rows(records, usual_holes):
+    """Rows that name who planted, or give trays, are one person's share of a batch: rows with the same name (or code), planting date and
+    batch number are joined into one batch. Every other row is a batch of its own, as it always was. Returns (records, errors)."""
+    order, groups, errors, result = [], {}, [], []
+    for rec in records:
+        if not (rec["planted_by"].strip() or rec["trays"].strip()):
+            order.append(rec)
+            continue
+        label = clean_name(rec["name"], 100) or clean_name(rec["item_code"], 30)
+        planted = rec["planted_on"].strip()
+        key = (norm(label) if label else rec["_row"], (day_or_none(planted) or planted.lower()) if planted else "", rec["batch_no"].strip().lower())
+        if key not in groups:
+            groups[key] = []
+            order.append(groups[key])
+        groups[key].append(rec)
+    for item in order:
+        if isinstance(item, dict):
+            result.append(item)
+            continue
+        rec, problems = join_batch_rows(item, usual_holes)
+        if problems:
+            where = "Rows " + ", ".join(str(r["_row"]) for r in item) if len(item) > 1 else f"Row {item[0]['_row']}"
+            errors.append(f"{where}: " + "; ".join(problems))
+        else:
+            result.append(rec)
+    return result, errors
 
 
 def in_record_only_window(day, start, end):
@@ -7794,7 +8000,7 @@ def in_record_only_window(day, start, end):
 def import_planting():
     db, biz = get_db(), g.user["business_id"]
     try:
-        records = read_csv_upload(PLANTING_COLUMNS, ("seeds", "ready_on", "mortality"))
+        records = read_csv_upload(PLANTING_COLUMNS, ("ready_on", "mortality"), one_of=("seeds", "trays"))
     except ImportProblem as e:
         flash(str(e), "error")
         return redirect(url_for("import_data"))
@@ -7819,7 +8025,10 @@ def import_planting():
     fallback = "Greenhouse" if "Greenhouse" in departments else "General"
     seen = {(norm(r["name"]), r["planted_on"], r["batch_no"] or "", r["seeds_planted"]) for r in db.all("SELECT name, planted_on, batch_no, seeds_planted FROM plantings WHERE business_id=?", (biz,))}
     today = today_str()
-    errors, plans, new_departments = [], [], []
+    check = request.form.get("check") == "1"   # the Import page asks first which names need confirming; nothing is saved
+    staff = db.all("SELECT id, full_name, nrc_number, employment_type FROM employees WHERE business_id=?", (biz,))
+    records, errors = group_tray_rows(records, hr_settings_for(db, biz)["holes_per_tray"] or None)
+    plans, new_departments = [], []
 
     for rec in records:
         problems = []
@@ -7905,15 +8114,54 @@ def import_planting():
             "seeds": seeds, "mortality": mortality, "seedlings": seedlings, "seed_cost": seed_cost, "cost_per_seedling": cost_per,
             "price": round(price if price is not None else round_up_to_cent(cost_per), 2), "planted_on": planted_on, "ready_on": ready_on,
             "actual_ready_on": actual, "still_in_greenhouse": still, "notes": rec["notes"][:300],
+            "trays": rec.get("_trays"), "holes_per_tray": rec.get("_holes"), "planters": rec.get("_planters", []),
         })
 
     if errors:
-        return import_errors("planting records", errors)
+        return jsonify(questions=[]) if check else import_errors("planting records", errors)
+
+    # Who planted: a name that is exactly an employee's is theirs; one that is only close, or nobody's, is asked about in the dialog box
+    names = {}
+    for plan in plans:
+        for key, display, _, found_rows in plan["planters"]:
+            names.setdefault(key, [display, []])[1].extend(found_rows)
+    choices = read_name_choices(staff, allow_skip=True)
+    resolved, asked = {}, {}
+    for key, (display, found_rows) in names.items():
+        how, found = match_person(staff, display)
+        if how == "same":
+            resolved[key] = ("use", found[0])
+        elif key in choices:
+            resolved[key] = ("new", display) if choices[key][0] == "new" else choices[key]
+        else:
+            asked[key] = person_question(key, display, how, found, found_rows)
+    if check:
+        return name_check_reply("planting", asked, staff)
+    if asked:
+        return import_errors("planting records", unconfirmed_names(asked))
+
+    registered, attached = [], set()
     try:
         for dept in new_departments:
             db.execute("INSERT INTO departments (business_id, name) VALUES (?, ?)", (biz, dept))
+        for key, answer in list(resolved.items()):
+            if answer[0] == "new":
+                worker = {"id": db.insert(
+                    """INSERT INTO employees (business_id, full_name, nrc_number, basic_salary, employment_type, address, age, start_date, expected_days_week)
+                       VALUES (?, ?, '', 0, 'Casual Worker', '', NULL, ?, 5)""",
+                    (biz, answer[1], today),
+                ), "full_name": answer[1]}
+                resolved[key] = ("use", worker)
+                registered.append(answer[1])
         for d in plans:
-            insert_planting(db, biz, d)
+            planting_id = insert_planting(db, biz, d)
+            given = {}
+            for key, _, trays, _ in d["planters"]:
+                if resolved[key][0] == "use":
+                    worker = resolved[key][1]
+                    given[worker["id"]] = [worker, round(given.get(worker["id"], [None, 0.0])[1] + trays, 2)]
+            save_tray_rows(db, biz, planting_id, [(worker, trays) for worker, trays in given.values()])
+            attached.update(given)
         db.commit()
     except DB_ERRORS:
         db.rollback()
@@ -7923,7 +8171,9 @@ def import_planting():
     record_only = sum(1 for d in plans if not d["still_in_greenhouse"])
     still_growing = len(plans) - record_only
     note = f": {still_growing} still in the greenhouse, {record_only} as a historical record only" if record_only else ""
-    flash(f"Imported {len(plans)} planting record(s){note}. Inventory was not changed. Batches within a week of being ready are already on the POS.", "ok")
+    who = f" Trays were attached to {len(attached)} employee(s)." if attached else ""
+    new = f" Registered as casual workers: {', '.join(registered)}." if registered else ""
+    flash(f"Imported {len(plans)} planting record(s){note}.{who}{new} Inventory was not changed. Batches within a week of being ready are already on the POS.", "ok")
     return redirect(url_for("planting_list"))
 
 

@@ -101,6 +101,7 @@
     <p class="muted">
         {{ p.trays|trays }} tray{{ 's' if p.trays != 1 }} planted{% if p.holes_per_tray %}, with {{ p.holes_per_tray }} holes in each tray ({{ '{:,}'.format((p.trays * p.holes_per_tray)|round|int) }} holes){% endif %}.
         {% if p.holes_per_tray and (p.trays * p.holes_per_tray)|round|int != p.seeds_planted %}The seeds planted ({{ '{:,}'.format(p.seeds_planted) }}) were entered separately and are not changed by the trays.{% endif %}
+        {% set given = planted_by|sum(attribute='trays') %}{% if p.trays - given > 0.005 %}{{ (p.trays - given)|trays }} tray{{ 's' if p.trays - given != 1 }} {{ 'are' if p.trays - given != 1 else 'is' }} attached to nobody, so not paid.{% if editable %} Add a person below to give them to someone; the total follows the people.{% endif %}{% endif %}
     </p>
     {% else %}
     <p class="muted">No trays were recorded for this planting. {% if editable %}Add them below to say who planted them.{% endif %}</p>
