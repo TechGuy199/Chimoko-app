@@ -4475,7 +4475,6 @@ def statement_pdf(customer, data):
 
     base = getSampleStyleSheet()
     small = ParagraphStyle("small", parent=base["Normal"], fontSize=8, leading=10)
-    right = ParagraphStyle("right", parent=small, alignment=2)
     centre = ParagraphStyle("centre", parent=base["Normal"], alignment=1, fontSize=9, leading=12)
     title = ParagraphStyle("title", parent=base["Title"], fontSize=16, spaceAfter=2)
     heading = ParagraphStyle("heading", parent=base["Heading3"], fontSize=11, spaceBefore=10, spaceAfter=4)
