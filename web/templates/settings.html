@@ -113,12 +113,13 @@
     <p class="muted">The assistant is switched on for this demo company, with a small allowance: {{ assistant_info.limits.business_questions }} questions today.</p>
     {% else %}
     <p class="muted">
-        An assistant that everyone with a login can ask, by typing or by voice: it looks things up in the app (sales, stock, customers, accounts...), explains how to do things, and can prepare a sale, a
-        pre-order, a payment or a delivery change, which happens only when the person presses Confirm. It sees only what the person asking could open themselves: an operator never gets accounts, staff pay or
-        supplier details.
+        An assistant that everyone with a login can ask, by typing, by voice or with a photo: it looks things up in the app (sales, stock, customers, accounts...), explains how to do things, says what needs
+        attention today and plans plantings. It can prepare sales, pre-orders, payments, delivery changes, purchases (from a photo of a supplier's receipt), plantings with their trays (from a photo of a tray
+        tally), tray payslips, stock transfers, supplier payments and money entries, each of which happens only when the person presses Confirm, and it writes reminders for customers that the person sends
+        themselves. It sees only what the person asking could open themselves: an operator never gets accounts, staff pay or supplier details.
     </p>
     <p class="muted">
-        <strong>It is run by Google's Gemini, so what it looks up (customer names and phone numbers, sales, and for an admin the accounts) is sent to Google to answer.</strong>
+        <strong>It is run by Google's Gemini, so what it looks up (customer names and phone numbers, sales, and for an admin the accounts), and any photo sent to it, is sent to Google to answer.</strong>
         Use a Gemini key from a Google project with billing switched on: on Google's paid terms your records are not used to improve Google's products, but on its free terms they can be.
     </p>
     <form method="post" action="{{ url_for('save_assistant') }}">

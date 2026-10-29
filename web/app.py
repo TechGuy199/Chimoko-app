@@ -6861,6 +6861,8 @@ def import_payroll():
 
 @app.errorhandler(413)
 def upload_too_large(error):
+    if request.path.startswith("/assistant/"):   # the chat panel reads JSON
+        return jsonify({"error": "That file is too big. Send a photo, or a PDF under 2 MB."}), 413
     flash("That file is too large. The limit is 2 MB; split it into smaller files.", "error")
     return redirect(url_for("import_data"))
 
@@ -10504,7 +10506,12 @@ def assistant_state():
 @app.post("/assistant/chat")
 @need(None)
 def assistant_chat():
-    return assistant_json(lambda: assistant.converse(get_db(), g.user, request.form.get("message", ""), voice=request.form.get("voice") == "1"))
+    # A photo (a receipt, a tray tally) or a PDF can come with the question; the assistant reads it and nothing of it is kept
+    upload = request.files.get("attachment")
+    attachment = upload.read(assistant.MAX_ATTACHMENT_BYTES + 1) if upload and upload.filename else None
+    return assistant_json(lambda: assistant.converse(
+        get_db(), g.user, request.form.get("message", ""), voice=request.form.get("voice") == "1", attachment=attachment,
+    ))
 
 
 @app.post("/assistant/listen")
@@ -10561,6 +10568,11 @@ assistant.bind(
     app=app, url_for=url_for, now=now, today_str=today_str, add_days=add_days, day_or_none=day_or_none, with_figures=with_figures, sold_url=sold_url,
     read_discount=read_discount, method_from_text=method_from_text, METHOD_NAMES=METHOD_NAMES, PAYMENT_STATUSES=PAYMENT_STATUSES,
     financial_standing=financial_standing, account_summary=account_summary, hr_settings_for=hr_settings_for,
+    # what the prepare tools for purchases, stock transfers, plantings, tray pay, supplier payments and money entries check against
+    is_seed_category=is_seed_category, department_names=department_names, seed_code_for=seed_code_for, phone_key=phone_key, name_key=name_key,
+    planting_staff=planting_staff, match_person=match_person, unpaid_trays=unpaid_trays, tray_count=tray_count, seedlings_from=seedlings_from,
+    planting_label=planting_label, MANUAL_IN=MANUAL_IN, MANUAL_OUT=MANUAL_OUT, CATEGORY_LABELS=CATEGORY_LABELS, MAX_TRAY_HOLES=MAX_TRAY_HOLES,
+    RELEASE_DAYS=RELEASE_DAYS,
 )
 
 

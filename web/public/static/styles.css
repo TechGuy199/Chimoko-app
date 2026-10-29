@@ -1129,8 +1129,8 @@ dialog.assistant[open] { display: flex; animation: assistant-in 0.2s var(--ease)
 .msg-source { padding: 3px 10px; border: 1px solid var(--line-strong); border-radius: 999px; font-size: 12px; }
 .assistant-card { align-self: stretch; padding: 12px 14px; border: 1px solid var(--primary); border-radius: 14px; background: color-mix(in srgb, var(--primary) 8%, var(--surface-alt)); }
 .assistant-card h3 { margin: 0 0 8px; font-size: 14px; }
-.assistant-card dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 3px 12px; margin: 0 0 10px; font-size: 13.5px; }
-.assistant-card dt { color: var(--text-muted); }
+.assistant-card dl { display: grid; grid-template-columns: fit-content(55%) minmax(0, 1fr); gap: 3px 12px; margin: 0 0 10px; font-size: 13.5px; }
+.assistant-card dt { color: var(--text-muted); overflow-wrap: anywhere; }
 .assistant-card dd { margin: 0; overflow-wrap: anywhere; }
 .assistant-card-buttons { display: flex; gap: 8px; }
 .assistant-card.done { border-color: var(--ok-text); }
@@ -1142,6 +1142,15 @@ dialog.assistant[open] { display: flex; animation: assistant-in 0.2s var(--ease)
 @keyframes assistant-dots { 0% { content: ""; } 25% { content: "."; } 50% { content: ".."; } 75% { content: "..."; } }
 .assistant-form { display: flex; align-items: flex-end; gap: 8px; padding: 10px 12px 12px; border-top: 1px solid var(--line); }
 .assistant-form textarea { flex: 1; min-width: 0; min-height: 40px; max-height: 120px; margin: 0; padding: 9px 12px; resize: none; border-radius: 20px; font-size: 14.5px; line-height: 1.4; }
+.assistant-photo { display: grid; place-items: center; flex: 0 0 auto; width: 40px; height: 40px; padding: 0; border: 0; border-radius: 50%; cursor: pointer; background: rgba(var(--ink), 0.1); color: var(--text); }
+.assistant-photo:disabled { opacity: 0.5; cursor: default; }
+.assistant-chip { display: flex; align-items: center; gap: 6px; margin: 0 12px; padding: 4px 6px 4px 12px; border-radius: 999px; background: rgba(var(--ink), 0.08); font-size: 13px; }
+.assistant-chip span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.assistant-chip-remove { display: grid; place-items: center; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 50%; background: none; color: var(--text-muted); cursor: pointer; }
+.assistant-chip-remove svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; }
+.msg-photo { display: block; max-width: 160px; max-height: 160px; margin-top: 6px; border-radius: 10px; }
+.msg-file { margin: 6px 0 0; font-size: 13px; opacity: 0.85; }
+.assistant-draft-text { margin: 0 0 10px; white-space: pre-wrap; font-size: 14px; }
 .assistant-mic, .assistant-send { display: grid; place-items: center; flex: 0 0 auto; width: 40px; height: 40px; padding: 0; border: 0; border-radius: 50%; cursor: pointer; }
 .assistant-mic { background: rgba(var(--ink), 0.1); color: var(--text); }
 .assistant-send { background: var(--primary); color: var(--on-accent); }

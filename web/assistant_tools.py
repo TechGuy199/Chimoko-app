@@ -6,6 +6,7 @@ not even offered to an operator. Lists are capped, text from the records is shor
 """
 import datetime
 import json
+import math
 
 from assistant import H, ToolError, clip, tool
 
@@ -553,7 +554,9 @@ GUIDE = {
     "reports": "Reports: sales, purchases and profit by department and period.",
     "staff": "Staff (admins): employees, payroll, payslips with NAPSA and NHIMA, and statements. Daily Activities records the work done in each plot. A casual worker can be paid for the trays they planted: set the pay for a tray under HR > Settings, then Compute Payslip.",
     "alerts": "Alerts come in the app and optionally by WhatsApp (Settings): low stock, pre-orders and collections due, deliveries due, and requests for admin permission.",
-    "assistant": "The assistant (this chat) can look things up, explain the app and prepare sales, pre-orders, payments and delivery changes for you to confirm. Nothing is done until you press Confirm.",
+    "assistant": "The assistant (this chat) can look things up, explain the app, say what needs attention today (the sun button) and plan plantings. It prepares sales, pre-orders, payments, "
+                 "delivery changes, purchases, plantings with trays, tray payslips, stock transfers, supplier payments and money entries for you to confirm; nothing is done until you press Confirm. "
+                 "The camera button sends a photo or PDF: a supplier's receipt becomes a purchase, a tally of trays a planting. It writes customer reminders for you to copy or open in WhatsApp.",
 }
 
 
@@ -948,3 +951,468 @@ def prepare_handover_change(ctx, args):
         rows.append(["New day", day])
     ctx.propose("handover", "sell", title, rows, path, form)
     return shown(title, rows)
+
+
+# ================= More prepare tools: purchases from a receipt, plantings with trays, tray pay, stock moves, supplier payments, money =================
+NUM = {"type": "number"}
+METHOD = S("Cash, Bank transfer, Airtel Money, MTN Money, Cheque, Card or Other")
+
+
+def number_of(value, kind=float):
+    """A number the model gave, or None when it is not one."""
+    try:
+        out = kind(value)
+    except (TypeError, ValueError):
+        return None
+    return out if out == out and out not in (float("inf"), float("-inf")) else None
+
+
+def inventory_item(ctx, term):
+    """The inventory item a person means (by code, or a name only one item fits), None when nothing fits, a ToolError when several do."""
+    term = clip(term, 80)
+    if not term:
+        return None
+    db, biz = ctx.db, ctx.biz
+    cols = "id, item_code, name, category, department, quantity, unit_cost, price, seeds_per_pack, loose_seeds"
+    found = db.all(f"SELECT {cols} FROM products WHERE business_id=? AND (UPPER(item_code) = ? OR LOWER(name) = ?)", (biz, term.upper(), term.lower()))
+    found = found or db.all(f"SELECT {cols} FROM products WHERE business_id=? AND (LOWER(name) LIKE ? OR UPPER(item_code) LIKE ?) ORDER BY name LIMIT 6",
+                            (biz, like(term), like(term).upper()))
+    if len(found) > 1:
+        raise ToolError("More than one inventory item fits '" + term + "': " + "; ".join(f"{p['name']} (code {p['item_code']})" for p in found) + ". Ask the person which one.")
+    return found[0] if found else None
+
+
+def new_item_code(ctx, name, taken):
+    """A code for a new inventory item, made from its name, used by nothing else."""
+    base = H.seed_code_for(name)[:16]
+    code, n = base, 2
+    while code in taken or ctx.db.one("SELECT 1 AS x FROM products WHERE business_id=? AND item_code=?", (ctx.biz, code)) \
+            or ctx.db.one("SELECT 1 AS x FROM pos_products WHERE business_id=? AND item_code=?", (ctx.biz, code)):
+        code, n = f"{base}-{n}", n + 1
+    taken.add(code)
+    return code
+
+
+def employee_named(ctx, who, staff):
+    """The employee a name means, only when it is exactly theirs. A name that is only close is never used without the person saying so."""
+    how, found = H.match_person(staff, who)
+    if how == "same":
+        return found[0]
+    if how == "close":
+        raise ToolError(f"'{who}' is not exactly the name of an employee; it is close to " + " or ".join(e["full_name"] for e in found)
+                        + ". Ask the person who it is, then prepare it again with the name as registered.")
+    if how == "many":
+        raise ToolError(f"More than one employee is called {who}. Ask the person to do this one on its page, where they can choose.")
+    raise ToolError(f"No employee is called '{who}'. Ask who it is; someone new is registered under HR & Payroll first.")
+
+
+PURCHASE_LINE = {"type": "object", "properties": {
+    "product": S("Inventory item's code or name; leave out for a new item"), "name": S("New item's name"), "quantity": N(), "unit_cost": NUM,
+    "selling_price": {"type": "number", "description": "New stock item"}, "category": S("New item"), "seeds_per_pack": N("New seed item"),
+    "stock": B("False for things not kept in stock, like fuel or repairs")}, "required": ["quantity", "unit_cost"]}
+
+
+@tool("Prepare a purchase (one supplier's receipt, 1-12 lines) for the person to confirm. Lines are matched to inventory items, or become new items.",
+      {"items": {"type": "array", "items": PURCHASE_LINE}, "supplier": S(), "supplier_phone": S(), "receipt_no": S(), "date": S("YYYY-MM-DD"),
+       "payment_status": E("Paid", "Unpaid", "Partial Payment"), "amount_paid": {"type": "number", "description": "Part payment, one-line receipts only"},
+       "payment_method": METHOD, "payment_reference": S("Defaults to the receipt number")},
+      required=["items"], perm="procure")
+def prepare_purchase(ctx, args):
+    items = args.get("items")
+    if not isinstance(items, list) or not 1 <= len(items) <= 12:
+        raise ToolError("Give the receipt's lines (1 to 12).")
+    status = choice(args, "payment_status", H.PAYMENT_STATUSES, "Paid")
+    if status == "Partial Payment" and len(items) > 1:
+        raise ToolError("A part payment can only be prepared for a one-line receipt. Ask whether it was paid in full or not at all.")
+    supplier, phone, receipt = text_of(args, "supplier", 100), text_of(args, "supplier_phone", 40), text_of(args, "receipt_no", 40)
+    day = H.day_or_none(str(args["date"])) if args.get("date") else ctx.today
+    if day is None or day > ctx.today:
+        raise ToolError("The receipt's date must be today or earlier, as YYYY-MM-DD.")
+    method = money_method(args, status != "Unpaid")
+    reference = text_of(args, "payment_reference", 60) or receipt
+    if status != "Unpaid" and supplier and not reference:
+        raise ToolError("Ask for the receipt number: a payment to a named supplier is recorded with it.")
+    departments = H.department_names(ctx.db, ctx.biz)
+    taken, steps, rows, total = set(), [], [], 0.0
+    for it in items:
+        it = it if isinstance(it, dict) else {}
+        qty, cost = number_of(it.get("quantity"), int), number_of(it.get("unit_cost"))
+        if not qty or qty < 1 or cost is None or cost < 0:
+            raise ToolError("Every line needs a whole quantity above zero and a unit cost.")
+        cost = round(cost, 2)
+        form = {"quantity": qty, "unit_cost": cost, "supplier_name": supplier, "supplier_phone": phone, "invoice_no": receipt, "purchase_date": day,
+                "payment_status": status, "origin": "procurements"}
+        if status == "Partial Payment":
+            paid = number_of(args.get("amount_paid"))
+            if paid is None or not 0 < paid < qty * cost:
+                raise ToolError(f"For a part payment say how much was paid: more than nothing and less than {ctx.money(qty * cost)}.")
+            form["amount_paid"] = round(paid, 2)
+        if status != "Unpaid":
+            form["payment_method"], form["payment_reference"] = method, reference
+        note = ""
+        if it.get("stock") is False:
+            name = text_of(it, "name", 100) or text_of(it, "product", 100)
+            if not name:
+                raise ToolError("A line that is not stock still needs a name, such as Diesel.")
+            form.update(name=name, item_code="", in_inventory="0")
+            note = " (not stock)"
+        else:
+            known = inventory_item(ctx, it.get("product")) if it.get("product") else None
+            if known:
+                form.update(item_code=known["item_code"], name=known["name"], in_inventory=["0", "1"])
+                if number_of(it.get("selling_price")) is not None:
+                    form["price"] = round(number_of(it.get("selling_price")), 2)
+                name = known["name"]
+            else:
+                name = text_of(it, "name", 100) or text_of(it, "product", 100)
+                category = text_of(it, "category", 60)
+                price = number_of(it.get("selling_price"))
+                if not name:
+                    raise ToolError("A new item needs a name.")
+                if not category or price is None or price < 0:
+                    raise ToolError(f"'{name}' is not in inventory. Ask whether it is new; if it is, ask for its category and selling price.")
+                form.update(item_code=new_item_code(ctx, name, taken), name=name, category=category, price=round(price, 2), in_inventory=["0", "1"],
+                            department="Greenhouse" if H.is_seed_category(category) and "Greenhouse" in departments else "General")
+                if H.is_seed_category(category):
+                    spp = number_of(it.get("seeds_per_pack"), int)
+                    if not spp or spp < 1:
+                        raise ToolError(f"'{name}' is a new seed item: ask how many seeds are in one pack.")
+                    form["seeds_per_pack"] = spp
+                note = f" (new item {form['item_code']}, {category}, sells at {ctx.money(price)})"
+        line = round(qty * cost, 2)
+        total += line
+        steps.append(("/inventory/purchase", form))
+        rows.append([f"{qty} × {name}{note}", f"{ctx.money(cost)} each = {ctx.money(line)}"])
+    head = [["Supplier", supplier or "Not named"]] + ([["Receipt no", receipt]] if receipt else []) + [["Date", day]]
+    paid_text = {"Paid": f"Paid by {method}", "Unpaid": "Not paid yet", "Partial Payment": f"{ctx.money(steps[0][1].get('amount_paid', 0))} paid by {method}"}[status]
+    tail = [["Total", ctx.money(total)], ["Payment", paid_text]]
+    if len(steps) > 1:
+        tail.append(["Note", "Each line is saved as its own purchase; if one is refused, the lines before it stay saved."])
+    title = "Record a purchase" + (f" from {supplier}" if supplier else "") + (f" (receipt {receipt})" if receipt else "")
+    ctx.propose("purchase", "procure", title, head + rows + tail, None, None, steps=steps)
+    return shown(title, head + rows + tail)
+
+
+PLANTER = {"type": "object", "properties": {"name": S("Employee, as registered"), "trays": NUM}, "required": ["name", "trays"]}
+
+
+@tool("Prepare a planting for the person to confirm: trays, holes per tray, who planted them (registered employees), dates, mortality.",
+      {"name": S("e.g. Tomato seedlings"), "seed_item": S("Inventory seed used, code or name; leave out if none"), "planters": {"type": "array", "items": PLANTER},
+       "trays": {"type": "number", "description": "Total, when nobody is named"}, "holes_per_tray": N("Leave out for the usual number"),
+       "seeds": N("Only when counted instead of trays x holes"), "planted_on": S("YYYY-MM-DD, default today"), "ready_on": S("YYYY-MM-DD"),
+       "mortality_pct": NUM, "batch_no": S(), "price": {"type": "number", "description": "Per seedling"}},
+      required=["name", "ready_on", "mortality_pct"], perm="plant")
+def prepare_planting(ctx, args):
+    db, biz = ctx.db, ctx.biz
+    name = text_of(args, "name", 100)
+    if not name:
+        raise ToolError("Ask what the seedlings are called, such as Tomato seedlings.")
+    seed = None
+    if args.get("seed_item"):
+        seed = inventory_item(ctx, args["seed_item"])
+        if seed is None or not H.is_seed_category(seed["category"]):
+            raise ToolError(f"'{clip(args['seed_item'], 60)}' is not a seed item in inventory. Leave it out if the seed was not taken from inventory.")
+    staff = H.planting_staff(db, biz)
+    given = {}
+    for p in args.get("planters") or []:
+        p = p if isinstance(p, dict) else {}
+        who = text_of(p, "name", 100)
+        try:
+            trays = H.tray_count(p.get("trays"))
+        except (TypeError, ValueError):
+            raise ToolError(f"Give the trays {who or 'each person'} planted, as a number above zero.")
+        e = employee_named(ctx, who, staff)
+        given[e["id"]] = [e, round((given[e["id"]][1] if e["id"] in given else 0) + trays, 2)]
+    if given:
+        total = round(sum(t for _, t in given.values()), 2)
+    elif args.get("trays") is not None:
+        try:
+            total = H.tray_count(args.get("trays"))
+        except (TypeError, ValueError):
+            raise ToolError("The trays planted must be a number above zero.")
+    else:
+        total = None
+    holes = number_of(args.get("holes_per_tray"), int) or (H.hr_settings_for(db, biz)["holes_per_tray"] or None)
+    if holes is not None and not 1 <= holes <= H.MAX_TRAY_HOLES:
+        raise ToolError(f"The holes in a tray must be a whole number from 1 to {H.MAX_TRAY_HOLES:,}.")
+    typed = number_of(args.get("seeds"), int)
+    seeds = typed or (int(total * holes + 0.5 + 1e-9) if total and holes else None)
+    if not seeds or seeds < 1:
+        raise ToolError("Give the trays and the holes in each tray (or the seeds planted). Ask how many holes the trays have if it is not known.")
+    planted = H.day_or_none(str(args["planted_on"])) if args.get("planted_on") else ctx.today
+    ready = H.day_or_none(str(args.get("ready_on") or ""))
+    if planted is None or ready is None or ready < planted:
+        raise ToolError("Ask for the planting date and the expected ready date (YYYY-MM-DD); ready cannot be before planted.")
+    mortality = number_of(args.get("mortality_pct"))
+    if mortality is None or not 0 <= mortality < 100:
+        raise ToolError("Ask for the expected mortality: a percentage from 0 up to (not including) 100.")
+    if seed:
+        have = (seed["quantity"] or 0) * (seed["seeds_per_pack"] or 0) + (seed["loose_seeds"] or 0)
+        if seed["seeds_per_pack"] and seeds > have:
+            raise ToolError(f"Only {have:,} seeds of {seed['name']} are in inventory, not the {seeds:,} this needs.")
+    departments = H.department_names(db, biz)
+    form = {"item_id": seed["id"] if seed else "", "name": name, "department": "Greenhouse" if "Greenhouse" in departments else "General",
+            "planted_on": planted, "ready_on": ready, "mortality_pct": mortality, "trays_planted": total if total else "", "holes_per_tray": holes or "",
+            "seeds_planted": typed or "", "planter_id": [str(e["id"]) for e, _ in given.values()], "planter_trays": [str(t) for _, t in given.values()],
+            "batch_no": text_of(args, "batch_no", 40), "still_in_greenhouse": ["0", "1"]}
+    if number_of(args.get("price")) is not None:
+        form["price"] = round(number_of(args.get("price")), 2)
+    rows = [["Seedlings", name], ["Seed", f"{seed['name']} from inventory" if seed else "Not taken from inventory"]]
+    if total:
+        rows.append(["Trays", f"{total:g} × {holes} holes" if holes else f"{total:g}"])
+    rows.append(["Seeds", f"{seeds:,}" + (" (counted)" if typed and total else "")])
+    for e, t in given.values():
+        rows.append([e["full_name"], f"{t:g} trays" + ("" if e["employment_type"] == "Casual Worker" else " (salaried, not paid by the tray)")])
+    rows += [["Planted", planted], ["Ready", ready], ["Mortality", f"{mortality:g}%"], ["Seedlings expected", f"about {H.seedlings_from(seeds, mortality):,}"]]
+    title = f"Record a planting of {name}"
+    ctx.propose("planting", "plant", title, rows, "/planting", form)
+    return shown(title, rows)
+
+
+@tool("Prepare a casual worker's payslip for the trays they planted (every unpaid tray up to the month's end), for the person to confirm.",
+      {"employee": S(), "month": S("YYYY-MM, default this month"), "payment_method": METHOD, "bonus": NUM, "bonus_name": S(), "deduction": NUM, "deduction_name": S()},
+      required=["employee", "payment_method"], admin=True)
+def prepare_tray_payslip(ctx, args):
+    db, biz = ctx.db, ctx.biz
+    staff = db.all("SELECT id, full_name, nrc_number, employment_type FROM employees WHERE business_id=?", (biz,))
+    e = employee_named(ctx, text_of(args, "employee", 100), staff)
+    if e["employment_type"] != "Casual Worker":
+        raise ToolError(f"{e['full_name']} is permanent staff: they are paid their salary, not by the tray.")
+    month = text_of(args, "month", 7) or ctx.today[:7]
+    if not (len(month) == 7 and month[4] == "-" and H.day_or_none(month + "-01")):
+        raise ToolError("The pay month must be YYYY-MM.")
+    rows_, trays = H.unpaid_trays(db, biz, e["id"], month)
+    rate = H.hr_settings_for(db, biz)["tray_rate"]
+    bonus, deduction = number_of(args.get("bonus")) or 0.0, number_of(args.get("deduction")) or 0.0
+    if bonus < 0 or deduction < 0:
+        raise ToolError("A bonus or deduction cannot be negative.")
+    if not rows_ and not bonus:
+        raise ToolError(f"{e['full_name']} has no unpaid trays planted up to {month}.")
+    if rows_ and rate <= 0:
+        raise ToolError("The pay for each tray is not set. An admin sets it under HR & Payroll > Settings.")
+    method = money_method(args, True)
+    form = {"employee_id": e["id"], "pay_month": month, "pay_basis": "trays", "payment_method": method,
+            "bonus_name": text_of(args, "bonus_name", 40) or ("Bonus" if bonus else ""), "bonus_amount": f"{bonus:.2f}" if bonus else "",
+            "deduction_name": text_of(args, "deduction_name", 40) or ("Deduction" if deduction else ""), "deduction_amount": f"{deduction:.2f}" if deduction else ""}
+    pay = round(trays * rate, 2)
+    rows = [["Employee", e["full_name"]], ["Pay month", month], ["Trays", f"{trays:g} unpaid, from {len(rows_)} planting(s)"], ["Pay for the trays", f"{trays:g} × {ctx.money(rate)} = {ctx.money(pay)}"]]
+    if bonus:
+        rows.append([form["bonus_name"], "+ " + ctx.money(bonus)])
+    if deduction:
+        rows.append([form["deduction_name"], "− " + ctx.money(deduction)])
+    rows += [["NAPSA and NHIMA", "Worked out by the app from HR Settings"], ["Paid by", method]]
+    title = f"Pay {e['full_name']} for {trays:g} trays"
+    ctx.propose("payslip", "admin", title, rows, "/hr/payslips/new", form)
+    return shown(title, rows)
+
+
+@tool("Prepare moving inventory stock to the POS (to sell) or to farm use, for the person to confirm.",
+      {"item": S("Code or name"), "quantity": N(), "to": E("pos", "farm"), "recipient": S("Farm use: who took it")}, required=["item", "quantity", "to"], perm="transfer")
+def prepare_transfer(ctx, args):
+    item = inventory_item(ctx, args.get("item"))
+    if item is None:
+        raise ToolError(f"No inventory item fits '{text_of(args, 'item', 60)}'.")
+    to = choice(args, "to", ("pos", "farm"), "")
+    qty = number_of(args.get("quantity"), int) or 0
+    if not to:
+        raise ToolError("Say where it goes: pos or farm.")
+    if to == "pos" and H.is_seed_category(item["category"]):
+        raise ToolError("Seed packs are sown, not sold as they are: prepare a planting instead, or sow them from the item's page.")
+    if not 1 <= qty <= item["quantity"]:
+        raise ToolError(f"{item['name']}: {item['quantity']} in inventory, so {qty} cannot be moved.")
+    form = {"destination": to, "quantity": qty, "recipient": text_of(args, "recipient", 80) if to == "farm" else ""}
+    rows = [["Item", f"{item['name']} ({item['item_code']})"], ["Quantity", f"{qty} of {item['quantity']} in inventory"],
+            ["To", "Sales & POS, at " + ctx.money(item["price"]) if to == "pos" else "Farm use" + (f", taken by {form['recipient']}" if form["recipient"] else "")]]
+    title = f"Move {qty} × {item['name']} to " + ("the POS" if to == "pos" else "farm use")
+    ctx.propose("transfer", "transfer", title, rows, f"/inventory/{item['id']}/transfer", form)
+    return shown(title, rows)
+
+
+@tool("Prepare a payment to a supplier (spread over what is owed, oldest first), for the person to confirm.",
+      {"supplier": S("Name or phone"), "amount": NUM, "payment_method": METHOD, "payment_reference": S("Needed; for cash the receipt number"), "paid_on": S("YYYY-MM-DD"), "note": S()},
+      required=["supplier", "amount", "payment_method"], admin=True)
+def prepare_supplier_payment(ctx, args):
+    db, biz = ctx.db, ctx.biz
+    term = text_of(args, "supplier", 80)
+    found = db.all("SELECT id, name, phone FROM suppliers WHERE business_id=? AND (LOWER(name) = ? OR phone = ?)", (biz, term.lower(), term))
+    found = found or db.all("SELECT id, name, phone FROM suppliers WHERE business_id=? AND (LOWER(name) LIKE ? OR phone LIKE ?) LIMIT 6", (biz, like(term), like(term)))
+    if not found:
+        raise ToolError(f"No supplier fits '{term}'.")
+    if len(found) > 1:
+        raise ToolError("More than one supplier fits: " + "; ".join(f"{s['name']} ({s['phone'] or 'no phone'})" for s in found) + ". Ask which one.")
+    s = found[0]
+    owed = db.one(
+        "SELECT COALESCE(SUM(total_cost - COALESCE(amount_paid, total_cost)), 0) AS n FROM procurements WHERE business_id=? AND supplier_id=? AND total_cost - COALESCE(amount_paid, total_cost) > 0.005",
+        (biz, s["id"]),
+    )["n"]
+    amount = number_of(args.get("amount"))
+    if owed < 0.005:
+        raise ToolError(f"Nothing is owed to {s['name']}.")
+    if amount is None or not 0 < amount <= owed + 0.005:
+        raise ToolError(f"The amount must be more than nothing and at most the {ctx.money(owed)} owed to {s['name']}.")
+    method = money_method(args, True)
+    reference = text_of(args, "payment_reference", 60)
+    if not reference:
+        raise ToolError("Ask for the payment's reference" + (" (for cash, the receipt number)." if method == "Cash" else "."))
+    paid_on = H.day_or_none(str(args["paid_on"])) if args.get("paid_on") else ctx.today
+    if paid_on is None or paid_on > ctx.today:
+        raise ToolError("The payment date must be today or earlier, as YYYY-MM-DD.")
+    form = {"amount": f"{amount:.2f}", "payment_method": method, "payment_reference": reference, "paid_on": paid_on, "note": text_of(args, "note", 150)}
+    rows = [["Supplier", s["name"]], ["Amount", f"{ctx.money(amount)} by {method}"], ["Reference", reference], ["Date", paid_on],
+            ["Still owed after this", ctx.money(round(owed - amount, 2))]]
+    title = f"Pay {ctx.money(amount)} to {s['name']}"
+    ctx.propose("supplier_payment", "admin", title, rows, f"/suppliers/{s['id']}/payment", form)
+    return shown(title, rows)
+
+
+@tool("Prepare money in or out that no other page records (rent, fuel, transport, owner's money, a loan...), for the person to confirm.",
+      {"direction": E("in", "out"), "category": S("One of the categories the tool lists"), "amount": NUM, "payment_method": METHOD, "date": S("YYYY-MM-DD"),
+       "party": S("Paid to or received from"), "description": S(), "reference": S()},
+      required=["direction", "category", "amount", "payment_method"], admin=True)
+def prepare_money_entry(ctx, args):
+    direction = choice(args, "direction", ("in", "out"), "")
+    allowed = H.MANUAL_IN if direction == "in" else H.MANUAL_OUT if direction == "out" else ()
+    raw = text_of(args, "category", 40).lower().replace(" ", "_")
+    by_label = {H.CATEGORY_LABELS[c].lower().replace(" ", "_"): c for c in allowed}
+    category = raw if raw in allowed else by_label.get(raw)
+    if not direction or category is None:
+        raise ToolError("Choose in or out, and a category: " + "; ".join(f"{d}: " + ", ".join(H.CATEGORY_LABELS[c] for c in cats) for d, cats in (("out", H.MANUAL_OUT), ("in", H.MANUAL_IN))) + ".")
+    amount = number_of(args.get("amount"))
+    if amount is None or amount <= 0:
+        raise ToolError("The amount must be above zero.")
+    method = money_method(args, True)
+    day = H.day_or_none(str(args["date"])) if args.get("date") else ctx.today
+    if day is None or day > ctx.today:
+        raise ToolError("The date must be today or earlier, as YYYY-MM-DD.")
+    form = {"direction": direction, "category": category, "amount": f"{amount:.2f}", "payment_method": method, "occurred_on": day,
+            "party": text_of(args, "party", 100), "description": text_of(args, "description", 200), "payment_reference": text_of(args, "reference", 60)}
+    rows = [["Money", "In" if direction == "in" else "Out"], ["For", H.CATEGORY_LABELS[category]], ["Amount", f"{ctx.money(amount)} by {method}"], ["Date", day]]
+    rows += [[label, form[key]] for key, label in (("party", "To or from"), ("description", "What for"), ("payment_reference", "Reference")) if form[key]]
+    title = f"Record {ctx.money(amount)} {'in' if direction == 'in' else 'out'}: {H.CATEGORY_LABELS[category]}"
+    ctx.propose("money", "admin", title, rows, "/accounts/record", form)
+    return shown(title, rows)
+
+
+# ================= The day, the planting planner, and messages to customers =================
+@tool("What needs attention today: deliveries and collections due, pre-orders to collect, batches ready, low stock, and for admins money owed and trays to pay. For 'what should I do today?'.")
+def attention_today(ctx, args):
+    db, biz, today, user = ctx.db, ctx.biz, ctx.today, ctx.user
+    soon = H.add_days(today, 2)
+
+    def handovers(column, done):
+        rows = db.all(
+            f"""SELECT invoice_no, customer_name, {column} AS day FROM invoices WHERE business_id=? AND kind='SALE' AND {column} IS NOT NULL AND {column} <= ?
+                AND {done} IS NULL AND COALESCE(payment_status, '') <> 'Cancelled' ORDER BY {column}, id LIMIT 8""",
+            (biz, today),
+        )
+        return [{"invoice": r["invoice_no"], "customer": clip(r["customer_name"], 50), "overdue": r["day"] < today} for r in rows]
+
+    collect = db.all(
+        """SELECT po.customer_name, po.qty, po.collect_on, p.name AS plant FROM preorders po JOIN plantings p ON p.id = po.planting_id
+           WHERE po.business_id=? AND po.status='pending' AND po.collect_on IS NOT NULL AND po.collect_on <= ? ORDER BY po.collect_on LIMIT 8""",
+        (biz, soon),
+    )
+    growing = H.with_figures(db, biz, db.all("SELECT * FROM plantings WHERE business_id=? AND still_in_greenhouse=1", (biz,)))
+    ready = [f for f in growing if f["stage"] in ("ready", "due") and f["available"] + f["pending"] > 0]
+    coming = [f for f in growing if f["stage"] == "growing" and f["days"] <= H.RELEASE_DAYS]
+    threshold = user["low_stock_threshold"]
+    low = db.all("SELECT name, quantity FROM pos_products WHERE business_id=? AND quantity < ? ORDER BY quantity, name LIMIT 8", (biz, threshold))
+    out = {
+        "today": today, "deliveries_due": handovers("deliver_on", "delivered_at"), "collections_due": handovers("collect_on", "collected_at"),
+        "preorders_to_collect_by": {"until": soon, "list": [{"customer": clip(r["customer_name"], 50), "qty": r["qty"], "plant": clip(r["plant"], 50), "on": r["collect_on"]} for r in collect]},
+        "batches_ready": [{"batch": f["label"], "free": f["available"], "preordered": f["pending"]} for f in ready[:8]],
+        "batches_ready_within_a_week": [{"batch": f["label"], "in_days": f["days"]} for f in coming[:8]],
+        "pos_low_stock": {"under": threshold, "items": [{"name": clip(r["name"], 50), "left": r["quantity"]} for r in low]},
+    }
+    if user["role"] == "admin":
+        owed = db.one(f"SELECT COUNT(*) AS n, COALESCE(SUM(i.balance_due), 0) AS owed FROM invoices i WHERE i.business_id=? AND {SALE} AND i.balance_due > 0.005", (biz,))
+        top = db.all(f"SELECT customer_name, SUM(balance_due) AS owed FROM invoices i WHERE i.business_id=? AND {SALE} AND i.balance_due > 0.005 GROUP BY customer_name ORDER BY owed DESC LIMIT 3", (biz,))
+        we_owe = db.one("SELECT COALESCE(SUM(total_cost - COALESCE(amount_paid, total_cost)), 0) AS n FROM procurements WHERE business_id=?", (biz,))["n"]
+        rate = H.hr_settings_for(db, biz)["tray_rate"]
+        trays = db.all(
+            """SELECT t.employee_name, SUM(t.trays) AS trays FROM planting_trays t JOIN employees e ON e.id = t.employee_id AND e.business_id = t.business_id
+               WHERE t.business_id=? AND t.paid_payslip_id IS NULL AND e.employment_type='Casual Worker' GROUP BY t.employee_name ORDER BY trays DESC LIMIT 6""",
+            (biz,),
+        )
+        asks = db.one("SELECT COUNT(*) AS n FROM permission_requests WHERE business_id=? AND status='pending'", (biz,))["n"]
+        out.update({
+            "customers_owe": {"invoices": owed["n"], "amount": r2(owed["owed"]), "most": [{"customer": clip(r["customer_name"], 50), "owes": r2(r["owed"])} for r in top]},
+            "we_owe_suppliers": r2(we_owe),
+            "trays_to_pay": [{"worker": clip(r["employee_name"], 50), "trays": r2(r["trays"]), "pay": r2(r["trays"] * rate) if rate else None} for r in trays],
+            "requests_waiting_for_approval": asks,
+        })
+    ctx.source("Up next", H.url_for("up_next"))
+    return {k: v for k, v in out.items() if v not in ([], None)}
+
+
+@tool("Plan a planting: seeds and trays to plant, and when, to have enough seedlings by a day. Uses past batches' mortality and growing time, and seed in stock.",
+      {"plant": S("e.g. Tomato"), "seedlings": N("Wanted; leave out to cover pre-orders not yet covered"), "ready_by": S("YYYY-MM-DD"), "mortality_pct": NUM, "holes_per_tray": N()},
+      required=["plant"])
+def plan_planting(ctx, args):
+    db, biz = ctx.db, ctx.biz
+    plant = text_of(args, "plant", 60)
+    if not plant:
+        raise ToolError("Which plant?")
+    past = db.all("SELECT * FROM plantings WHERE business_id=? AND (LOWER(name) LIKE ? OR LOWER(seed_name) LIKE ?) ORDER BY planted_on DESC, id DESC LIMIT 20", (biz, like(plant), like(plant)))
+    figures = H.with_figures(db, biz, past)
+    mortality = number_of(args.get("mortality_pct"))
+    basis = {}
+    if mortality is None:
+        if past:
+            mortality = round(sum(p["mortality_pct"] for p in past) / len(past), 1)
+            basis["mortality"] = f"average of {len(past)} past batch(es)"
+        else:
+            mortality, basis["mortality"] = 15.0, "no past batches: 15% assumed, ask the person"
+    if not 0 <= mortality < 100:
+        raise ToolError("Mortality must be from 0 up to (not including) 100.")
+    spans = []
+    for p in past:
+        a, b = H.day_or_none(p["planted_on"] or ""), H.day_or_none(p["ready_on"] or "")
+        if a and b:
+            spans.append((datetime.date.fromisoformat(b) - datetime.date.fromisoformat(a)).days)
+    grow_days = round(sum(spans) / len(spans)) if spans else None
+    wanted = number_of(args.get("seedlings"), int)
+    if wanted is None:
+        pending = sum(f["pending"] for f in figures if f["still_in_greenhouse"])
+        free = sum(f["available"] for f in figures if f["still_in_greenhouse"])
+        wanted = max(0, pending - free)
+        basis["seedlings"] = f"pre-orders waiting ({pending}) less seedlings still free in batches growing ({free})"
+    if wanted <= 0:
+        return {"plant": plant, "seedlings_needed": 0, "basis": basis, "say": "The pre-orders are already covered by the batches growing; ask how many seedlings they want if they want more."}
+    holes = number_of(args.get("holes_per_tray"), int) or (H.hr_settings_for(db, biz)["holes_per_tray"] or None)
+    if holes is None:
+        used = [p["holes_per_tray"] for p in past if p["holes_per_tray"]]
+        holes = max(set(used), key=used.count) if used else None
+    seeds = math.ceil(wanted / (1 - mortality / 100) - 1e-9)
+    out = {"plant": plant, "seedlings_needed": wanted, "mortality_pct": mortality, "seeds_to_plant": seeds, "basis": basis}
+    if holes:
+        out.update(holes_per_tray=holes, trays_to_plant=math.ceil(seeds / holes - 1e-9))
+    if grow_days is not None:
+        out["growing_days_usually"] = grow_days
+        ready_by = H.day_or_none(str(args.get("ready_by") or ""))
+        if ready_by:
+            plant_by = H.add_days(ready_by, -grow_days)
+            out.update(ready_by=ready_by, plant_by=plant_by, late=plant_by < ctx.today)
+    seed_items = [r for r in db.all("SELECT name, quantity, seeds_per_pack, loose_seeds, category FROM products WHERE business_id=? AND LOWER(name) LIKE ?", (biz, like(plant))) if H.is_seed_category(r["category"])]
+    if seed_items:
+        have = sum((r["quantity"] or 0) * (r["seeds_per_pack"] or 0) + (r["loose_seeds"] or 0) for r in seed_items)
+        out["seed_in_stock"] = {"items": [clip(r["name"], 50) for r in seed_items][:4], "seeds": have, "enough": have >= seeds}
+    ctx.source("Planting Records", H.url_for("planting_list"))
+    return out
+
+
+@tool("Write a message for the person to send a customer themselves (a payment or collection reminder...). It is shown with Copy and Open in WhatsApp; nothing is sent.",
+      {"customer": S("Name or phone"), "message": S("The whole message, in the person's language")}, required=["customer", "message"], perm="sell")
+def draft_message(ctx, args):
+    term, text = text_of(args, "customer", 80), " ".join(str(args.get("message") or "").split())[:900]
+    if not text:
+        raise ToolError("Write the message first.")
+    db, biz = ctx.db, ctx.biz
+    found = db.all("SELECT name, phone FROM customers WHERE business_id=? AND (LOWER(name) = ? OR phone_key = ?)", (biz, term.lower(), H.phone_key(term)))
+    found = found or db.all("SELECT name, phone FROM customers WHERE business_id=? AND LOWER(name) LIKE ? LIMIT 6", (biz, like(term)))
+    if len(found) > 1 and len({f["phone"] for f in found}) > 1:
+        raise ToolError("More than one customer fits '" + term + "': " + "; ".join(f"{f['name']} ({f['phone'] or 'no phone'})" for f in found) + ". Ask which one.")
+    name, phone = (found[0]["name"], found[0]["phone"] or "") if found else (term, term if len(H.phone_key(term)) >= 9 else "")
+    ctx.draft(f"Message to {clip(name, 60)}", text, phone)
+    return {"drafted": True, "to": name, "phone": phone or None,
+            "say": "Say the message is ready below to copy or open in WhatsApp" + ("" if phone else " (no phone number is recorded, so it can only be copied)") + ". Nothing was sent."}
