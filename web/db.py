@@ -246,6 +246,13 @@ SCHEMA = [
         id {pk}, business_id INTEGER NOT NULL, user_id INTEGER NOT NULL, kind TEXT NOT NULL, request TEXT NOT NULL, summary TEXT NOT NULL,
         status TEXT NOT NULL DEFAULT 'pending', created_at TEXT, expires_at TEXT, decided_at TEXT, result TEXT DEFAULT '', link TEXT DEFAULT ''
     )""",
+    # One row for every request the assistant answered, to follow its cost: who, when, what kind (a question to Gemini, one the app answered
+    # itself, the evening brief, a recording heard, an answer spoken), the model, how many calls it took, what was sent and the tokens Google counted.
+    """CREATE TABLE IF NOT EXISTS assistant_calls (
+        id {pk}, business_id INTEGER NOT NULL, user_id INTEGER NOT NULL, created_at TEXT NOT NULL, kind TEXT NOT NULL, model TEXT DEFAULT '',
+        rounds INTEGER NOT NULL DEFAULT 0, chars_sent INTEGER NOT NULL DEFAULT 0, input_tokens INTEGER NOT NULL DEFAULT 0,
+        output_tokens INTEGER NOT NULL DEFAULT 0, cached_tokens INTEGER NOT NULL DEFAULT 0
+    )""",
     # What the assistant was asked to remember: a person's own preference (user_id set) or one for the whole business (user_id NULL, only
     # from an admin). It is part of what the assistant is told with every question; each can be seen and deleted in the panel and in Settings.
     """CREATE TABLE IF NOT EXISTS assistant_memory (
@@ -288,6 +295,7 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS planting_trays_by_planting ON planting_trays (business_id, planting_id)",
     "CREATE INDEX IF NOT EXISTS planting_trays_by_employee ON planting_trays (business_id, employee_id, paid_payslip_id)",
     "CREATE INDEX IF NOT EXISTS assistant_memory_by_business ON assistant_memory (business_id, user_id)",
+    "CREATE INDEX IF NOT EXISTS assistant_calls_by_day ON assistant_calls (business_id, created_at)",
 ]
 
 # --- Postgres connections, kept between requests ---

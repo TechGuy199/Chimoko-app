@@ -191,8 +191,30 @@
         <p><strong class="warn">Not connected yet</strong>: the server has no Gemini key. Add GEMINI_API_KEY under Settings &gt; Environment Variables in Vercel, then redeploy.</p>
         {% endif %}
         <p class="muted">Today: this business has asked {{ assistant_info.usage.business_questions }} of {{ assistant_info.limits.business_questions }} questions and used voice {{ assistant_info.usage.business_voice }}
-            of {{ assistant_info.limits.business_voice }} times. Each person may ask {{ assistant_info.limits.user_questions }} a day.</p>
+            of {{ assistant_info.limits.business_voice }} times. Each person may ask {{ assistant_info.limits.user_questions }} a day, up to {{ '{:,}'.format(assistant_info.limits.user_tokens) }} tokens.
+            Simple questions (stock counts, searches, what is low, today, what to restock, moving stock to the POS) and the evening brief are answered by the app and cost nothing.</p>
     </div>
+    {% set costs = assistant_info.costs %}
+    <h3 class="spaced">Use and cost</h3>
+    {% if costs.today %}
+    <table>
+        <thead><tr><th>Today</th><th class="num">Requests</th><th class="num">By the app</th><th class="num">Tokens in</th><th class="num">Tokens out</th>{% if costs.priced %}<th class="num">Cost (US$)</th>{% endif %}</tr></thead>
+        <tbody>
+        {% for p in costs.today %}
+            <tr><td>{{ p.who }}</td><td class="num">{{ p.requests }}</td><td class="num">{{ p.by_app }}</td><td class="num">{{ '{:,}'.format(p.input_tokens) }}</td>
+                <td class="num">{{ '{:,}'.format(p.output_tokens) }}</td>{% if costs.priced %}<td class="num">{{ '%.4f' % p.cost }}</td>{% endif %}</tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="muted">Nobody has used the assistant today.</p>
+    {% endif %}
+    <p class="muted">
+        Last 7 days: {{ costs.week.requests }} requests ({{ costs.week.by_app }} answered by the app), {{ '{:,}'.format(costs.week.input_tokens) }} tokens in
+        ({{ '{:,}'.format(costs.week.cached_tokens) }} of them from Google's cache) and {{ '{:,}'.format(costs.week.output_tokens) }} out{% if costs.week.cost is not none %}, about US$ {{ '%.2f' % costs.week.cost }}{% endif %}.
+        Last 30 days: {{ costs.month.requests }} requests{% if costs.month.cost is not none %}, about US$ {{ '%.2f' % costs.month.cost }}{% endif %}.
+        {% if costs.priced %}Costs are worked out at Google's listed prices for {{ costs.model }}; Google's bill is what counts.{% else %}There is no price here for {{ costs.model }}, so no cost is worked out.{% endif %}
+    </p>
 </section>
 
 <section class="card block narrow-form">

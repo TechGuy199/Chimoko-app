@@ -10240,7 +10240,8 @@ def settings():
     departments = db.all("SELECT id, name FROM departments WHERE business_id=? ORDER BY name", (biz,))
     return render_template(
         "settings.html", departments=departments, whatsapp=whatsapp_service(),
-        assistant_info={"configured": assistant.configured(), "usage": assistant.usage_today(db, g.user), "limits": assistant.limits(g.user), "model": assistant.MODEL},
+        assistant_info={"configured": assistant.configured(), "usage": assistant.usage_today(db, g.user), "limits": assistant.limits(g.user), "model": assistant.MODEL,
+                        "costs": assistant.cost_report(db, g.user)},
         assistant_memory=assistant.memory_of(db, g.user), brief_hour=assistant.BRIEF_HOUR, cron_ready=bool(os.environ.get("CRON_SECRET")),
     )
 

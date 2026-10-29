@@ -423,7 +423,9 @@ class BusinessSeparation(unittest.TestCase):
         stand_in = A.assistant._client
         stand_in.ask = ask
         try:
-            response = self.beta.post("/assistant/chat", data={"csrf": csrf_of(self.beta), "message": "look at everything"})
+            # The words of every area, so every look-up is offered (a question gets only the tools its words call for)
+            response = self.beta.post("/assistant/chat", data={"csrf": csrf_of(self.beta),
+                                                               "message": "look at everything: sales, stock, plants, money, staff, records, alerts, remember today"})
         finally:
             stand_in.ask = None
         self.assertEqual(response.status_code, 200, response.get_data(as_text=True))

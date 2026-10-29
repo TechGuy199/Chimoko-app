@@ -8,7 +8,9 @@ not even offered to an operator. Lists are capped, text from the records is shor
 import datetime
 import json
 import math
+import re
 
+import assistant
 from assistant import H, ToolError, clip, name_check, tool
 
 # ---------- Descriptions of what a tool takes (kept terse: every call to the model carries all of them) ----------
@@ -1825,3 +1827,184 @@ def prepare_assistant_name(ctx, args):
     rows = [["Name", name], ["Who sees it", "Everyone in the business"]]
     ctx.propose("name", "admin", title, rows, "/settings/assistant/name", {"assistant_name": name})
     return shown(title, rows)
+
+
+# ================= Which tools a question is offered =================
+# Every call to Gemini carries the description of every tool it is offered, and those descriptions are most of what is sent. So a question
+# is offered only the areas its words call for (assistant.areas_for), plus the few tools every question gets; when that is not enough, the
+# model asks for more with more_tools. Each area's prepare tools (the largest descriptions) are a second group, "<area>+", offered only
+# when the person asks for something to be done rather than asks a question. A tool may sit in more than one group.
+GROUPS = {
+    "sales": ("sales_report", "find_invoices", "invoice_details", "product_buyers", "customers", "deliveries_and_collections"),
+    "sales+": ("prepare_sale", "prepare_payment", "prepare_handover_change", "draft_message"),
+    "stock": ("stock_watch", "purchases", "suppliers"),
+    "stock+": ("prepare_purchase", "prepare_transfer", "prepare_supplier_payment"),
+    "planting": ("plantings", "preorders", "plan_planting", "daily_activities"),
+    "planting+": ("prepare_preorder", "prepare_planting", "prepare_tray_payslip"),
+    "money": ("financial_overview", "cashbook_entries", "customers", "suppliers"),
+    "money+": ("prepare_money_entry", "prepare_supplier_payment"),
+    "staff": ("staff", "daily_activities"),
+    "staff+": ("prepare_tray_payslip",),
+    "records": ("audit_log", "my_alerts"),
+    "memory": ("remember_this", "forget_this", "stock_preference", "prepare_assistant_name"),
+    "today": ("attention_today", "deliveries_and_collections", "preorders"),
+}
+AREAS = tuple(a for a in GROUPS if not a.endswith("+"))
+# A question (rather than something to do) gets only the areas' look-ups
+ASKING = re.compile(r"^\s*(how|what|which|who|whom|when|where|why|did|do|does|is|are|was|were|has|have|show|list|tell me|give me|can you tell|any)\b")
+DOING = re.compile(r"\b(prepare|record|make|create|add|enter|log|do it|go ahead|yes|yeah|ok|okay|confirm)\b")
+AREA_WORDS = {area: re.compile(r"\b(" + words + r")\b") for area, words in {
+    "sales": r"sales?|sell\w*|sold|invoices?|inv-\d+|revenue|takings|customers?|clients?|buyers?|bought|paid|pay|paying|payments?|owe[sd]?|owing|debts?|"
+             r"deliver\w*|collect\w*|remind\w*|message|whatsapp|discounts?|refund\w*",
+    "stock": r"stock\w*|inventor\w*|restock\w*|buy|buying|purchas\w*|receipts?|suppliers?|move|moving|transfer\w*|low|items?|products?|expir\w*|prices?|"
+             r"costs?|margins?|re-?order\w*|order more|run(ning)? out|watch out|warnings?|shelf|pos|store",
+    "planting": r"plant\w*|seeds?|seedlings?|trays?|batch\w*|greenhouse|pre-?orders?|mortality|germin\w*|grow\w*|plots?|activit\w*|nursery",
+    "money": r"money|cash|bank|profits?|loss|losses|expenses?|spend|spent|rent|fuel|transport|accounts?|balances?|income|worth|airtel|mtn|loans?|financ\w*|"
+             r"owe[sd]?|owing|debts?",
+    "staff": r"staff|employees?|payroll|payslips?|salar\w*|napsa|nhima|wages?|workers?|casuals?",
+    "records": r"delet\w*|adjust\w*|removed|requests?|permissions?|alerts?|notifications?|audit|who changed",
+    "memory": r"remember\w*|forget|forgot|prefer\w*|always|never|from now on|keep (about |around )?\d+|call (you|yourself)|your name|rename|name you",
+    "today": r"today|tomorrow|tonight|attention|due|urgent|to do|brief|this morning|this week",
+}.items()}
+
+
+@tool("Get more tools (look-ups and prepare tools) when none offered fits. Areas: sales (invoices, customers, deliveries, payments, messages), stock (restock, "
+      "purchases, suppliers, transfers), planting (batches, pre-orders, trays, plots), money (accounts, expenses), staff (payroll), records (alerts, "
+      "adjustments, deleted), memory (preferences, your name), today.", {"areas": {"type": "array", "items": E(*AREAS)}}, required=["areas"])
+def more_tools(ctx, args):
+    wanted = {a for a in (args.get("areas") or []) if a in AREAS} if isinstance(args.get("areas"), list) else set()
+    if not wanted:
+        raise ToolError("Name one or more areas: " + ", ".join(AREAS) + ".")
+    ctx.areas |= wanted | {a + "+" for a in wanted if a + "+" in GROUPS}
+    return {"added": sorted(wanted), "say": "Those tools are offered now: use them."}
+
+
+for _area, _names in GROUPS.items():
+    for _name in _names:
+        assistant.TOOLS[_name].groups.add(_area)
+
+
+# ================= Simple questions the app answers itself, without Gemini =================
+# Matched on their whole wording, so only a question that plainly is one of these is answered here; anything else goes to Gemini.
+def plain_words(message):
+    t = " ".join(re.sub(r"[?!.,;:“”\"]+", " ", message.lower().replace("’", "'")).split())
+    return re.sub(r"\s+(please|for me|now|right now)$", "", re.sub(r"^((please|hey|hi|ok|okay|so)\s+)+", "", t))
+
+
+QUICK_TODAY = re.compile(r"^(what|whats|what's|what is|anything that) (needs|need|requires|wants) (my |our )?attention( today)?$|^what (should|do|must) (i|we) do today$"
+                         r"|^what('s| is) (on |due )?(for )?today$|^(today|my day|today's brief)$")
+QUICK_RESTOCK = re.compile(r"^(what|which (items|things|products|stock)) (should|do|must) (i|we) (re-?stock|buy|order)( now| this month| this week| today)?$"
+                           r"|^(what|anything) to (re-?stock|buy|order)$|^(re-?stock|restocking)( advice| suggestions)?$|^what needs re-?stocking$")
+QUICK_LOW = re.compile(r"^(what|which (items|products|things))( is|'s| are)? (low|running low|running out|low on stock|low in stock|almost finished|finishing)$"
+                       r"|^(show |list )?(me )?(the )?low stock( items)?$|^what('s| is) low( on stock| in stock)?$|^anything low( on stock)?$")
+QUICK_COUNT = re.compile(r"^how many (different )?(items|products) (do we have|are there|are in stock|in stock|do we stock)$")
+QUICK_LOOKUP = [re.compile(p) for p in (
+    r"^how (many|much) (?P<item>.+?) (do we have( left)?|have we got( left)?|are (there|left|in stock)|is (there|left|in stock)|in stock|left)$",
+    r"^(do we have|have we got|is there|are there) (any )?(?P<item>.+?)( in stock| left)?$",
+    r"^(stock|how much stock|stock level|quantity) (of|for) (?P<item>.+)$",
+    r"^is (the )?(?P<item>.+?) in stock$",
+    r"^(find|search for|search|look up|lookup|show me|where is|where are) (the |a |an |some )?(?P<item>.+)$",
+    r"^(what is the price of|price of|how much is|how much are|how much does|how much do) (the |a |an )?(?P<item>.+?)( cost| sell for)?$",
+)]
+QUICK_MOVE = re.compile(r"^(move|transfer|put|send|take) (?P<n>\d+) (?P<item>.+?) (to|onto|on|into) (the )?(?P<to>pos|shop|till|point of sale|counter|farm|farm use)$")
+
+
+def answered(ctx, reply):
+    return {"reply": reply, "sources": [{"label": label, "url": url} for label, url in ctx.sources], "actions": ctx.actions, "drafts": [], "notes": []}
+
+
+def spellings(term):
+    """A name as said, and without a plural ending (hoes: hoe; boxes: box)."""
+    term = re.sub(r"^(the|a|an|any|some|our) ", "", term.strip())
+    return [term] + ([term[:-2]] if term.endswith("es") else []) + ([term[:-1]] if term.endswith("s") else [])
+
+
+def stock_matches(ctx, term):
+    """The stock a term names, tried as it is and without a plural ending: (the items by code, whether more fit than were read), or ({}, False)."""
+    for t in spellings(term):
+        if len(t) < 2:
+            continue
+        found = find_stock(ctx, {"query": t, "limit": 6})
+        items = {}
+        for r in found["pos"]["items"]:
+            items.setdefault(r["code"], {"name": r["name"], "price": r["price"]})["pos"] = r["in_stock"]
+        for r in found["inventory"]["items"]:
+            entry = items.setdefault(r["code"], {"name": r["name"], "price": r["price"]})
+            entry["store"] = r["quantity"]
+        if items:
+            return items, max(found["pos"]["matching"], found["inventory"]["matching"]) > 6
+    return {}, False
+
+
+def quick_answer(ctx, message):
+    """The answer the app gives itself to a simple question, in the same form as the assistant's, or None to ask Gemini."""
+    t = plain_words(message)
+    name = assistant.name_of(ctx.user).lower()
+    if t.startswith(name + " "):
+        t = t[len(name) + 1:]
+    if not t or len(t) > 120:
+        return None
+    if QUICK_TODAY.match(t):
+        a = attention_today(ctx, {})
+        lines = assistant.due_lines(a, "today")
+        low = (a.get("pos_low_stock") or {}).get("items") or []
+        if low:
+            lines.append("Low on the POS: " + ", ".join(f"{r['name']} ({r['left']} left)" for r in low[:5]) + (f" and {len(low) - 5} more" if len(low) > 5 else ""))
+        coming = a.get("batches_ready_within_a_week") or []
+        if coming:
+            lines.append("Ready within a week: " + ", ".join(f"{b['batch']} (in {b['in_days']} days)" for b in coming[:3]))
+        lines += assistant.money_lines(ctx, a)
+        if a.get("requests_waiting_for_approval"):
+            lines.append(assistant.plural(a["requests_waiting_for_approval"], "request is", "requests are") + " waiting for your approval")
+        return answered(ctx, ("Today:\n" + "\n".join("- " + line for line in lines)) if lines else "Nothing needs attention today.")
+    if QUICK_RESTOCK.match(t):
+        s = stock_report(ctx, "all", "", 5)
+        lines = assistant.stock_lines(ctx, s)
+        if not lines:
+            return answered(ctx, "Nothing needs restocking for the next " + f"{ctx.user['stock_cover_days'] or DEFAULT_COVER} days, and there is nothing to watch out for.")
+        text = "\n".join("- " + line for line in lines)
+        if s.get("ask"):
+            text += "\nI cannot tell yet for " + ", ".join(a["item"] for a in s["ask"]) + ": there are too few records. How much do you want to keep?"
+        return answered(ctx, "What to restock:\n" + text + "\nSay which to prepare and I will put it on a card for you to confirm.")
+    if QUICK_LOW.match(t):
+        found = find_stock(ctx, {"low_only": True, "limit": 10})
+        rows = [f"{r['name']}: {r['in_stock']} on the POS" for r in found["pos"]["items"]] + [f"{r['name']}: {r['quantity']} in the store" for r in found["inventory"]["items"]]
+        if not rows:
+            return answered(ctx, f"Nothing is low: every item has at least {found['low_stock_means_under']}.")
+        more = found["pos"]["matching"] + found["inventory"]["matching"] - len(rows)
+        return answered(ctx, f"Low (under {found['low_stock_means_under']}):\n" + "\n".join("- " + r for r in rows) + (f"\n- and {more} more" if more > 0 else ""))
+    if QUICK_COUNT.match(t):
+        found = find_stock(ctx, {"limit": 1})
+        return answered(ctx, f"There are **{found['inventory']['matching']}** items in the inventory ({found['inventory']['units']:,} units in all) and "
+                             f"{found['pos']['matching']} listed on the POS ({found['pos']['units']:,} units).")
+    move = QUICK_MOVE.match(t)
+    if move and assistant.may(ctx.user, "transfer"):
+        destination = "farm" if move.group("to").startswith("farm") else "pos"
+        for name in spellings(move.group("item")):
+            try:
+                prepare_transfer(ctx, {"item": name, "quantity": int(move.group("n")), "to": destination})
+                break
+            except ToolError:
+                continue
+        else:
+            return None   # nothing fits, several do, or there is not enough: the assistant asks about it
+        card = ctx.actions[-1]
+        return answered(ctx, f"I prepared it below: **{card['title']}**. Nothing moves until you press Confirm.")
+    for pattern in QUICK_LOOKUP:
+        m = pattern.match(t)
+        if not m:
+            continue
+        items, more = stock_matches(ctx, m.group("item"))
+        if not items:
+            return None   # not stock: perhaps a customer or an invoice, for the assistant
+        lines = []
+        for code, it in list(items.items())[:5]:
+            where = []
+            if "pos" in it:
+                where.append(f"**{it['pos']}** on the POS")
+            if "store" in it:
+                where.append(f"**{it['store']}** in the store")
+            lines.append(f"{it['name']} ({code}): " + " and ".join(where) + (f", sells at {ctx.money(it['price'])}" if it.get("price") else ""))
+        text = "\n".join("- " + line for line in lines) if len(lines) > 1 else lines[0]
+        return answered(ctx, text + ("\n- and more: say more of the name to narrow it" if more or len(items) > 5 else ""))
+    return None
