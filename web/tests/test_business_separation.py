@@ -142,7 +142,7 @@ class StandInGemini:
     def transcribe(self, wav):
         return "hello"
 
-    def speak(self, text):
+    def speak(self, text, voice=None):
         return A.assistant.as_wav(b"\x00\x00" * 240, None, 24000)
 
 

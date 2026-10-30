@@ -11,7 +11,7 @@ import math
 import re
 
 import assistant
-from assistant import H, ToolError, clip, name_check, tool
+from assistant import H, ToolError, clip, tool
 
 # ---------- Descriptions of what a tool takes (kept terse: every call to the model carries all of them) ----------
 def S(description=None):
@@ -560,9 +560,10 @@ GUIDE = {
     "assistant": "The assistant (this chat) can look things up, explain the app, say what needs attention today (the sun button), what to restock and what to watch out for, and plan plantings. "
                  "It prepares sales, pre-orders, payments, delivery changes, purchases, plantings with trays, tray payslips, stock transfers, supplier payments and money entries for you to confirm; "
                  "nothing is done until you press Confirm. The camera button sends a photo or PDF: a supplier's receipt becomes a purchase, a tally of trays a planting. It writes customer "
-                 "reminders for you to copy or open in WhatsApp. Tell it a preference and it remembers it (the bookmark button lists what it remembers, to delete any). Every evening it "
-                 "gives a brief of tomorrow and of what to restock. An admin can give it a name (Settings); with the ear button on, saying the name while the panel is open asks it a question "
-                 "out loud, hands-free.",
+                 "reminders for you to copy or open in WhatsApp. Tell it a preference and it remembers it (the menu lists what it remembers, to delete any). Every evening it "
+                 "gives a brief of tomorrow and of what to restock. With the ear on, saying the wake phrase (set by an admin in Settings, like 'Hey Assistant') asks it a question out "
+                 "loud; the stop phrase switches listening off. Hands-free mode is a spoken conversation: it answers, suggests and prepares things, and you say yes or no to confirm. "
+                 "Each person picks the voice it speaks with from the menu.",
 }
 
 
@@ -1818,16 +1819,6 @@ def stock_preference(ctx, args):
     return {"saved": True, "item": name, **new}
 
 
-@tool("Prepare a new name for the assistant (everyone sees it), for the person to confirm.", {"name": S()}, required=["name"], admin=True)
-def prepare_assistant_name(ctx, args):
-    name, problem = name_check(text_of(args, "name", 40))
-    if problem:
-        raise ToolError(problem)
-    title = f"Call the assistant {name}"
-    rows = [["Name", name], ["Who sees it", "Everyone in the business"]]
-    ctx.propose("name", "admin", title, rows, "/settings/assistant/name", {"assistant_name": name})
-    return shown(title, rows)
-
 
 # ================= Which tools a question is offered =================
 # Every call to Gemini carries the description of every tool it is offered, and those descriptions are most of what is sent. So a question
@@ -1846,7 +1837,7 @@ GROUPS = {
     "staff": ("staff", "daily_activities"),
     "staff+": ("prepare_tray_payslip",),
     "records": ("audit_log", "my_alerts"),
-    "memory": ("remember_this", "forget_this", "stock_preference", "prepare_assistant_name"),
+    "memory": ("remember_this", "forget_this", "stock_preference"),
     "today": ("attention_today", "deliveries_and_collections", "preorders"),
 }
 AREAS = tuple(a for a in GROUPS if not a.endswith("+"))
@@ -1863,14 +1854,14 @@ AREA_WORDS = {area: re.compile(r"\b(" + words + r")\b") for area, words in {
              r"owe[sd]?|owing|debts?",
     "staff": r"staff|employees?|payroll|payslips?|salar\w*|napsa|nhima|wages?|workers?|casuals?",
     "records": r"delet\w*|adjust\w*|removed|requests?|permissions?|alerts?|notifications?|audit|who changed",
-    "memory": r"remember\w*|forget|forgot|prefer\w*|always|never|from now on|keep (about |around )?\d+|call (you|yourself)|your name|rename|name you",
+    "memory": r"remember\w*|forget|forgot|prefer\w*|always|never|from now on|keep (about |around )?\d+",
     "today": r"today|tomorrow|tonight|attention|due|urgent|to do|brief|this morning|this week",
 }.items()}
 
 
 @tool("Get more tools (look-ups and prepare tools) when none offered fits. Areas: sales (invoices, customers, deliveries, payments, messages), stock (restock, "
       "purchases, suppliers, transfers), planting (batches, pre-orders, trays, plots), money (accounts, expenses), staff (payroll), records (alerts, "
-      "adjustments, deleted), memory (preferences, your name), today.", {"areas": {"type": "array", "items": E(*AREAS)}}, required=["areas"])
+      "adjustments, deleted), memory (preferences), today.", {"areas": {"type": "array", "items": E(*AREAS)}}, required=["areas"])
 def more_tools(ctx, args):
     wanted = {a for a in (args.get("areas") or []) if a in AREAS} if isinstance(args.get("areas"), list) else set()
     if not wanted:
@@ -1975,8 +1966,9 @@ def quick_answer(ctx, message):
         return answered(ctx, f"Low (under {found['low_stock_means_under']}):\n" + "\n".join("- " + r for r in rows) + (f"\n- and {more} more" if more > 0 else ""))
     if QUICK_COUNT.match(t):
         found = find_stock(ctx, {"limit": 1})
-        return answered(ctx, f"There are **{found['inventory']['matching']}** items in the inventory ({found['inventory']['units']:,} units in all) and "
-                             f"{found['pos']['matching']} listed on the POS ({found['pos']['units']:,} units).")
+        n, listed = found["inventory"]["matching"], found["pos"]["matching"]
+        return answered(ctx, f"There {'is' if n == 1 else 'are'} **{n}** {'item' if n == 1 else 'items'} in the inventory ({found['inventory']['units']:,} units in all) and "
+                             f"{listed} listed on the POS ({found['pos']['units']:,} units).")
     move = QUICK_MOVE.match(t)
     if move and assistant.may(ctx.user, "transfer"):
         destination = "farm" if move.group("to").startswith("farm") else "pos"

@@ -192,7 +192,8 @@
 {% if user and assistant_on %}
 <script src="{{ asset('assistant.js') }}" data-csrf="{{ csrf_token() }}" data-state="{{ url_for('assistant_state') }}" data-chat="{{ url_for('assistant_chat') }}"
         data-listen="{{ url_for('assistant_listen') }}" data-speak="{{ url_for('assistant_speak') }}" data-clear="{{ url_for('assistant_clear') }}"
-        data-actions="/assistant/actions/" data-user="{{ user.username }}" data-name="{{ assistant_name }}" data-brief="{{ url_for('assistant_brief') }}"
+        data-actions="/assistant/actions/" data-user="{{ user.username }}" data-wake="{{ assistant_phrases[0] }}" data-stop="{{ assistant_phrases[1] }}"
+        data-voice-url="{{ url_for('assistant_voice') }}" data-brief="{{ url_for('assistant_brief') }}"
         data-brief-waiting="{{ '1' if brief_waiting else '' }}" data-memory="/assistant/memory" data-my-brief="{{ url_for('assistant_my_brief') }}"
         data-stock-prefs="/assistant/stock-preferences/"></script>
 {% endif %}

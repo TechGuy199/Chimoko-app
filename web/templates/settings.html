@@ -129,15 +129,21 @@
         <button class="btn primary">Save</button>
     </form>
 
-    <h3 class="spaced">Its name</h3>
-    <form method="post" action="{{ url_for('save_assistant_name') }}" class="toolbar">
+    <h3 class="spaced">Wake and stop phrases</h3>
+    <form method="post" action="{{ url_for('save_assistant_phrases') }}">
         {{ csrf_field() }}
-        <input name="assistant_name" value="{{ assistant_name if assistant_name != 'Assistant' else '' }}" maxlength="20" placeholder="Assistant" aria-label="The assistant's name" autocomplete="off">
-        <button class="btn primary">Save name</button>
+        <label>Wake phrase: said to ask the assistant something while it listens
+            <input name="wake_phrase" value="{{ assistant_phrases[0] }}" maxlength="40" placeholder="Hey Assistant" autocomplete="off">
+        </label>
+        <label>Stop phrase: said to switch its listening off, even while its panel is small
+            <input name="stop_phrase" value="{{ assistant_phrases[1] }}" maxlength="40" placeholder="Stop listening" autocomplete="off">
+        </label>
+        <button class="btn primary">Save phrases</button>
     </form>
     <p class="muted">
-        Everyone in the business sees it. With <strong>Listen</strong> on (the ear button in the assistant's panel, in Chrome, Edge or Android), saying the name while the panel is open asks it a question
-        out loud and it answers aloud. While listening is on, the browser sends what the microphone hears to its own speech service (Google's, in Chrome) to pick out the name. Leave the box empty for "Assistant".
+        For everyone in the business. With <strong>Listen</strong> on (the ear in the assistant's panel, in Chrome, Edge or Android), the wake phrase and a question ("Hey Mark, what is low?") ask it
+        out loud, and it answers in the voice each person chose; hands-free mode needs no wake phrase. While listening is on, the browser sends what the microphone hears to its own speech service
+        (Google's, in Chrome) to pick out the phrases.
     </p>
 
     <h3 class="spaced">Evening brief and restocking</h3>
@@ -190,8 +196,9 @@
         {% else %}
         <p><strong class="warn">Not connected yet</strong>: the server has no Gemini key. Add GEMINI_API_KEY under Settings &gt; Environment Variables in Vercel, then redeploy.</p>
         {% endif %}
-        <p class="muted">Today: this business has asked {{ assistant_info.usage.business_questions }} of {{ assistant_info.limits.business_questions }} questions and used voice {{ assistant_info.usage.business_voice }}
-            of {{ assistant_info.limits.business_voice }} times. Each person may ask {{ assistant_info.limits.user_questions }} a day, up to {{ '{:,}'.format(assistant_info.limits.user_tokens) }} tokens.
+        <p class="muted">Today: this business has asked {{ assistant_info.usage.business_questions }}{% if assistant_info.limits.business_questions %} of {{ assistant_info.limits.business_questions }}{% endif %}
+            questions and used voice {{ assistant_info.usage.business_voice }}{% if assistant_info.limits.business_voice %} of {{ assistant_info.limits.business_voice }}{% endif %} times.
+            {% if assistant_info.limits.user_questions %}Each person may ask {{ assistant_info.limits.user_questions }} a day.{% else %}There is no daily limit on questions.{% endif %}
             Simple questions (stock counts, searches, what is low, today, what to restock, moving stock to the POS) and the evening brief are answered by the app and cost nothing.</p>
     </div>
     {% set costs = assistant_info.costs %}

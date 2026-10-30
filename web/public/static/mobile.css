@@ -231,3 +231,5 @@ dialog.assistant { z-index: 60; }
 .assistant-photo { min-width: 44px; min-height: 44px; }
 .assistant-bubble { bottom: calc(var(--tabbar-height) + var(--safe-bottom) + 24px); right: 76px; }
 .assistant-head-tools { gap: 0; }
+.assistant-mini { bottom: calc(var(--tabbar-height) + var(--safe-bottom) + 14px); right: 14px; }
+.assistant-mini-close, .assistant-menu button { min-height: 44px; min-width: 44px; }

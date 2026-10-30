@@ -1139,12 +1139,42 @@ dialog.assistant[open] { display: flex; animation: assistant-in 0.2s var(--ease)
 .assistant-card-result { margin: 0 0 8px; font-size: 13.5px; font-weight: 600; }
 .assistant-status { margin: 0; padding: 6px 16px; color: var(--text-muted); font-size: 13px; }
 .assistant-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.assistant-listening { display: flex; align-items: center; gap: 8px; margin: 0 12px 4px; padding: 6px 12px; border-radius: 999px; font-size: 13px;
-    color: var(--text-muted); background: rgba(var(--ink), 0.06); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.assistant-listening::before { content: ""; flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%; background: var(--warn-text); }
-.assistant-listening.awake { color: var(--text); background: color-mix(in srgb, var(--primary) 14%, transparent); }
-.assistant-listening.awake::before { background: var(--primary); animation: assistant-pulse 1.2s ease-in-out infinite; }
-.assistant-listening[hidden] { display: none; }
+/* Listening: a bar above the box, and the small panel it shrinks to. The wave rests while it listens, moves with the person's voice and with its own */
+.assistant-listening { display: flex; align-items: center; gap: 10px; margin: 0 12px 4px; padding: 7px 14px; border-radius: 999px; font-size: 13px;
+    color: var(--text-muted); background: rgba(var(--ink), 0.06); transition: color 0.3s var(--ease), background 0.3s var(--ease); }
+.assistant-listening[hidden], .assistant-mini[hidden] { display: none; }
+.assistant-listening-text, .assistant-mini-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.assistant-wave { display: inline-flex; align-items: center; gap: 3px; flex: 0 0 auto; height: 20px; }
+.assistant-wave i { display: block; width: 3px; height: 4px; border-radius: 3px; background: currentColor; opacity: 0.5; }
+[data-voice="listening"] .assistant-wave i { animation: assistant-wave-rest 2.6s ease-in-out infinite; }
+[data-voice="hearing"] .assistant-wave i, [data-voice="speaking"] .assistant-wave i { opacity: 0.95; animation: assistant-wave-live 0.95s ease-in-out infinite; }
+[data-voice="thinking"] .assistant-wave i { animation: assistant-wave-think 1.3s ease-in-out infinite; }
+.assistant-wave i:nth-child(2) { animation-delay: -0.18s; }
+.assistant-wave i:nth-child(3) { animation-delay: -0.36s; }
+.assistant-wave i:nth-child(4) { animation-delay: -0.54s; }
+.assistant-wave i:nth-child(5) { animation-delay: -0.72s; }
+[data-voice="hearing"], [data-voice="speaking"] { color: var(--text); background: color-mix(in srgb, var(--primary) 14%, transparent); }
+[data-voice="hearing"] .assistant-wave, [data-voice="speaking"] .assistant-wave { color: var(--primary); }
+@keyframes assistant-wave-rest { 0%, 100% { height: 4px; } 50% { height: 8px; } }
+@keyframes assistant-wave-live { 0%, 100% { height: 5px; } 35% { height: 18px; } 65% { height: 10px; } }
+@keyframes assistant-wave-think { 0%, 100% { height: 5px; opacity: 0.3; } 50% { height: 10px; opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .assistant-wave i { animation: none !important; } [data-voice="hearing"] .assistant-wave i, [data-voice="speaking"] .assistant-wave i { height: 12px; } }
+dialog.assistant.mini { display: none !important; }
+.assistant-mini { position: fixed; right: 18px; bottom: 18px; z-index: 41; display: flex; align-items: center; gap: 4px; padding: 5px 5px 5px 6px; border: 1px solid var(--line);
+    border-radius: 999px; background: var(--bg); color: var(--text-muted); box-shadow: 0 10px 28px rgba(0, 0, 0, 0.35); font: 13.5px/1.35 var(--font-family);
+    -webkit-font-smoothing: antialiased; animation: assistant-in 0.2s var(--ease); }
+.assistant-mini-open { display: flex; align-items: center; gap: 10px; max-width: min(280px, calc(100vw - 110px)); padding: 6px 10px; border: 0; border-radius: 999px;
+    background: none; color: inherit; font: inherit; cursor: pointer; }
+.assistant-mini-close { display: grid; place-items: center; flex: 0 0 auto; width: 32px; height: 32px; padding: 0; border: 0; border-radius: 50%; cursor: pointer;
+    background: rgba(var(--ink), 0.08); color: var(--text-muted); }
+.assistant-mini-close svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; }
+.assistant-menu { position: absolute; z-index: 3; top: 52px; right: 10px; display: grid; min-width: 220px; padding: 6px; border: 1px solid var(--line); border-radius: 12px;
+    background: var(--bg); box-shadow: 0 10px 28px rgba(0, 0, 0, 0.3); }
+.assistant-menu[hidden] { display: none; }
+.assistant-menu button { padding: 9px 12px; border: 0; border-radius: 8px; background: none; color: var(--text); font: inherit; text-align: left; cursor: pointer; }
+.assistant-menu button:hover, .assistant-menu button:focus-visible { background: rgba(var(--ink), 0.08); outline: none; }
+.assistant-head .assistant-more svg { stroke-width: 3; }
+.assistant-voices select { width: 100%; margin: 0 0 10px; }
 .msg-note { align-self: flex-start; margin: -4px 0 0 6px; color: var(--text-muted); font-size: 12.5px; }
 .assistant-memory-list { margin: 0 0 10px; padding: 0; list-style: none; display: grid; gap: 6px; font-size: 13.5px; }
 .assistant-memory-list li { display: flex; align-items: center; gap: 8px; }

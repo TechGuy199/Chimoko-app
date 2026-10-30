@@ -250,11 +250,11 @@ def user_row(db, uid):
     """A login with its business's settings: what g.user holds while they are signed in."""
     return db.one(
         """SELECT u.id, u.business_id, u.username, u.role, u.can_sell, u.can_procure, u.can_transfer, u.can_delete, u.theme, u.glass,
-                  u.evening_brief AS my_brief, u.brief_day,
+                  u.evening_brief AS my_brief, u.brief_day, u.assistant_voice,
                   b.name AS business_name, b.subtitle, b.contact, b.currency, b.low_stock_threshold,
                   b.alert_phone, b.alert_low_stock, b.alert_permission, b.alert_preorders, b.alert_collections, b.alert_deliveries, b.preorder_remind_days,
                   b.backup_hour, b.last_backup_at, b.last_backup_by, b.demo_expires_at, b.assistant_enabled,
-                  b.assistant_name, b.stock_cover_days, b.evening_brief, b.brief_whatsapp
+                  b.wake_phrase, b.stop_phrase, b.stock_cover_days, b.evening_brief, b.brief_whatsapp
            FROM users u JOIN businesses b ON b.id = u.business_id WHERE u.id=?""",
         (uid,),
     )
@@ -289,7 +289,7 @@ def template_globals():
     return {
         "csrf_field": csrf_field, "user": g.get("user"), "can": can, "look": appearance_of(g.get("user")), "themes": THEMES,
         "asset": asset, "csrf_token": csrf_token, "inv_link": inv_link, "assistant_on": assistant.enabled_for(g.get("user")),
-        "assistant_name": assistant.name_of(g.user) if g.get("user") else assistant.DEFAULT_NAME,
+        "assistant_phrases": assistant.phrases_of(g.user) if g.get("user") else (assistant.DEFAULT_WAKE, assistant.DEFAULT_STOP),
         "brief_waiting": bool(g.get("user")) and assistant.brief_due(g.user),
     }
 
@@ -10522,6 +10522,7 @@ def assistant_chat():
     attachment = upload.read(assistant.MAX_ATTACHMENT_BYTES + 1) if upload and upload.filename else None
     return assistant_json(lambda: assistant.converse(
         get_db(), g.user, request.form.get("message", ""), voice=request.form.get("voice") == "1", attachment=attachment,
+        handsfree=request.form.get("handsfree") == "1",
     ))
 
 
@@ -10539,7 +10540,7 @@ def assistant_listen():
 @need(None)
 def assistant_speak():
     try:
-        wav = assistant.speak(get_db(), g.user, request.form.get("text", ""))
+        wav = assistant.speak(get_db(), g.user, request.form.get("text", ""), voice=request.form.get("voice") or None)
     except assistant.Refused as e:
         return jsonify({"error": e.message}), e.status
     return Response(wav, mimetype="audio/wav", headers={"Cache-Control": "no-store"})
@@ -10610,17 +10611,27 @@ def assistant_my_brief():
     return jsonify({"ok": True, "on": on})
 
 
-@app.post("/settings/assistant/name")
+@app.post("/assistant/voice")
+@need(None)
+def assistant_voice():
+    return assistant_json(lambda: assistant.set_voice(get_db(), g.user, request.form.get("voice", "")))
+
+
+@app.post("/settings/assistant/phrases")
 @need("admin")
-def save_assistant_name():
+def save_assistant_phrases():
     db = get_db()
-    name, problem = assistant.name_check(request.form.get("assistant_name", ""))
-    if problem:
-        flash(problem, "error")
+    wake, problem = assistant.phrase_check(request.form.get("wake_phrase", ""), "wake")
+    stop, problem_stop = assistant.phrase_check(request.form.get("stop_phrase", ""), "stop")
+    if problem or problem_stop:
+        flash(problem or problem_stop, "error")
+    elif wake.lower() == stop.lower():
+        flash("The wake phrase and the stop phrase must be different.", "error")
     else:
-        db.execute("UPDATE businesses SET assistant_name=? WHERE id=?", (None if name == assistant.DEFAULT_NAME else name, g.user["business_id"]))
+        db.execute("UPDATE businesses SET wake_phrase=?, stop_phrase=? WHERE id=?",
+                   (None if wake == assistant.DEFAULT_WAKE else wake, None if stop == assistant.DEFAULT_STOP else stop, g.user["business_id"]))
         db.commit()
-        flash(f"The assistant is now called {name}, for everyone in the business. With listening on in its panel, saying the name asks it a question.", "ok")
+        flash(f"Saved: say \u201c{wake}\u201d to ask the assistant something while it listens, and \u201c{stop}\u201d to switch its listening off.", "ok")
     return redirect(url_for("settings") + "#assistant")
 
 
@@ -10664,11 +10675,11 @@ def cron_evening_brief():
         users = [u for u in (user_row(db, r["id"]) for r in db.all("SELECT id FROM users WHERE business_id=? ORDER BY id", (b["id"],))) if u and assistant.brief_on(u)]
         if not users:
             continue
-        name, sent = assistant.name_of(users[0]), {}
+        sent = {}
         for u in users:
             sent[u["id"]] = db.insert(
                 "INSERT INTO notifications (business_id, for_user_id, kind, title, body, link, created_at) VALUES (?, ?, 'brief', ?, ?, ?, ?)",
-                (b["id"], u["id"], f"Evening brief from {name}", "What is due tomorrow, and what to restock or watch out for. Open it to read it.",
+                (b["id"], u["id"], "Your evening brief", "What is due tomorrow, and what to restock or watch out for. Open it to read it.",
                  url_for("pos", assistant="brief"), stamp),
             )
         db.commit()

@@ -502,8 +502,13 @@ def init_schema():
         add_column(db, "businesses", "alert_deliveries", "INTEGER")
         # The assistant is off for a business until one of its admins switches it on (it sends records to Google); 1 = on
         add_column(db, "businesses", "assistant_enabled", "INTEGER")
-        # The assistant's name, chosen by an admin (NULL = "Assistant"); saying it wakes the panel's listening
+        # The assistant's name, chosen by an admin (no longer used: the wake phrase took its place)
         add_column(db, "businesses", "assistant_name", "TEXT")
+        # What an admin set to be said to the listening assistant: the wake phrase asks it something, the stop phrase switches the listening
+        # off (NULL = "Hey Assistant" and "Stop listening"). And the voice each person chose for it to speak with (NULL = the default)
+        add_column(db, "businesses", "wake_phrase", "TEXT")
+        add_column(db, "businesses", "stop_phrase", "TEXT")
+        add_column(db, "users", "assistant_voice", "TEXT")
         # Restock advice: the days of stock to keep (NULL = 30). The evening brief (NULL counts as on), its WhatsApp copy to the alert
         # number (NULL counts as on), and the day that copy last went, so it goes once a day
         add_column(db, "businesses", "stock_cover_days", "INTEGER")

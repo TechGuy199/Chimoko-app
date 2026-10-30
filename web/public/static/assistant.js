@@ -1,8 +1,9 @@
 // The assistant: a button on every page that opens a chat panel (Gemini, run by assistant.py). You can type or speak, send a photo or a PDF
 // (a receipt, a tally of trays), and it can read its answers aloud. When it prepares a change, a card with Confirm and Cancel is shown:
 // nothing happens until Confirm. A message it writes for a customer comes with Copy and Open in WhatsApp; it never sends anything itself.
-// In the evening it gives a brief without being asked. With Listen on (the browser's own speech recognition, not Gemini), saying its name
-// while the panel is open asks a question out loud, and the browser reads the answer aloud.
+// In the evening it gives a brief without being asked. With Listen on (the browser's own speech recognition picks out the phrases), the
+// business's wake phrase and a question ask it out loud, and it answers in the voice the person chose; hands-free mode is a spoken
+// conversation, with changes confirmed by saying yes or no. While it listens, a tap outside shrinks the panel to a small one that still listens.
 // Loaded once (base.html), so the panel stays open while the pages change underneath it.
 (function () {
     "use strict";
@@ -22,7 +23,7 @@
     let reading = 0;              // which reading aloud is current: a newer one, or Stop, makes an older one give up
     let preparing = false;        // the status line says the voice is being made
     let attachment = null;        // the photo or PDF going with the next question: {blob, name, kind}
-    cfg.name = cfg.name || "Assistant";
+    let voices = [];              // the voices a person can choose from: [{name, style}] (cfg, the script's data, holds only text)
 
     function keep(key, value) {
         try {
@@ -62,6 +63,9 @@
         today: "M12 3v2m0 14v2M3 12h2m14 0h2M5.6 5.6 7 7m10 10 1.4 1.4m0-12.8L17 7M7 17l-1.4 1.4M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8Z",
         ear: "M7 10a5 5 0 0 1 10 0c0 3-3 4-3 7a3 3 0 0 1-6 0m2-7a2 2 0 0 1 4 0",
         memory: "M7 4h10a1 1 0 0 1 1 1v15l-6-4-6 4V5a1 1 0 0 1 1-1Z",
+        free: "M4 15v-3a8 8 0 0 1 16 0v3M4 15a2 2 0 0 1 2-2h1v6H6a2 2 0 0 1-2-2v-2Zm16 0a2 2 0 0 0-2-2h-1v6h1a2 2 0 0 0 2-2v-2Z",
+        more: "M5 12h.01M12 12h.01M19 12h.01",
+        shrink: "M6 14h4v4M18 10h-4V6M10 14l-6 6M14 10l6-6",
     };
 
     function button(className, label, iconName, handler) {
@@ -213,13 +217,22 @@
     function decide(node, card, what, yes, no) {
         yes.disabled = no.disabled = true;
         yes.textContent = what === "confirm" ? "Working..." : "Confirm";
-        send(cfg.actions + card.id + "/" + what, new FormData()).then(function (r) {
-            if (r.card) paintCard(node, r.card);
-            else {
-                addError(r.error || "That could not be done.");
+        waiting = waiting.filter(function (w) { return w.node !== node; });
+        act(node, card, what).then(function (done) {
+            if (!done) {
                 yes.disabled = no.disabled = false;
                 yes.textContent = "Confirm";
             }
+            paintEar();
+        });
+    }
+
+    // Confirm or Cancel a card, by its buttons or by voice: the card as it ends up, or null (the error is shown)
+    function act(node, card, what) {
+        return send(cfg.actions + card.id + "/" + what, new FormData()).then(function (r) {
+            if (r.card) { paintCard(node, r.card); return r.card; }
+            addError(r.error || "That could not be done.");
+            return null;
         });
     }
 
@@ -246,7 +259,8 @@
         });
     }
 
-    // opts.heard: the question came from listening, so the browser reads the answer aloud and listens for a follow-up
+    // opts.heard: the question was spoken while listening, so the answer is spoken back (and a change it prepared can be confirmed by voice);
+    // opts.handsfree: in a hands-free conversation
     function ask(message, voice, opts) {
         const heard = !!(opts && opts.heard);
         if (busy || (!message.trim() && !attachment)) return;
@@ -267,19 +281,27 @@
         grow();
         ui.send.disabled = ui.mic.disabled = ui.photo.disabled = true;
         status(sending ? "Reading it" : "Thinking");
+        paintEar();
         const form = new FormData();
         form.append("message", message);
         if (voice) form.append("voice", "1");
+        if (opts && opts.handsfree) form.append("handsfree", "1");
         if (sending) form.append("attachment", sending.blob, sending.name);
         send(cfg.chat, form).then(function (r) {
             status("");
             busy = false;
             ui.send.disabled = ui.mic.disabled = ui.photo.disabled = false;
-            if (r.error) { addError(r.error); if (heard) speakAloud(r.error); return; }
+            paintEar();
+            if (r.error) { addError(r.error); if (heard) talkBack(r.error); return; }
             if (!r.reply) return;
             addMessage("assistant", r.reply, { sources: r.sources, actions: r.actions, drafts: r.drafts, notes: r.notes });
-            if (heard) speakAloud(r.reply);
-            else if (voice || keep("assistant.speak") === "1") say(r.reply);
+            if (heard) {
+                // A change prepared while talking waits for a spoken yes or no (or the card's own buttons)
+                waiting = (r.actions || []).filter(function (a) { return a.status === "pending"; }).map(function (card) {
+                    return { card: card, node: ui.body.querySelector('.assistant-card[data-id="' + card.id + '"]') };
+                });
+                talkBack(r.reply + (waiting.length && !/\byes\b/i.test(r.reply) ? " Say yes to confirm, or no to cancel." : ""));
+            } else if (voice || keep("assistant.speak") === "1") say(r.reply);
         });
     }
 
@@ -298,7 +320,7 @@
             if (!r.reply) return;
             addMessage("user", "Evening brief");
             addMessage("assistant", r.reply, { sources: r.sources, actions: r.actions, drafts: r.drafts, notes: r.notes });
-            if (ear) speakAloud(r.reply);
+            if (ear) talkBack(r.reply);
             else if (keep("assistant.speak") === "1") say(r.reply);
         });
     }
@@ -313,12 +335,12 @@
         if (ui.memory && ui.memory.isConnected) { ui.memory.remove(); ui.memory = null; return; }
         const box = el("section", "assistant-card assistant-memory");
         ui.memory = box;
-        box.appendChild(el("h3", "", "What " + cfg.name + " remembers"));
+        box.appendChild(el("h3", "", "What I remember"));
         box.appendChild(el("p", "msg-note", "Opening"));
         ui.body.appendChild(box);
         scrollDown();
         fetch(cfg.memory, { credentials: "same-origin", headers: { Accept: "application/json" } }).then(function (r) { return r.json(); }).then(function (m) {
-            box.replaceChildren(el("h3", "", "What " + cfg.name + " remembers"));
+            box.replaceChildren(el("h3", "", "What I remember"));
             if (m.error) { box.appendChild(el("p", "", m.error)); return; }
             const list = el("ul", "assistant-memory-list");
             function line(text, label, url, can) {
@@ -358,29 +380,83 @@
         }).catch(function () { box.appendChild(el("p", "", "Could not open it. Check the connection.")); });
     }
 
-    // ---------- Listening for the name: the browser's own speech recognition (Gemini's voice is not used for it) ----------
-    // While the panel is open and Listen is on, the browser listens. The name, then a question ("Tendai, what is low?") asks it; the name alone
-    // waits a few seconds for the question. The answer is read aloud by the browser, and a follow-up is waited for without the name. While it
-    // is answering, only the name is taken (it stops talking), so its own voice is never taken for a question.
+    // ---------- The voice it speaks with: each person's own, kept until they choose another ----------
+    function showVoices() {
+        if (ui.voiceCard && ui.voiceCard.isConnected) { ui.voiceCard.remove(); ui.voiceCard = null; return; }
+        const box = el("section", "assistant-card assistant-voices");
+        ui.voiceCard = box;
+        box.appendChild(el("h3", "", "My voice"));
+        const pickList = el("select");
+        pickList.setAttribute("aria-label", "Voice");
+        voices.forEach(function (v) {
+            const option = el("option", "", v.name + " — " + v.style.toLowerCase());
+            option.value = v.name;
+            option.selected = v.name === cfg.voice;
+            pickList.appendChild(option);
+        });
+        box.appendChild(pickList);
+        const row = el("div", "assistant-card-buttons");
+        const hear = el("button", "btn small", "Hear it");
+        hear.type = "button";
+        hear.addEventListener("click", function () { unlock(); say("Hello, " + cfg.user + ". This is how I would sound when I answer you.", null, pickList.value); });
+        const use = el("button", "btn small primary", "Use this voice");
+        use.type = "button";
+        use.addEventListener("click", function () {
+            const form = new FormData();
+            form.append("voice", pickList.value);
+            use.disabled = true;
+            send(cfg.voiceUrl, form).then(function (r) {
+                use.disabled = false;
+                if (r.error) { addError(r.error); return; }
+                cfg.voice = r.voice;
+                box.remove();
+                ui.body.appendChild(el("p", "msg-note", "I will speak with " + r.voice + " from now on, until you choose another."));
+                scrollDown();
+            });
+        });
+        row.appendChild(hear);
+        row.appendChild(use);
+        box.appendChild(row);
+        box.appendChild(el("p", "msg-note", "Used for every spoken answer, on any device you sign in on."));
+        ui.body.appendChild(box);
+        scrollDown();
+    }
+
+    // ---------- Listening: the browser's own speech recognition picks out the phrases; Gemini answers, in the voice the person chose ----------
+    // Listen (the ear): the wake phrase and a question ("Hey Mark, what is low?") ask it; the wake phrase alone waits a few seconds for the
+    // question, and after an answer a follow-up is listened for without it. Hands-free: no wake phrase, a spoken conversation, and a change it
+    // prepares is confirmed or cancelled by saying yes or no. The stop phrase switches listening off, even while the panel is small. While it
+    // speaks, only the wake or stop phrase is taken, so its own voice is never taken for a question.
     const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     const AWAKE_MS = 8000;
     const LANGS = ["en-US", "en-GB", "en-ZA", "en-KE", "en-NG", "en-IN", "en-AU", "en-CA", "en-IE", "en-NZ", "en-PH", "en-TZ", "en-GH"];
     const SPEECH_LANG = LANGS.indexOf(navigator.language) >= 0 ? navigator.language : "en-GB";
+    const GREETINGS = ["hey", "hi", "hello", "ok", "okay"];
+    const YES = /^(yes|yeah|yep|yup|sure|ok|okay|alright|confirm|confirmed|do it|go ahead|please do|correct|that'?s right)\b/;
+    const NO = /^(no|nope|cancel|don'?t|do not|leave it|never mind|not now)\b/;
+    cfg.wake = cfg.wake || "Hey Assistant";
+    cfg.stop = cfg.stop || "Stop listening";
     let ear = null;          // {rec, awake, timer, fails, started} while listening
-    let talking = null;      // what the browser is reading aloud, while it is
+    let handsfree = false;   // a spoken conversation, no wake phrase
+    let talking = false;     // it is speaking an answer
+    let hearing = null;      // the person is speaking: the wave moves (a timer that stops it when they pause)
+    let heardSoFar = "";
+    let waiting = [];        // changes from the last spoken answer, to confirm or cancel by voice: [{card, node}]
     let resumeEar = false;   // listening paused for a recording with the microphone button
     let chimes = null;
 
     function plain(text) {
-        return String(text).toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9' ]+/g, " ").replace(/\s+/g, " ").trim();
+        return String(text).toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[^a-z0-9' ]+/g, " ").replace(/\s+/g, " ").trim();
     }
 
-    // What was said around the name (a greeting dropped), or null when the name was not said
-    function aroundName(text) {
-        const t = " " + plain(text) + " ", n = " " + plain(cfg.name) + " ";
-        const at = t.indexOf(n);
-        if (at < 0) return null;
-        return (t.slice(0, at) + " " + t.slice(at + n.length)).replace(/^\s*(hey|hi|hello|ok|okay|yes)\b/, "").trim();
+    // What was said around a phrase, or null when it was not said. One that starts with a greeting ("Hey Mark") is heard with any ("OK Mark").
+    function around(text, phrase) {
+        const t = " " + plain(text) + " ";
+        const words = plain(phrase).split(" ");
+        const tail = words.slice(GREETINGS.indexOf(words[0]) >= 0 && words.length > 1 ? 1 : 0).join(" ").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        const found = new RegExp(" " + (tail !== words.join(" ") ? "(?:" + GREETINGS.join("|") + "|hay|a) " : "") + tail + " ").exec(t);
+        if (!found) return null;
+        return (t.slice(0, found.index) + " " + t.slice(found.index + found[0].length)).trim();
     }
 
     function chime() {
@@ -397,13 +473,45 @@
         } catch (e) { /* no sound: the words on the screen still say it is listening */ }
     }
 
+    function wave() {
+        const w = el("span", "assistant-wave");
+        w.setAttribute("aria-hidden", "true");
+        for (let i = 0; i < 5; i++) w.appendChild(el("i"));
+        return w;
+    }
+
+    // The listening bar in the panel and the small panel show where things stand; the wave moves while the person speaks and while it answers
     function paintEar() {
         if (!ui.ear) return;
         ui.ear.classList.toggle("on", !!ear);
         ui.ear.setAttribute("aria-pressed", ear ? "true" : "false");
+        ui.free.classList.toggle("on", handsfree);
+        ui.free.setAttribute("aria-pressed", handsfree ? "true" : "false");
+        const state = !ear ? "" : talking ? "speaking" : busy ? "thinking" : hearing ? "hearing" : "listening";
+        let text = "";
+        if (ear) {
+            if (hearing && heardSoFar) text = heardSoFar;
+            else if (talking) text = "Speaking. Say “" + cfg.wake + "” to interrupt";
+            else if (busy) text = "Thinking";
+            else if (waiting.length) text = "Say yes to confirm, or no to cancel";
+            else if (handsfree) text = "Hands-free: just talk to me";
+            else if (ear.awake) text = "Listening: say your question";
+            else text = "Say “" + cfg.wake + "” and your question";
+        }
         ui.listenBar.hidden = !ear;
-        if (ear) ui.listenBar.textContent = ear.awake ? "Listening: say your question" : "Listening for \u201c" + cfg.name + "\u201d";
-        ui.listenBar.classList.toggle("awake", !!(ear && ear.awake));
+        ui.listenBar.dataset.voice = state;
+        ui.listenText.textContent = text;
+        ui.mini.dataset.voice = state;
+        ui.miniText.textContent = text || "Assistant";
+        // Listening switched off (the stop phrase) while small: the small panel goes, leaving the button, without popping the chat up
+        if (!ear && panel && panel.classList.contains("mini")) {
+            panel.classList.remove("mini");
+            ui.mini.hidden = true;
+            if (panel.open) panel.close();
+            fab.hidden = false;
+            fab.classList.remove("open");
+            fab.setAttribute("aria-expanded", "false");
+        }
     }
 
     function startListening() {
@@ -435,8 +543,9 @@
         keep("assistant.listen", "1");
         if (keep("assistant.listen.told") !== "1") {
             keep("assistant.listen.told", "1");
-            addMessage("assistant", "Listening is on. Say \u201c" + cfg.name + "\u201d and then your question, and I will answer out loud. While it is on, this browser sends what the " +
-                "microphone hears to its speech service (Google's, in Chrome) to pick out my name. Tap the ear to stop; it also stops when the panel closes.", { plain: true });
+            addMessage("assistant", "Listening is on. Say “" + cfg.wake + "” and your question, and I will answer out loud; say “" + cfg.stop + "” to stop me listening. " +
+                "Tap outside this panel and it shrinks, still listening. While it listens, this browser sends what the microphone hears to its speech service " +
+                "(Google's, in Chrome) to pick out the phrases.", { plain: true });
         }
         paintEar();
     }
@@ -454,7 +563,23 @@
             e.rec.onend = null;
             try { e.rec.abort(); } catch (x) { /* already stopped */ }
         }
-        if (!keepChoice) keep("assistant.listen", "0");
+        if (!keepChoice) {
+            keep("assistant.listen", "0");
+            handsfree = false;
+            keep("assistant.handsfree", "0");
+            waiting = [];
+        }
+        paintEar();
+    }
+
+    function setHandsfree(on) {
+        handsfree = on;
+        keep("assistant.handsfree", on ? "1" : "0");
+        if (on) {
+            unlock();
+            startListening();
+            chime();
+        }
         paintEar();
     }
 
@@ -473,49 +598,73 @@
             if (e.results[i].isFinal) said += e.results[i][0].transcript + " ";
             else partly += e.results[i][0].transcript;
         }
-        if (ear.awake && partly) ui.listenBar.textContent = "Hearing: " + partly;
+        if (partly && !talking) {
+            heardSoFar = partly;
+            clearTimeout(hearing);
+            hearing = setTimeout(function () { hearing = null; heardSoFar = ""; paintEar(); }, 1400);
+            paintEar();
+        }
         said = said.trim();
         if (!said) return;
-        const rest = aroundName(said);
-        if (talking !== null) {
-            if (rest === null || plain(talking).indexOf(plain(cfg.name)) >= 0) return;
-            stopTalking();
+        clearTimeout(hearing);
+        hearing = null;
+        heardSoFar = "";
+        if (around(said, cfg.stop) !== null) {
+            stopSpeaking();
+            stopListening(false);
+            ui.body.appendChild(el("p", "msg-note", "Listening is off. Tap the ear to start it again."));
+            scrollDown();
+            return;
         }
-        if (busy) return;
+        const rest = around(said, cfg.wake);
+        if (talking) {
+            if (rest === null) return;   // its own voice, or someone else: only the wake phrase interrupts it
+            stopSpeaking();
+        }
+        if (busy) { paintEar(); return; }
+        const words = plain(rest !== null ? rest : said);
+        if (waiting.length && (handsfree || ear.awake || rest !== null)) {
+            if (YES.test(words)) { decideByVoice("confirm"); return; }
+            if (NO.test(words)) { decideByVoice("cancel"); return; }
+        }
+        if (handsfree) {
+            if (words) question(rest !== null ? rest : said); else wake();
+            return;
+        }
         if (rest !== null && rest.split(" ").length >= 2) { question(rest); return; }
         if (rest !== null) { wake(); return; }
         if (ear.awake) question(said);
+        else paintEar();
     }
 
     function question(text) {
         ear.awake = false;
         clearTimeout(ear.timer);
-        paintEar();
-        ask(text.charAt(0).toUpperCase() + text.slice(1), true, { heard: true });
+        ask(text.charAt(0).toUpperCase() + text.slice(1), true, { heard: true, handsfree: handsfree });
     }
 
-    // The browser's own voice, a sentence at a time (some browsers stop a long one part way). When it ends, a follow-up is listened for.
-    function speakAloud(text) {
-        if (!window.speechSynthesis) return;
-        const words = String(text).replace(/\*\*/g, "").replace(/^\s*(?:[-*\u2022]|\d+[.)])\s+/gm, "").replace(/https?:\/\/\S+/g, "").replace(/\s+/g, " ").trim().slice(0, 700);
-        if (!words) return;
-        stopTalking();
-        talking = words;
-        const parts = words.match(/[^.!?]+[.!?]*/g) || [words];
-        parts.forEach(function (part, i) {
-            const u = new SpeechSynthesisUtterance(part.trim());
-            u.lang = SPEECH_LANG;
-            if (i === parts.length - 1) u.onend = u.onerror = function () { if (talking === words) { talking = null; wake(); } };
-            window.speechSynthesis.speak(u);
+    // A spoken yes or no to what was prepared: the cards are confirmed or cancelled as their own buttons would, and the outcome is said
+    function decideByVoice(what) {
+        const cards = waiting.filter(function (w) { return w.node && w.node.isConnected; });
+        waiting = [];
+        if (!cards.length) { paintEar(); return; }
+        busy = true;
+        paintEar();
+        Promise.all(cards.map(function (w) { return act(w.node, w.card, what); })).then(function (done) {
+            busy = false;
+            const failed = done.filter(function (c) { return !c || c.status !== (what === "confirm" ? "done" : "cancelled"); });
+            if (what === "cancel") talkBack(failed.length ? "I could not cancel that." : "Cancelled.");
+            else if (!failed.length) talkBack("Done. " + ((done[0] && done[0].result) || "").split(/(?<=[.!?])\s/)[0]);
+            else talkBack("That did not go through. " + ((failed[0] && failed[0].result) || "Look at the card for why."));
         });
     }
 
-    function stopTalking() {
-        talking = null;
-        if (window.speechSynthesis) window.speechSynthesis.cancel();
+    // An answer to something heard is spoken back; then, listening for the wake phrase, a follow-up is waited for without it
+    function talkBack(text) {
+        say(text, function () { if (ear && !handsfree) wake(); paintEar(); });
     }
 
-    // ---------- Speaking ----------
+    // ---------- Speaking: Gemini's voice, the one the person chose ----------
     // Phones only let a page play sound after a tap, so the shared player is started (silently) on the first tap
     function unlock() {
         if (unlocked) return;
@@ -538,35 +687,70 @@
         reading++;
         player.pause();
         player.onended = null;
+        if (window.speechSynthesis) window.speechSynthesis.cancel();
         if (preparing) { preparing = false; status(""); }
+        if (talking) { talking = false; paintEar(); }
     }
 
-    function say(text) {
+    function stopTalking() {
+        stopSpeaking();
+    }
+
+    // after: called once it has finished speaking (not when it is stopped). voice: another voice, to hear it before choosing it.
+    function say(text, after, voice) {
         stopSpeaking();
         const mine = reading;
-        const clips = pieces(text).map(function (part) {
+        talking = true;
+        paintEar();
+        function finish() {
+            if (mine !== reading) return;
+            talking = false;
+            paintEar();
+            if (after) after();
+        }
+        const parts = pieces(text);
+        const clips = parts.map(function (part) {
             const form = new FormData();
             form.append("text", part);
+            if (voice) form.append("voice", voice);
             return send(cfg.speak, form);
         });
         let at = 0;
         function next() {
             if (mine !== reading) return;
-            if (at >= clips.length) return;
+            if (at >= clips.length) { finish(); return; }
             preparing = true;
             status("Getting the voice");
+            const part = at;
             clips[at++].then(function (r) {
                 if (mine !== reading) return;
                 preparing = false;
                 status("");
-                if (!r.audio) { if (r.error) addError(r.error); return; }
+                if (!r.audio) {
+                    // No Gemini voice just now (Google busy, no connection): the browser's own reads the rest, so a conversation is not left hanging
+                    if (r.error) addError(r.error);
+                    browserVoice(parts.slice(part).join(" "), finish);
+                    return;
+                }
                 const url = URL.createObjectURL(r.audio);
                 player.src = url;
                 player.onended = function () { URL.revokeObjectURL(url); next(); };
-                player.play().catch(function () { addError("Tap the speaker under the answer to hear it."); });
+                player.play().catch(function () { addError("Tap the speaker under the answer to hear it."); finish(); });
             });
         }
         next();
+    }
+
+    function browserVoice(text, then) {
+        if (!window.speechSynthesis) { then(); return; }
+        const words = String(text).replace(/\*\*/g, "").replace(/^\s*(?:[-*•]|\d+[.)])\s+/gm, "").replace(/https?:\/\/\S+/g, "").replace(/\s+/g, " ").trim().slice(0, 700);
+        const lines = words.match(/[^.!?]+[.!?]*/g) || [words];
+        lines.forEach(function (line, i) {
+            const u = new SpeechSynthesisUtterance(line.trim());
+            u.lang = SPEECH_LANG;
+            if (i === lines.length - 1) u.onend = u.onerror = then;
+            window.speechSynthesis.speak(u);
+        });
     }
 
     // ---------- Recording: raw sound, 16 kHz mono, made into a WAV file here, so every browser sends the same thing ----------
@@ -721,38 +905,52 @@
 
     function build() {
         panel = el("dialog", "assistant");
-        panel.setAttribute("aria-label", cfg.name);
+        panel.setAttribute("aria-label", "Assistant");
         panel.dataset.busy = "1";   // dialog.js closes a dialog when its dark backdrop is clicked; a chat panel has none, so a stray click must not close it
         const head = el("header", "assistant-head");
-        ui.title = el("strong", "assistant-title", cfg.name);
-        head.appendChild(ui.title);
+        head.appendChild(el("strong", "assistant-title", "Assistant"));
         const tools = el("span", "assistant-head-tools");
-        ui.speakToggle = button("assistant-toggle", "Read answers aloud", "speaker", function () {
-            const on = keep("assistant.speak") !== "1";
-            keep("assistant.speak", on ? "1" : "0");
-            ui.speakToggle.setAttribute("aria-pressed", on ? "true" : "false");
-            ui.speakToggle.classList.toggle("on", on);
-            if (on) unlock(); else stopSpeaking();
-        });
-        const on = keep("assistant.speak") === "1";
-        ui.speakToggle.setAttribute("aria-pressed", on ? "true" : "false");
-        ui.speakToggle.classList.toggle("on", on);
-        tools.appendChild(ui.speakToggle);
         if (Recognition) {
-            ui.ear = button("assistant-ear", "Listen for my name", "ear", function () { if (ear) stopListening(false); else { unlock(); startListening(); } });
+            ui.ear = button("assistant-ear", "Listen for the wake phrase", "ear", function () { if (ear) stopListening(false); else { unlock(); startListening(); } });
+            ui.free = button("assistant-free", "Hands-free conversation", "free", function () { setHandsfree(!handsfree); });
             tools.appendChild(ui.ear);
+            tools.appendChild(ui.free);
         }
         tools.appendChild(button("assistant-today", "What needs attention today", "today", function () { ask("What needs my attention today?", false); }));
-        tools.appendChild(button("assistant-memory-button", "What I remember", "memory", showMemory));
-        tools.appendChild(button("assistant-new", "Start a new chat", "again", function () {
-            if (recording) stopRecording(false);
-            stopSpeaking();
-            stopTalking();
-            send(cfg.clear, new FormData()).then(function () { ui.body.replaceChildren(); welcome(); });
-        }));
+        ui.more = button("assistant-more", "More", "more", function (e) { e.stopPropagation(); ui.menu.hidden = !ui.menu.hidden; });
+        tools.appendChild(ui.more);
+        tools.appendChild(button("assistant-shrink", "Make it small", "shrink", minimize));
         tools.appendChild(button("assistant-close", "Close the assistant", "close", closePanel));
         head.appendChild(tools);
         panel.appendChild(head);
+
+        // The menu: reading typed answers aloud, the voice, what it remembers, a new chat
+        ui.menu = el("div", "assistant-menu");
+        ui.menu.hidden = true;
+        function item(text, handler) {
+            const b = el("button", "", text);
+            b.type = "button";
+            b.addEventListener("click", function () { ui.menu.hidden = true; handler(); });
+            ui.menu.appendChild(b);
+            return b;
+        }
+        ui.speakToggle = item("", function () {
+            const on = keep("assistant.speak") !== "1";
+            keep("assistant.speak", on ? "1" : "0");
+            paintSpeak();
+            if (on) unlock(); else stopSpeaking();
+        });
+        item("My voice", showVoices);
+        item("What I remember", showMemory);
+        item("Start a new chat", function () {
+            if (recording) stopRecording(false);
+            stopSpeaking();
+            waiting = [];
+            send(cfg.clear, new FormData()).then(function () { ui.body.replaceChildren(); welcome(); });
+        });
+        paintSpeak();
+        panel.appendChild(ui.menu);
+        panel.addEventListener("click", function (e) { if (!ui.menu.hidden && !ui.menu.contains(e.target)) ui.menu.hidden = true; });
 
         ui.body = el("div", "assistant-body");
         ui.body.setAttribute("role", "log");
@@ -761,9 +959,12 @@
         ui.status = el("p", "assistant-status");
         ui.status.hidden = true;
         panel.appendChild(ui.status);
-        ui.listenBar = el("p", "assistant-listening");
+        ui.listenBar = el("div", "assistant-listening");
         ui.listenBar.setAttribute("role", "status");
         ui.listenBar.hidden = true;
+        ui.listenBar.appendChild(wave());
+        ui.listenText = el("span", "assistant-listening-text");
+        ui.listenBar.appendChild(ui.listenText);
         panel.appendChild(ui.listenBar);
 
         // Not a <form>: dialog.js closes any dialog whose form is submitted, which is right for an edit overlay and wrong for a chat
@@ -796,26 +997,37 @@
         form.appendChild(ui.send);
         panel.appendChild(form);
 
-        panel.addEventListener("keydown", function (e) { if (e.key === "Escape") closePanel(); });
+        panel.addEventListener("keydown", function (e) { if (e.key === "Escape") { if (ear) minimize(); else closePanel(); } });
         // On <html>, not <body>: nav.js swaps the whole body on every page change, which would wipe the chat (the progress bar does the same)
         document.documentElement.appendChild(panel);
+
+        // The small panel: while listening, a tap outside the chat shrinks it to this, still listening, with the wave and where things stand
+        ui.mini = el("div", "assistant-mini no-print");
+        ui.mini.hidden = true;
+        const grow_ = el("button", "assistant-mini-open");
+        grow_.type = "button";
+        grow_.setAttribute("aria-label", "Open the assistant");
+        grow_.appendChild(wave());
+        ui.miniText = el("span", "assistant-mini-text", "Assistant");
+        grow_.appendChild(ui.miniText);
+        grow_.addEventListener("click", expand);
+        ui.mini.appendChild(grow_);
+        ui.mini.appendChild(button("assistant-mini-close", "Stop listening and close", "close", closePanel));
+        document.documentElement.appendChild(ui.mini);
+    }
+
+    function paintSpeak() {
+        const on = keep("assistant.speak") === "1";
+        ui.speakToggle.textContent = (on ? "✓ " : "") + "Read typed answers aloud";
+        ui.speakToggle.setAttribute("aria-pressed", on ? "true" : "false");
     }
 
     function welcome() {
-        addMessage("assistant", "Hello " + cfg.user + ", I am " + cfg.name + ". Ask me about sales, stock, customers, deliveries, what to restock or how to do something in the app. " +
+        addMessage("assistant", "Hello " + cfg.user + ". Ask me about sales, stock, customers, deliveries, what to restock or how to do something in the app. " +
             "I can prepare sales, pre-orders, purchases, plantings and more for you to confirm. Send a photo of a supplier's receipt or a tally of trays planted and I will fill it in for you. " +
-            "The sun button tells you what needs attention today. Tell me how you like things and I will remember." +
-            (Recognition ? " Tap the ear and you can just say \u201c" + cfg.name + "\u201d and ask." : ""), { plain: true });
-    }
-
-    function setName(name) {
-        if (!name || name === cfg.name) return;
-        cfg.name = name;
-        if (ui.title) ui.title.textContent = name;
-        if (panel) panel.setAttribute("aria-label", name);
-        fab.setAttribute("aria-label", "Ask " + name);
-        fab.title = "Ask " + name;
-        paintEar();
+            "Tell me how you like things and I will remember." +
+            (Recognition ? " Tap the ear and just say “" + cfg.wake + "” and your question, or the headset for a hands-free conversation. The menu (…) lets you pick my voice." : ""),
+            { plain: true });
     }
 
     function load() {
@@ -825,11 +1037,15 @@
             ready = true;
             if (!s.enabled) { addError("The assistant is switched off for this business." + (s.can_enable ? " You can switch it on in Settings." : " Ask an admin to switch it on.")); return; }
             if (!s.configured) addError("The assistant is not connected to Gemini yet. An admin needs to add the Gemini key on the server.");
-            setName(s.assistant_name);
+            cfg.wake = s.wake || cfg.wake;
+            cfg.stop = s.stop || cfg.stop;
+            cfg.voice = s.voice;
+            voices = s.voices || [];
             if (!s.messages.length && !s.actions.length) welcome();
             s.messages.forEach(function (m) { addMessage(m.role, m.content, { plain: m.role === "assistant" && /^(Confirmed|Tried to confirm|Cancelled):/.test(m.content) }); });
             s.actions.forEach(addCard);
             scrollDown();
+            paintEar();
             briefBadge(!!s.brief_due);
             if (s.brief_due) giveBrief();
         }).catch(function () { status(""); addError("Could not open the assistant. Check the connection and try again."); });
@@ -837,36 +1053,69 @@
 
     function openPanel() {
         if (!panel) build();
+        if (panel.classList.contains("mini")) { expand(); return; }
         if (!panel.open) panel.show();
         fab.classList.add("open");
         fab.setAttribute("aria-expanded", "true");
         if (bubble) bubble.hidden = true;
         if (!ready) load();
         else if (fab.classList.contains("has-brief")) giveBrief();
-        if (Recognition && keep("assistant.listen") === "1") startListening();
+        if (Recognition && keep("assistant.listen") === "1") {
+            startListening();
+            if (keep("assistant.handsfree") === "1") setHandsfree(true);
+        }
         setTimeout(function () { ui.input.focus(); }, 50);
+    }
+
+    // Small, still listening (and still speaking an answer); tapping it brings the whole panel back
+    function minimize() {
+        if (!panel || !panel.open) return;
+        ui.menu.hidden = true;
+        panel.classList.add("mini");
+        ui.mini.hidden = false;
+        fab.hidden = true;
+        paintEar();
+    }
+
+    function expand() {
+        if (!panel) return;
+        panel.classList.remove("mini");
+        ui.mini.hidden = true;
+        fab.hidden = false;
+        setTimeout(function () { ui.input.focus(); scrollDown(); }, 50);
     }
 
     function closePanel() {
         if (recording) stopRecording(false);
         stopSpeaking();
-        stopTalking();
         stopListening(true);
-        if (panel && panel.open) panel.close();
+        if (panel) {
+            panel.classList.remove("mini");
+            ui.mini.hidden = true;
+            if (panel.open) panel.close();
+        }
+        fab.hidden = false;
         fab.classList.remove("open");
         fab.setAttribute("aria-expanded", "false");
     }
 
-    const fab = button("assistant-fab no-print", "Ask " + cfg.name, "chat", function () {
-        if (panel && panel.open) closePanel(); else openPanel();
+    const fab = button("assistant-fab no-print", "Ask the assistant", "chat", function () {
+        if (panel && panel.open && !panel.classList.contains("mini")) closePanel(); else openPanel();
     });
     fab.setAttribute("aria-expanded", "false");
     document.documentElement.appendChild(fab);
 
+    // While it listens, a tap anywhere outside the chat shrinks it (it keeps listening); without listening the panel stays as it is
+    document.addEventListener("pointerdown", function (e) {
+        if (!panel || !panel.open || panel.classList.contains("mini") || !ear) return;
+        if (panel.contains(e.target) || fab.contains(e.target) || ui.mini.contains(e.target) || (bubble && bubble.contains(e.target))) return;
+        minimize();
+    }, true);
+
     // The evening brief waiting: a dot on the button and a note beside it, until the panel is opened
     let bubble = null;
     if (cfg.briefWaiting === "1") {
-        bubble = el("button", "assistant-bubble no-print", "Your evening brief from " + cfg.name + " is ready");
+        bubble = el("button", "assistant-bubble no-print", "Your evening brief is ready");
         bubble.type = "button";
         bubble.addEventListener("click", openPanel);
         document.documentElement.appendChild(bubble);
@@ -875,8 +1124,11 @@
 
     // A page hidden (another tab, the phone locked) stops listening; it starts again when the page is back and the panel still open
     document.addEventListener("visibilitychange", function () {
-        if (document.hidden) { if (ear) stopListening(true); stopTalking(); }
-        else if (panel && panel.open && Recognition && keep("assistant.listen") === "1") startListening();
+        if (document.hidden) { if (ear) stopListening(true); stopSpeaking(); }
+        else if (panel && panel.open && Recognition && keep("assistant.listen") === "1") {
+            startListening();
+            if (keep("assistant.handsfree") === "1") setHandsfree(true);
+        }
     });
 
     // An alert's link opens the panel (the evening brief's: /?assistant=brief)
