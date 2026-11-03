@@ -224,6 +224,7 @@ def csrf_field():
 @app.before_request
 def load_user_and_check_csrf():
     g.user = None
+    g.started = time.perf_counter()
     if request.endpoint == "static":
         return
 
@@ -249,7 +250,7 @@ def load_user_and_check_csrf():
 def user_row(db, uid):
     """A login with its business's settings: what g.user holds while they are signed in."""
     return db.one(
-        """SELECT u.id, u.business_id, u.username, u.role, u.can_sell, u.can_procure, u.can_transfer, u.can_delete, u.theme, u.glass,
+        """SELECT u.id, u.business_id, u.username, u.role, u.can_sell, u.can_procure, u.can_transfer, u.can_delete, u.theme, u.glass, u.accent, u.text_size,
                   u.evening_brief AS my_brief, u.brief_day, u.assistant_voice,
                   b.name AS business_name, b.subtitle, b.contact, b.currency, b.low_stock_threshold,
                   b.alert_phone, b.alert_low_stock, b.alert_permission, b.alert_preorders, b.alert_collections, b.alert_deliveries, b.preorder_remind_days,
@@ -288,13 +289,24 @@ def need(perm):
 def template_globals():
     return {
         "csrf_field": csrf_field, "user": g.get("user"), "can": can, "look": appearance_of(g.get("user")), "themes": THEMES,
+        "theme_swatches": THEME_SWATCHES, "accents": ACCENTS, "accent_colours": ACCENT_COLOURS, "text_sizes": TEXT_SIZES,
         "asset": asset, "csrf_token": csrf_token, "inv_link": inv_link, "assistant_on": assistant.enabled_for(g.get("user")),
         "assistant_phrases": assistant.phrases_of(g.user) if g.get("user") else (assistant.DEFAULT_WAKE, assistant.DEFAULT_STOP),
         "brief_waiting": bool(g.get("user")) and assistant.brief_due(g.user),
     }
 
 
-THEMES = (("dark", "Dark"), ("light", "Light"), ("system", "Match my device"))
+# The colour sets a person can choose (styles.css has one block for each), with the two colours their swatch shows
+THEMES = (("dark", "Midnight"), ("light", "Daylight"), ("system", "Match my device"), ("forest", "Forest"), ("ocean", "Ocean"),
+          ("sunset", "Sunset"), ("graphite", "Graphite"), ("sand", "Sand"), ("mint", "Mint"), ("contrast", "High contrast"))
+THEME_SWATCHES = {"dark": ("#0c0d13", "#3b82f6"), "light": ("#f2f4f9", "#2563eb"), "system": ("#0c0d13", "#f2f4f9"), "forest": ("#0b130e", "#22a35a"),
+                  "ocean": ("#08121a", "#14a3b8"), "sunset": ("#160d0b", "#f0703a"), "graphite": ("#111214", "#a1a1aa"), "sand": ("#f6f1e7", "#b45309"),
+                  "mint": ("#eef7f2", "#0f9d6a"), "contrast": ("#000000", "#ffd400")}
+# An accent colour for buttons, links and highlights, over any theme ("" = the theme's own)
+ACCENTS = (("", "The theme's own"), ("blue", "Blue"), ("green", "Green"), ("teal", "Teal"), ("purple", "Purple"), ("orange", "Orange"),
+           ("rose", "Rose"), ("gold", "Gold"))
+ACCENT_COLOURS = {"blue": "#3b82f6", "green": "#16a34a", "teal": "#0d9488", "purple": "#8b5cf6", "orange": "#f97316", "rose": "#e11d48", "gold": "#ca8a04"}
+TEXT_SIZES = (("normal", "Normal"), ("large", "Large"), ("larger", "Larger"))
 DEFAULT_GLASS = 50
 # Changes with every deployment, so browsers never keep using an older stylesheet or script
 ASSET_VERSION = os.environ.get("VERCEL_GIT_COMMIT_SHA", "")[:10] or datetime.datetime.now().strftime("%Y%m%d%H%M%S")
@@ -305,22 +317,33 @@ def asset(filename):
 
 
 def appearance_of(user):
-    """The theme and transparency (0-100) to draw the page with.
+    """The theme, transparency (0-100), accent colour and text size to draw the page with.
 
     A signed-in user's saved choice wins. Signed-out pages (login) reuse the look last used on this
     device, kept in a cookie. Anything unset or invalid falls back to the defaults.
     """
-    theme = glass = None
+    theme = glass = accent = size = None
     if user:
-        theme, glass = user["theme"], user["glass"]
+        theme, glass, accent, size = user["theme"], user["glass"], user.get("accent"), user.get("text_size")
     else:
         remembered = request.cookies.get("look", "").split(":")
-        if len(remembered) == 2 and remembered[1].isdigit():
+        if len(remembered) >= 2 and remembered[1].isdigit():
             theme, glass = remembered[0], int(remembered[1])
+            accent, size = (remembered[2:4] + ["", ""])[:2]
     return {
         "theme": theme if theme in dict(THEMES) else "dark",
         "glass": glass if isinstance(glass, int) and 0 <= glass <= 100 else DEFAULT_GLASS,
+        "accent": accent if accent in ACCENT_COLOURS else "",
+        "size": size if size in dict(TEXT_SIZES) else "normal",
     }
+
+
+@app.after_request
+def server_timing(response):
+    """How long the server took over a page, for the browser's developer tools (Network > Timing) when a page feels slow."""
+    if g.get("started") is not None:
+        response.headers["Server-Timing"] = f"app;dur={(time.perf_counter() - g.started) * 1000:.0f}"
+    return response
 
 
 @app.after_request
@@ -328,7 +351,7 @@ def remember_look(response):
     user = g.get("user")
     if user:
         look = appearance_of(user)
-        value = f"{look['theme']}:{look['glass']}"
+        value = f"{look['theme']}:{look['glass']}:{look['accent']}:{look['size']}"
         if request.cookies.get("look") != value:
             response.set_cookie("look", value, max_age=365 * 24 * 3600, samesite="Lax", secure=ON_VERCEL, httponly=True)
     return response
@@ -346,12 +369,15 @@ def appearance():
             glass = number("glass", int)
         except ValueError:
             glass = -1
-        valid = theme in dict(THEMES) and 0 <= glass <= 100
+        # Accent and text size: kept as they were when a form does not send them
+        accent = text("accent") if "accent" in request.form else (g.user.get("accent") or "")
+        size = text("text_size") if "text_size" in request.form else (g.user.get("text_size") or "normal")
+        valid = theme in dict(THEMES) and 0 <= glass <= 100 and (accent == "" or accent in ACCENT_COLOURS) and size in dict(TEXT_SIZES)
         if valid:
             db = get_db()
-            db.execute("UPDATE users SET theme=?, glass=? WHERE id=?", (theme, glass, g.user["id"]))
+            db.execute("UPDATE users SET theme=?, glass=?, accent=?, text_size=? WHERE id=?", (theme, glass, accent or None, size, g.user["id"]))
             db.commit()
-            g.user["theme"], g.user["glass"] = theme, glass
+            g.user["theme"], g.user["glass"], g.user["accent"], g.user["text_size"] = theme, glass, accent or None, size
         if background:
             return ("", 204) if valid else ("Choose a theme and a transparency between 0 and 100.", 400)
         if valid:
@@ -1215,9 +1241,20 @@ def read_handover():
     return None, None, None
 
 
-@app.post("/checkout")
-@need("sell")
-def checkout():
+class SaleRefused(Exception):
+    """A sale that cannot be recorded as it stands: what to tell the person, and where to send them to put it right."""
+
+    def __init__(self, message, back=None):
+        super().__init__(message)
+        self.message, self.back = message, back
+
+
+def record_sale(offline=None):
+    """Records the sale in the posted form (the POS cart) and returns its invoice id, or raises SaleRefused and saves nothing.
+
+    offline: a sale made on a device with no connection, uploaded now ({"ref", "sold_at", "prices"}). It was made with the goods in front
+    of the seller, so it is recorded even when the app's stock says there is not enough (stock may go below zero, and admins are told to
+    count it); at the price the device showed; on the day and time it was made; and taken there and then (no delivery or collection)."""
     db, biz = get_db(), g.user["business_id"]
 
     # The browser only says which products and how many, any discount, and which pre-orders; names, prices and stock come from the database
@@ -1225,6 +1262,8 @@ def checkout():
     try:
         for line in json.loads(request.form.get("cart", "[]")):
             if "preorder" in line:
+                if offline:
+                    continue   # a pre-order is collected online, where it can be claimed
                 preorder_ids.append(int(line["preorder"]))
                 discounts[("po", int(line["preorder"]))] = line.get("discount", "")
                 continue
@@ -1238,8 +1277,7 @@ def checkout():
     # Back to the POS with the pre-orders still in the cart, when something has to be put right
     back = redirect(url_for("pos", preorder=preorder_ids) if preorder_ids else url_for("pos"))
     if not wanted and not preorder_ids:
-        flash("Add at least one item to the cart before completing the invoice.", "error")
-        return back
+        raise SaleRefused("Add at least one item to the cart before completing the invoice.", back)
 
     lines, total = [], 0.0
     if wanted:
@@ -1254,17 +1292,19 @@ def checkout():
         }
         for pid, qty in wanted.items():
             p = found.get(pid)
-            if not p or qty > p["quantity"]:
-                available = p["quantity"] if p else 0
-                flash(f"Insufficient stock for {p['name'] if p else 'an item'}. Available: {available}.", "error")
-                return back
-            gross = round(qty * p["price"], 2)
+            if not p:
+                raise SaleRefused("An item in this sale is no longer listed on the POS.", back)
+            if qty > p["quantity"] and not offline:
+                raise SaleRefused(f"Insufficient stock for {p['name']}. Available: {p['quantity']}.", back)
+            price = p["price"]
+            if offline and offline["prices"].get(pid) is not None:
+                price = offline["prices"][pid]   # what the customer was charged, from the device's copy of the prices
+            gross = round(qty * price, 2)
             try:
                 discount = read_discount(discounts.get(("item", pid)), gross)
             except ValueError:
-                flash(f"The discount on {p['name']} must be an amount up to {money(gross)}, or a percentage like 10%.", "error")
-                return back
-            lines.append((p, qty, discount, round(gross - discount, 2)))
+                raise SaleRefused(f"The discount on {p['name']} must be an amount up to {money(gross)}, or a percentage like 10%.", back)
+            lines.append((p, qty, discount, round(gross - discount, 2), price))
             total += gross - discount
 
     # Pre-orders: at the quantity and price agreed when they were placed. Their seedlings were held from the batch then, so the
@@ -1273,14 +1313,13 @@ def checkout():
     if preorder_ids:
         preorders, problem = pos_preorders(db, biz, preorder_ids)
         if problem or len(preorders) != len(set(preorder_ids)):
-            flash(problem or "Some of these pre-orders were already collected or cancelled. Please check the cart.", "error")
-            return redirect(url_for("pos", preorder=[po["preorder"] for po in preorders]) if preorders else url_for("pos"))
+            raise SaleRefused(problem or "Some of these pre-orders were already collected or cancelled. Please check the cart.",
+                              redirect(url_for("pos", preorder=[po["preorder"] for po in preorders]) if preorders else url_for("pos")))
         for po in preorders:
             try:
                 po["discount"] = read_discount(discounts.get(("po", po["preorder"])), po["total"])
             except ValueError:
-                flash(f"The discount on {po['name']} must be an amount up to {money(po['total'])}, or a percentage like 10%.", "error")
-                return back
+                raise SaleRefused(f"The discount on {po['name']} must be an amount up to {money(po['total'])}, or a percentage like 10%.", back)
             po["line_total"] = round(po["total"] - po["discount"], 2)
             total += po["line_total"]
     total = round(total, 2)
@@ -1296,55 +1335,63 @@ def checkout():
         try:
             amount_paid = round(number("amount_paid"), 2)
         except ValueError:
-            flash("Enter the amount paid for a partial payment.", "error")
-            return back
+            raise SaleRefused("Enter the amount paid for a partial payment.", back)
         if amount_paid <= 0 or amount_paid >= total:
-            flash("A partial payment must be more than zero and less than the invoice total.", "error")
-            return back
+            raise SaleRefused("A partial payment must be more than zero and less than the invoice total.", back)
     # Whatever is paid now goes to Accounts with how it was paid: cash, bank or mobile money
     method, reference = NOT_RECORDED, ""
     if amount_paid > 0.005:
         method, reference, problem = read_money_method()
         if problem:
-            flash(problem, "error")
-            return back
+            raise SaleRefused(problem, back)
     # Taken now, collected on a later day (reminded the day before), or delivered on a day (on that day's delivery list)
-    collect_on, deliver_on, problem = read_handover()
+    collect_on, deliver_on, problem = (None, None, None) if offline else read_handover()
     if problem:
-        flash(problem, "error")
-        return back
+        raise SaleRefused(problem, back)
 
     try:
-        sold_at = now().strftime("%Y-%m-%d %H:%M:%S")
+        sold_at = offline["sold_at"] if offline else now().strftime("%Y-%m-%d %H:%M:%S")
         invoice_no, customer = next_invoice_no(db, biz), text("customer_name") or WALK_IN
         invoice_id = db.insert(
             """INSERT INTO invoices (business_id, invoice_no, kind, customer_name, customer_phone, payment_status, total, amount_paid, balance_due, created_by, created_at,
-                                     customer_id, collect_on, deliver_on)
-               VALUES (?, ?, 'SALE', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                     customer_id, collect_on, deliver_on, offline_ref)
+               VALUES (?, ?, 'SALE', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 biz, invoice_no, customer, text("customer_phone"),
                 status, total, amount_paid, round(total - amount_paid, 2), g.user["username"], sold_at,
-                customer_for(db, biz, text("customer_name"), text("customer_phone"), sold_at), collect_on, deliver_on,
+                customer_for(db, biz, text("customer_name"), text("customer_phone"), sold_at), collect_on, deliver_on, offline["ref"] if offline else None,
             ),
         )
         record_money(
             db, biz, "in", amount_paid, method, "sale", reference, customer, f"Invoice {invoice_no}" + (" (pre-order collected)" if preorders else ""),
             "invoice", invoice_id, sold_at,
         )
-        for p, qty, discount, line_total in lines:
-            # The quantity check in the WHERE clause stops two tills selling the same last units
-            moved = db.execute(
-                "UPDATE pos_products SET quantity = quantity - ? WHERE id=? AND business_id=? AND quantity >= ?",
-                (qty, p["id"], biz, qty),
-            )
-            if moved.rowcount != 1:
-                raise StockError(p["name"])
+        short = []
+        for p, qty, discount, line_total, price in lines:
+            if offline:
+                # Sold from what was in front of the seller: recorded whatever the app's stock said
+                db.execute("UPDATE pos_products SET quantity = quantity - ? WHERE id=? AND business_id=?", (qty, p["id"], biz))
+                left = db.one("SELECT quantity FROM pos_products WHERE id=?", (p["id"],))["quantity"]
+                if left < 0:
+                    short.append((p, left))
+            else:
+                # The quantity check in the WHERE clause stops two tills selling the same last units
+                moved = db.execute(
+                    "UPDATE pos_products SET quantity = quantity - ? WHERE id=? AND business_id=? AND quantity >= ?",
+                    (qty, p["id"], biz, qty),
+                )
+                if moved.rowcount != 1:
+                    raise StockError(p["name"])
             low_stock_alert(db, p["name"], p["item_code"], p["quantity"], p["quantity"] - qty, "listed for sale in the POS")
             db.execute(
                 """INSERT INTO invoice_items (invoice_id, business_id, item_code, item_name, department, batch_no, qty, unit_price, line_total, discount)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (invoice_id, biz, p["item_code"], p["name"], p["department"], p["batch_no"], qty, p["price"], line_total, discount or None),
+                (invoice_id, biz, p["item_code"], p["name"], p["department"], p["batch_no"], qty, price, line_total, discount or None),
             )
+        for p, left in short:
+            notify(db, "low_stock", f"Count {p['name']}: the app's stock is below zero",
+                   f"A sale made offline ({offline['ref']}, now {invoice_no}) sold more {p['name']} (code {p['item_code']}) than the app had in stock: "
+                   f"it now shows {left}. Count it and correct the stock.", url_for("inventory"), whatsapp=True)
         for po in preorders:
             # Claimed only while still pending, so two tills cannot both sell the same pre-order
             claimed = db.execute(
@@ -1358,25 +1405,122 @@ def checkout():
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (invoice_id, biz, po["pos_code"], po["name"], po["department"], po["batch_no"], po["qty"], po["price"], po["line_total"], po["discount"] or None),
             )
+        if offline:
+            db.execute("INSERT INTO offline_uploads (business_id, upload_key, invoice_id, created_by, created_at) VALUES (?, ?, ?, ?, ?)",
+                       (biz, offline["key"], invoice_id, g.user["username"], now().strftime("%Y-%m-%d %H:%M:%S")))
         db.commit()
     except PreorderGone as e:
         db.rollback()
-        flash(f"{e}'s pre-order was just collected or cancelled elsewhere. Nothing was saved; please review the cart.", "error")
-        return redirect(url_for("pos"))
+        raise SaleRefused(f"{e}'s pre-order was just collected or cancelled elsewhere. Nothing was saved; please review the cart.", redirect(url_for("pos")))
     except StockError as e:
         db.rollback()
-        flash(f"'{e}' was just sold elsewhere and is now short. Nothing was saved; please review the cart.", "error")
-        return back
+        raise SaleRefused(f"'{e}' was just sold elsewhere and is now short. Nothing was saved; please review the cart.", back)
     except DB_ERRORS:
         db.rollback()
-        flash("The sale could not be saved. Please try again.", "error")
-        return back
+        raise SaleRefused("The sale could not be saved. Please try again.", back)
 
     if collect_on:
         flash(f"To be collected on {collect_on}. Everyone gets a reminder the day before.", "ok")
     if deliver_on:
         flash(f"To be delivered on {deliver_on}: it is on that day's delivery list.", "ok")
+    return invoice_id
+
+
+@app.post("/checkout")
+@need("sell")
+def checkout():
+    try:
+        invoice_id = record_sale()
+    except SaleRefused as e:
+        flash(e.message, "error")
+        return e.back
     return redirect(url_for("invoice", invoice_id=invoice_id))
+
+
+# --- OFFLINE ---
+# The app works on a bad network day: each signed-in device keeps a snapshot of what it needs to show stock, prices, customers, recent
+# invoices and plantings, and to sell (offline.js keeps it fresh while there is a connection). A sale made with no connection waits on the
+# device and is uploaded here when the connection is back, through the same checks as any sale (record_sale). Pages already opened are
+# kept by the service worker (sw.js) and shown, marked as an offline copy, when they cannot be fetched.
+OFFLINE_DAYS = 30            # the invoices a device keeps
+OFFLINE_SALE_DAYS = 14       # how old an offline sale may be when it is uploaded
+
+
+@app.get("/offline/snapshot")
+@need(None)
+def offline_snapshot():
+    db, biz, user = get_db(), g.user["business_id"], g.user
+    admin = user["role"] == "admin"
+    since = add_days(today_str(), -OFFLINE_DAYS)
+    products = db.all("SELECT id, item_code, name, category, department, batch_no, quantity, price FROM pos_products WHERE business_id=? ORDER BY name", (biz,))
+    inventory = db.all(
+        "SELECT item_code, name, category, department, quantity, unit, unit_cost, price, expiry_date FROM products WHERE business_id=? ORDER BY name", (biz,))
+    if admin:
+        customers = db.all(
+            f"""SELECT c.name, c.phone, COALESCE(SUM(CASE WHEN i.kind='SALE' AND i.payment_status <> 'Cancelled' THEN i.balance_due ELSE 0 END), 0) AS owes
+                FROM customers c LEFT JOIN invoices i ON i.customer_id = c.id AND i.business_id = c.business_id
+                WHERE c.business_id=? GROUP BY c.id, c.name, c.phone ORDER BY c.name""", (biz,))
+    else:
+        customers = db.all("SELECT name, phone FROM customers WHERE business_id=? ORDER BY name", (biz,))
+    invoices = db.all(
+        """SELECT id, invoice_no, kind, customer_name, customer_phone, payment_status, total, amount_paid, balance_due, created_at, offline_ref
+           FROM invoices WHERE business_id=? AND created_at >= ? ORDER BY id DESC LIMIT 2000""", (biz, since))
+    items = {}
+    for r in db.all(
+        """SELECT ii.invoice_id, ii.item_name, ii.qty, ii.unit_price, ii.line_total FROM invoice_items ii JOIN invoices i ON i.id = ii.invoice_id
+           WHERE ii.business_id=? AND i.created_at >= ? ORDER BY ii.id""", (biz, since)):
+        items.setdefault(r["invoice_id"], []).append([r["item_name"], r["qty"], r["unit_price"], r["line_total"]])
+    batches = with_figures(db, biz, db.all("SELECT * FROM plantings WHERE business_id=? AND still_in_greenhouse=1 ORDER BY ready_on, id", (biz,)))
+    preorders = db.all(
+        """SELECT po.customer_name, po.customer_phone, po.qty, po.collect_on, p.name AS plant, p.batch_no, p.planted_on FROM preorders po
+           JOIN plantings p ON p.id = po.planting_id WHERE po.business_id=? AND po.status='pending' ORDER BY po.collect_on, po.id""", (biz,))
+    response = jsonify({
+        "at": now().strftime("%Y-%m-%d %H:%M:%S"), "csrf": csrf_token(), "days": OFFLINE_DAYS,
+        "user": {"id": user["id"], "name": user["username"], "admin": admin, "sell": can("sell")},
+        "business": {"name": user["business_name"], "currency": user["currency"] or "", "low": user["low_stock_threshold"], "walk_in": WALK_IN},
+        "methods": METHOD_NAMES, "statuses": list(PAYMENT_STATUSES), "urls": {"sales": url_for("offline_sale"), "snapshot": url_for("offline_snapshot")},
+        "products": products, "inventory": inventory, "customers": customers,
+        "invoices": [dict(i, items=items.get(i["id"], [])) for i in invoices],
+        "plantings": [{"batch": b["label"], "planted_on": b["planted_on"], "ready_on": b["actual_ready_on"] or b["ready_on"], "stage": b["stage_label"],
+                       "seedlings": b["seedlings"], "free": b["available"], "preordered": b["pending"], "price": b["price"]} for b in batches],
+        "preorders": [{"customer": p["customer_name"], "phone": p["customer_phone"], "qty": p["qty"], "collect_on": p["collect_on"],
+                       "batch": planting_label({"name": p["plant"], "batch_no": p["batch_no"], "planted_on": p["planted_on"]})} for p in preorders],
+    })
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.post("/offline/sales")
+@need("sell")
+def offline_sale():
+    """One sale made offline: recorded once, however often it is sent, as {ok, invoice_no, url} or {ok: false, error} for the device to show."""
+    db, biz = get_db(), g.user["business_id"]
+    key, ref = text("upload_key"), text("offline_ref")[:30]
+    if not re.fullmatch(r"[A-Za-z0-9-]{8,80}", key) or not re.fullmatch(r"OFF-[A-Za-z0-9-]{1,24}", ref):
+        return jsonify({"ok": False, "error": "This sale is not one the app made offline."}), 400
+    done = db.one("SELECT u.invoice_id, i.invoice_no FROM offline_uploads u LEFT JOIN invoices i ON i.id = u.invoice_id WHERE u.business_id=? AND u.upload_key=?", (biz, key))
+    if done:
+        return jsonify({"ok": True, "invoice_no": done["invoice_no"], "url": url_for("invoice", invoice_id=done["invoice_id"]), "again": True})
+    # When it was made: on the device's clock, kept if it is believable (not ahead of now, not older than OFFLINE_SALE_DAYS)
+    sold_at = now().strftime("%Y-%m-%d %H:%M:%S")
+    made = text("sold_at")
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", made) and add_days(today_str(), -OFFLINE_SALE_DAYS) <= made[:10] and made <= sold_at:
+        sold_at = made
+    try:
+        prices = {int(k): round(float(v), 2) for k, v in json.loads(request.form.get("prices", "{}")).items() if float(v) >= 0}
+    except (ValueError, TypeError, AttributeError):
+        prices = {}
+    try:
+        invoice_id = record_sale(offline={"key": key, "ref": ref, "sold_at": sold_at, "prices": prices})
+    except SaleRefused as e:
+        session.pop("_flashes", None)
+        again = db.one("SELECT u.invoice_id, i.invoice_no FROM offline_uploads u LEFT JOIN invoices i ON i.id = u.invoice_id WHERE u.business_id=? AND u.upload_key=?", (biz, key))
+        if again:   # the same sale sent twice at once: the other one recorded it
+            return jsonify({"ok": True, "invoice_no": again["invoice_no"], "url": url_for("invoice", invoice_id=again["invoice_id"]), "again": True})
+        return jsonify({"ok": False, "error": e.message}), 409
+    session.pop("_flashes", None)
+    number = db.one("SELECT invoice_no FROM invoices WHERE id=?", (invoice_id,))["invoice_no"]
+    return jsonify({"ok": True, "invoice_no": number, "url": url_for("invoice", invoice_id=invoice_id)})
 
 
 # --- Sales collected on a later day ---
@@ -2973,7 +3117,7 @@ def invoice(invoice_id):
     db, biz = get_db(), g.user["business_id"]
     inv = db.one(
         """SELECT id, invoice_no, kind, customer_name, customer_phone, payment_status, total, amount_paid, balance_due, created_by, created_at, customer_id,
-                  cancelled_at, cancelled_by, cancel_reason, collect_on, collected_at, collected_by, deliver_on, delivered_at, delivered_by
+                  cancelled_at, cancelled_by, cancel_reason, collect_on, collected_at, collected_by, deliver_on, delivered_at, delivered_by, offline_ref
            FROM invoices WHERE id=? AND business_id=?""",
         (invoice_id, biz),
     )

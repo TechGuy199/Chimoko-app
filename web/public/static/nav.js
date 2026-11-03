@@ -9,6 +9,7 @@
 // - a link starts loading when the pointer rests on it (or a finger touches it), so part of the wait is over by the
 //   time it is clicked. Only links that just show a page are fetched early, the copy is used once and only for a few
 //   seconds, and any save throws all early copies away, so a page is never shown with data older than a save;
+// - Back and Forward show the page as it was at once, from memory, then bring it up to date without moving it;
 // - the latest click wins: a page that arrives after another was asked for is dropped, never swapped in over it;
 // - a form being saved cannot be sent a second time by a double click;
 // - Back and Forward return to where the page was scrolled to.
@@ -17,14 +18,16 @@
 // download links (.csv/.pdf/.xlsx/.zip exports), forms marked data-full-reload (the CSV/XLSX import uploads, kept as
 // plain uploads for now), and signing in or out (the signed-in page loads its own scripts: alerts, backups). Anything
 // that fails - offline, a server error, an unexpected response - falls back to a real navigation too, so the app is
-// never left in a half-updated state.
+// never left in a half-updated state. With no connection (or on a page shown from the device's offline copy, see sw.js) a save is not
+// tried at all: the page says so, and points to the offline screens.
 (function () {
     const DOWNLOAD_PATH = /\.(csv|pdf|xlsx|zip)(?:$|\?)/i;
     // Links that do something when followed (opening an alert marks it read), so they are never fetched early
     const NOT_EARLY = /\/notifications\/\d+\/open$/;
     const EARLY_FOR = 8000;       // ms an early copy stays usable
-    const HOVER_WAIT = 70;        // ms the pointer rests on a link before it is fetched early
-    const BAR_AFTER = 120;        // ms before the progress bar appears
+    const HOVER_WAIT = 40;        // ms the pointer rests on a link before it is fetched early
+    const BAR_AFTER = 60;         // ms before the progress bar appears
+    const REMEMBERED = 15;        // pages kept in memory for Back and Forward
 
     function sameOrigin(url) {
         return url.origin === location.origin;
@@ -76,8 +79,10 @@
         if (!doc.getElementById("page-main")) return false;   // not one of our own pages (e.g. a bare error page)
         if (!!doc.getElementById("app-header") !== !!document.getElementById("app-header")) return "reload";
         document.title = doc.title;
-        const theme = doc.documentElement.getAttribute("data-theme");
-        if (theme) document.documentElement.setAttribute("data-theme", theme);
+        ["data-theme", "data-accent", "data-size"].forEach(function (name) {
+            const value = doc.documentElement.getAttribute(name);
+            if (value !== null) document.documentElement.setAttribute(name, value);
+        });
         const lookStyle = doc.documentElement.getAttribute("style");
         if (lookStyle) document.documentElement.setAttribute("style", lookStyle);
         document.body.innerHTML = doc.body.innerHTML;
@@ -108,6 +113,8 @@
     }
 
     function load(url, init, signal) {
+        // A page asked for (not a save) says so, so the service worker keeps a copy of it for offline viewing
+        if ((init.method || "GET").toUpperCase() === "GET") init = Object.assign({}, init, { headers: Object.assign({ "X-Nav-Page": "1" }, init.headers) });
         return fetch(url, Object.assign({ credentials: "same-origin", signal: signal }, init))
             .then(function (response) {
                 // A save comes back as the page to show next, with its address in X-Nav-Url (see FollowSaves in app.py)
@@ -146,6 +153,15 @@
         early.set(url, entry);
     }
 
+    // --- Pages seen, for Back and Forward ---
+    const seen = new Map();   // address (without #) -> the page's HTML, newest last
+    function remember(url, html) {
+        const key = url.split("#")[0];
+        seen.delete(key);
+        seen.set(key, html);
+        while (seen.size > REMEMBERED) seen.delete(seen.keys().next().value);
+    }
+
     // --- Navigating ---
     let latest = 0;            // the newest navigation; an older one that finishes later is dropped
     let pageFetch = null;      // the AbortController of a page being fetched (GET), so a newer click can stop it
@@ -178,6 +194,7 @@
                 // The same page brought up to date stays still; a new page makes its entrance (styles.css)
                 document.documentElement.classList.toggle("nav-quiet", samePage);
                 const swapped = swap(result.html);
+                if (swapped === true && isGet) remember(result.finalUrl, result.html);
                 if (swapped === "reload") {
                     window.location.href = result.finalUrl;
                     return;
@@ -273,6 +290,12 @@
         if (!sameOrigin(url)) return;
         e.preventDefault();
         const method = (form.getAttribute("method") || "GET").toUpperCase();
+        // No connection, or a page shown from the offline copy: nothing is sent, and the page says why
+        if (method !== "GET" && (!navigator.onLine || document.getElementById("offline-copy"))) {
+            e.preventDefault();
+            offlineNote();
+            return;
+        }
         // A save already on its way is not sent again by a second click
         if (method !== "GET" && form.dataset.sending) return;
         const scrollBefore = window.scrollY;
@@ -295,12 +318,34 @@
             form.classList.remove("is-sending");
         }
         rememberScroll();
-        navigate(url.toString(), init, true, scrollBefore, method === "GET").then(ready, function () {
+        navigate(url.toString(), init, true, scrollBefore, method === "GET").then(ready, function (err) {
             ready();
+            // The server could not be reached (no internet, even with Wi-Fi on): said here, rather than the browser's own error page
+            if (method !== "GET" && err instanceof TypeError) { offlineNote(); return; }
             if (document.body.contains(form)) form.submit();   // a real submit, which this listener cannot intercept a second time
             else window.location.href = url.toString();
         });
     });
+
+    function offlineNote() {
+        const main = document.getElementById("page-main");
+        if (!main) return;
+        let note = document.getElementById("offline-note");
+        if (!note) {
+            note = document.createElement("div");
+            note.id = "offline-note";
+            note.className = "flash error no-print";
+            note.appendChild(document.createTextNode("No connection: nothing was saved. Sales can still be made under "));
+            const link = document.createElement("a");
+            link.href = "/static/offline.html";
+            link.setAttribute("data-full-reload", "");
+            link.textContent = "Work offline";
+            note.appendChild(link);
+            note.appendChild(document.createTextNode("; everything else waits for the connection."));
+            main.insertBefore(note, main.firstChild);
+        }
+        window.scrollTo({ top: 0, behavior: "smooth" });
+    }
 
     // The form's fields, and the button that was pressed (its name and value), as a real submit would send them
     function formData(form, submitter) {
@@ -335,6 +380,29 @@
     if ("scrollRestoration" in history) history.scrollRestoration = "manual";
     window.addEventListener("popstate", function (e) {
         const scroll = e.state && typeof e.state.scroll === "number" ? e.state.scroll : 0;
+        const here = location.href;
+        const kept = seen.get(here.split("#")[0]);
+        if (kept) {
+            // At once, as it was; then the live page replaces it where it stands, unless the person has started typing in it
+            const mine = ++latest;
+            document.documentElement.classList.add("nav-quiet");
+            if (swap(kept) === true) {
+                window.scrollTo({ top: scroll, left: 0, behavior: "instant" });
+                document.dispatchEvent(new CustomEvent("nav:swapped", { detail: { url: here } }));
+                load(here, { method: "GET" }).then(function (result) {
+                    if (mine !== latest || location.href !== here) return;
+                    const active = document.activeElement;
+                    if (active && /^(INPUT|TEXTAREA|SELECT)$/.test(active.tagName)) return;
+                    const y = window.scrollY;
+                    if (swap(result.html) === true) {
+                        remember(here, result.html);
+                        window.scrollTo({ top: y, left: 0, behavior: "instant" });
+                        document.dispatchEvent(new CustomEvent("nav:swapped", { detail: { url: here } }));
+                    }
+                }).catch(function () { /* the copy stays; offline, the service worker answers with its own */ });
+                return;
+            }
+        }
         navigate(location.href, { method: "GET" }, false, 0, false, scroll).catch(function () {
             location.reload();
         });

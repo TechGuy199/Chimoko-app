@@ -233,3 +233,5 @@ dialog.assistant { z-index: 60; }
 .assistant-head-tools { gap: 0; }
 .assistant-mini { bottom: calc(var(--tabbar-height) + var(--safe-bottom) + 14px); right: 14px; }
 .assistant-mini-close, .assistant-menu button { min-height: 44px; min-width: 44px; }
+.offline-pill { bottom: calc(var(--tabbar-height) + var(--safe-bottom) + 14px); left: 12px; }
+.offline-tabs button { min-height: 44px; }

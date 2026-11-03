@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en" data-theme="{{ look.theme }}" style="--glass: {{ look.glass / 100 }}">
+<html lang="en" data-theme="{{ look.theme }}" data-accent="{{ look.accent }}" data-size="{{ look.size }}" style="--glass: {{ look.glass / 100 }}">
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
@@ -8,7 +8,8 @@
     {# Phones get their own look on top: a bottom tab bar, bigger touch targets and the Inter typeface #}
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" media="(max-width: 760px)">
+    {# Loaded without holding up the page (media="print" until it arrives): the system font shows meanwhile, and offline #}
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" media="print" onload="this.media='(max-width: 760px)'">
     <link rel="stylesheet" href="{{ asset('mobile.css') }}" media="(max-width: 760px)">
     {# The launch screen covers the page from its first paint, so it runs here rather than at the end of the body #}
     <script src="{{ asset('splash.js') }}"></script>
@@ -101,6 +102,7 @@
         <div class="menu-panel">
             <span class="menu-heading">Signed in as {{ user.role }}</span>
             <a class="menu-item {{ 'active' if request.endpoint == 'appearance' }}" href="{{ url_for('appearance') }}">My Account &amp; Appearance</a>
+            <a class="menu-item" href="/static/offline.html" data-full-reload>Work offline</a>
             <form method="post" action="{{ url_for('logout') }}">
                 {{ csrf_field() }}
                 <button class="menu-item danger">Logout</button>
@@ -196,6 +198,10 @@
         data-voice-url="{{ url_for('assistant_voice') }}" data-brief="{{ url_for('assistant_brief') }}"
         data-brief-waiting="{{ '1' if brief_waiting else '' }}" data-memory="/assistant/memory" data-my-brief="{{ url_for('assistant_my_brief') }}"
         data-stock-prefs="/assistant/stock-preferences/"></script>
+{% endif %}
+{# Offline: keeps this device's snapshot fresh, uploads sales made offline, and says what is waiting. Loaded once, here. #}
+{% if user %}
+<script src="{{ asset('offline-store.js') }}" data-user="{{ user.id }}" data-snapshot="{{ url_for('offline_snapshot') }}"></script>
 {% endif %}
 <div id="page-scripts">{% block scripts %}{% endblock %}</div>
 <script>

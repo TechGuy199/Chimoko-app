@@ -253,6 +253,12 @@ SCHEMA = [
         rounds INTEGER NOT NULL DEFAULT 0, chars_sent INTEGER NOT NULL DEFAULT 0, input_tokens INTEGER NOT NULL DEFAULT 0,
         output_tokens INTEGER NOT NULL DEFAULT 0, cached_tokens INTEGER NOT NULL DEFAULT 0
     )""",
+    # A sale made on a device with no connection, uploaded later: its key (made on the device, so an upload repeated after a dropped
+    # connection is recognised and never recorded twice) and the invoice it became.
+    """CREATE TABLE IF NOT EXISTS offline_uploads (
+        id {pk}, business_id INTEGER NOT NULL, upload_key TEXT NOT NULL, invoice_id INTEGER, created_by TEXT, created_at TEXT,
+        UNIQUE (business_id, upload_key)
+    )""",
     # What the assistant was asked to remember: a person's own preference (user_id set) or one for the whole business (user_id NULL, only
     # from an admin). It is part of what the assistant is told with every question; each can be seen and deleted in the panel and in Settings.
     """CREATE TABLE IF NOT EXISTS assistant_memory (
@@ -453,6 +459,9 @@ def init_schema():
         # Each user's own appearance choices: colour theme and how see-through the interface is (0-100)
         add_column(db, "users", "theme", "TEXT")
         add_column(db, "users", "glass", "INTEGER")
+        # And their accent colour (NULL = the theme's own) and text size (NULL = normal)
+        add_column(db, "users", "accent", "TEXT")
+        add_column(db, "users", "text_size", "TEXT")
         # Alert settings per business: the WhatsApp number and which alerts are switched on (NULL counts as on)
         # How many seeds one pack holds (seed items only); stock of a seed item is counted in packs
         add_column(db, "products", "seeds_per_pack", "INTEGER")
@@ -509,6 +518,8 @@ def init_schema():
         add_column(db, "businesses", "wake_phrase", "TEXT")
         add_column(db, "businesses", "stop_phrase", "TEXT")
         add_column(db, "users", "assistant_voice", "TEXT")
+        # A sale made offline keeps the number it had on the device (OFF-...) until it was uploaded and given its invoice number
+        add_column(db, "invoices", "offline_ref", "TEXT")
         # Restock advice: the days of stock to keep (NULL = 30). The evening brief (NULL counts as on), its WhatsApp copy to the alert
         # number (NULL counts as on), and the day that copy last went, so it goes once a day
         add_column(db, "businesses", "stock_cover_days", "INTEGER")

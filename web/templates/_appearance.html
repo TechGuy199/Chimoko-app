@@ -1,13 +1,35 @@
-{# Theme and transparency form. Expects: look, themes, and optionally back ('settings' returns there after a plain form post). #}
+{# Theme, accent, text size and transparency form. Expects: look, themes, theme_swatches, accents, accent_colours, text_sizes, and optionally back
+   ('settings' returns there after a plain form post). #}
 <form method="post" action="{{ url_for('appearance') }}" class="appearance" id="appearance-form">
     {{ csrf_field() }}
     {% if back %}<input type="hidden" name="back" value="{{ back }}">{% endif %}
 
     <span class="muted">Theme</span>
+    <div class="theme-grid" role="radiogroup" aria-label="Theme">
+        {% for value, label in themes %}
+        <label class="theme-choice">
+            <input type="radio" name="theme" value="{{ value }}" {{ 'checked' if look.theme == value }}>
+            <span class="theme-swatch" style="--swatch-bg: {{ theme_swatches[value][0] }}; --swatch-accent: {{ theme_swatches[value][1] }}" aria-hidden="true"><i></i><i></i><i></i></span>
+            <span>{{ label }}</span>
+        </label>
+        {% endfor %}
+    </div>
+
+    <span class="muted">Accent colour</span>
+    <div class="accent-row" role="radiogroup" aria-label="Accent colour">
+        {% for value, label in accents %}
+        <label class="accent-choice" title="{{ label }}">
+            <input type="radio" name="accent" value="{{ value }}" {{ 'checked' if look.accent == value }} aria-label="{{ label }}">
+            <span class="accent-dot{{ ' own' if not value }}" style="{{ '--dot: ' ~ accent_colours[value] if value }}" aria-hidden="true"></span>
+        </label>
+        {% endfor %}
+    </div>
+
+    <span class="muted">Text size</span>
     <div>
-        <span class="segmented" role="radiogroup" aria-label="Theme">
-            {% for value, label in themes %}
-            <label><input type="radio" name="theme" value="{{ value }}" {{ 'checked' if look.theme == value }}> {{ label }}</label>
+        <span class="segmented" role="radiogroup" aria-label="Text size">
+            {% for value, label in text_sizes %}
+            <label><input type="radio" name="text_size" value="{{ value }}" {{ 'checked' if look.size == value }}> {{ label }}</label>
             {% endfor %}
         </span>
     </div>
@@ -41,13 +63,23 @@
         const shown = document.getElementById("glass-value");
         const status = document.getElementById("appearance-status");
         const themes = Array.from(form.querySelectorAll('input[name="theme"]'));
+        const accents = Array.from(form.querySelectorAll('input[name="accent"]'));
+        const sizes = Array.from(form.querySelectorAll('input[name="text_size"]'));
         let pending;
+
+        function picked(radios) {
+            const radio = radios.find(function (r) { return r.checked; });
+            return radio ? radio.value : null;
+        }
 
         function show() {
             root.style.setProperty("--glass", slider.value / 100);
             shown.textContent = slider.value + "%";
-            const picked = themes.find(function (radio) { return radio.checked; });
-            if (picked) root.dataset.theme = picked.value;
+            if (picked(themes) !== null) root.dataset.theme = picked(themes);
+            if (picked(accents) !== null) root.dataset.accent = picked(accents);
+            if (picked(sizes) !== null) root.dataset.size = picked(sizes);
+            // The offline screens read the look from here (they have no server to ask)
+            try { localStorage.setItem("ms-look", JSON.stringify({ theme: root.dataset.theme, accent: root.dataset.accent, size: root.dataset.size, glass: slider.value })); } catch (e) { /* not kept */ }
         }
 
         function save() {
@@ -73,10 +105,12 @@
 
         slider.addEventListener("input", show);       // follow the thumb while dragging
         slider.addEventListener("change", changed);   // save when it is let go
-        themes.forEach(function (radio) { radio.addEventListener("change", changed); });
+        themes.concat(accents, sizes).forEach(function (radio) { radio.addEventListener("change", changed); });
         document.getElementById("appearance-reset").addEventListener("click", function () {
             slider.value = 50;
             themes.forEach(function (radio) { radio.checked = radio.value === "dark"; });
+            accents.forEach(function (radio) { radio.checked = radio.value === ""; });
+            sizes.forEach(function (radio) { radio.checked = radio.value === "normal"; });
             changed();
         });
     })();

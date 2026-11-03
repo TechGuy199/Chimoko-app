@@ -84,6 +84,7 @@
 
     <dl>
         <dt>Invoice no</dt><dd>{{ inv.invoice_no }}</dd>
+        {% if inv.offline_ref %}<dt>Made offline as</dt><dd>{{ inv.offline_ref }} (the number on its offline receipt)</dd>{% endif %}
         <dt>Date &amp; time</dt><dd>{{ inv.created_at }}</dd>
         <dt>Served by</dt><dd>{{ inv.created_by }}</dd>
         <dt>{{ 'Recipient' if inv.kind == 'FARM_USE' else 'Customer' }}</dt><dd>{{ inv.customer_name }}</dd>

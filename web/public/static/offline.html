@@ -1,30 +1,45 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark" data-accent="" data-size="normal" style="--glass: 0.5">
 <head>
     <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>You're offline</title>
-    <style>
-        body {
-            margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
-            background: #0b1220; color: #e7ecf5; font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-            padding: 24px; box-sizing: border-box;
-        }
-        .box { max-width: 380px; text-align: center; }
-        h1 { font-size: 20px; margin: 0 0 8px; }
-        p { color: #9aa7bd; margin: 0 0 20px; }
-        button {
-            padding: 10px 18px; border: 0; border-radius: 8px; background: #2563eb; color: #fff;
-            font: inherit; font-weight: 600; cursor: pointer;
-        }
-        button:hover { background: #1d4ed8; }
-    </style>
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <title>Working offline</title>
+    <!-- The offline screens: shown by the service worker when a page cannot be fetched and has no saved copy, or opened from
+         "Work offline". Everything comes from this device's snapshot (offline-store.js); a sale made here waits to upload. -->
+    <script>
+        // The person's look, kept by the appearance settings, before anything is painted
+        try {
+            const look = JSON.parse(localStorage.getItem("ms-look") || "{}");
+            if (look.theme) document.documentElement.dataset.theme = look.theme;
+            if (look.accent !== undefined) document.documentElement.dataset.accent = look.accent || "";
+            if (look.size) document.documentElement.dataset.size = look.size;
+            if (look.glass !== undefined) document.documentElement.style.setProperty("--glass", look.glass / 100);
+        } catch (e) { /* the default look */ }
+    </script>
+    <link rel="stylesheet" href="/static/styles.css">
+    <link rel="stylesheet" href="/static/mobile.css" media="(max-width: 760px)">
+    <link rel="icon" href="/static/icons/icon.svg" type="image/svg+xml">
 </head>
-<body>
-    <div class="box">
-        <h1>You're offline</h1>
-        <p>MS-POS needs a connection to show your inventory, sales and records. Reconnect and try again.</p>
-        <button onclick="location.reload()">Try again</button>
-    </div>
+<body data-offline-app="1">
+<header class="topbar no-print">
+    <span class="brand" id="off-business">Offline</span>
+    <span class="here">Working offline</span>
+    <span class="spacer"></span>
+    <a class="btn ghost" id="off-online" href="/" hidden>Back online: open the app</a>
+</header>
+<main id="page-main">
+    <p class="flash notice no-print" id="off-asof">Opening this device's copy…</p>
+    <nav class="offline-tabs no-print" role="tablist" aria-label="Offline screens">
+        <button type="button" role="tab" data-tab="sell">Sell</button>
+        <button type="button" role="tab" data-tab="stock">Stock</button>
+        <button type="button" role="tab" data-tab="customers">Customers</button>
+        <button type="button" role="tab" data-tab="invoices">Invoices</button>
+        <button type="button" role="tab" data-tab="plantings">Plantings</button>
+        <button type="button" role="tab" data-tab="waiting">Waiting <span class="badge" id="off-count" hidden></span></button>
+    </nav>
+    <section id="off-view"></section>
+</main>
+<script src="/static/offline-store.js"></script>
+<script src="/static/offline-app.js"></script>
 </body>
 </html>

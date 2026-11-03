@@ -1,5 +1,6 @@
 // Launch screen: "MS-FINTECH - Building custom specialised software for every business". A book opens and a pen writes in it
-// (3 seconds), then an infinity loop runs (5 seconds), with tips about the app underneath; the page loads behind it meanwhile.
+// (about a second and a half), with a tip about the app underneath, while the page loads behind it. It ends as soon as the page is
+// ready (never before the book has opened, never after 4 seconds); if the page is still loading, an infinity loop runs meanwhile.
 // It shows every time the app is opened (once per tab or window), not on every page inside it. Skip (or Esc) ends it at once.
 // Loaded in the page head, so it can cover the page before anything is painted. Pure CSS and SVG: nothing extra to download.
 (function () {
@@ -13,8 +14,8 @@
 
     const root = document.documentElement;
     const calm = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    const BOOK_MS = calm ? 600 : 3000;
-    const TOTAL_MS = calm ? 1500 : 8000;
+    const BOOK_MS = calm ? 300 : 1400;   // the book has opened and the pen written: the shortest it shows
+    const MAX_MS = 4000;                 // the longest, however slow the page
     const TIPS = [
         "Scan a barcode into the POS search and press Enter: it goes straight into the cart.",
         "Count your cash, bank, Airtel Money and MTN Money once in Accounts; every payment keeps them up to date.",
@@ -70,28 +71,17 @@
             '<div class="splash-bar"><i></i></div>' +
             '<p class="splash-tip" aria-live="polite"><span>Tip</span><em></em></p>' +
             "</div>";
-        splash.style.setProperty("--splash-total", TOTAL_MS + "ms");
         document.body.insertBefore(splash, document.body.firstChild);
 
-        // Tips, a new one every two seconds, in a random order
+        // One tip, chosen at random
         const tip = splash.querySelector(".splash-tip em");
-        const order = TIPS.slice().sort(function () { return Math.random() - 0.5; });
-        let shown = 0;
-        function nextTip() {
-            tip.classList.remove("in");
-            setTimeout(function () {
-                tip.textContent = order[shown++ % order.length];
-                tip.classList.add("in");
-            }, shown ? 220 : 0);
-        }
-        nextTip();
-        const tips = setInterval(nextTip, 2000);
+        tip.textContent = TIPS[Math.floor(Math.random() * TIPS.length)];
+        tip.classList.add("in");
 
-        let ended = false;
+        let ended = false, loaded = document.readyState === "complete", opened = false;
         function finish() {
             if (ended) return;
             ended = true;
-            clearInterval(tips);
             splash.classList.add("done");
             root.classList.remove("splash-on");
             document.removeEventListener("keydown", onKey);
@@ -103,8 +93,17 @@
 
         if (calm) splash.classList.add("calm");
         requestAnimationFrame(function () { splash.classList.add("play"); });
-        setTimeout(function () { splash.classList.add("loop"); }, BOOK_MS);
-        setTimeout(finish, TOTAL_MS);
+        // Once the book is open: gone if the page is ready, otherwise the loop runs until it is
+        setTimeout(function () {
+            opened = true;
+            if (loaded) finish();
+            else splash.classList.add("loop");
+        }, BOOK_MS);
+        window.addEventListener("load", function () {
+            loaded = true;
+            if (opened) finish();
+        });
+        setTimeout(finish, MAX_MS);
     }
 
     if (document.body) build();
