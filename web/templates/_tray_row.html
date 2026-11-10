@@ -1,9 +1,15 @@
 <div class="tray-row">
     <select name="planter_id" aria-label="Employee">
         <option value="">Choose a person</option>
-        {% for e in staff %}
-        <option value="{{ e.id }}" {{ 'selected' if r and r.employee_id == e.id }}>{{ e.full_name }}{% if e.employment_type != 'Casual Worker' %} (salaried){% endif %}</option>
-        {% endfor %}
+        {# Casual workers (paid by the tray) first, with their rate; then the salaried staff #}
+        {% set casual = staff|selectattr('employment_type', 'equalto', 'Casual Worker')|list %}
+        {% set salaried = staff|rejectattr('employment_type', 'equalto', 'Casual Worker')|list %}
+        {% if casual %}<optgroup label="Casual workers (paid by the tray)">
+            {% for e in casual %}<option value="{{ e.id }}" {{ 'selected' if r and r.employee_id == e.id }}>{{ e.full_name }}{% if e.rate %} · {{ e.rate|money }} a tray{% endif %}</option>{% endfor %}
+        </optgroup>{% endif %}
+        {% if salaried %}<optgroup label="Salaried staff">
+            {% for e in salaried %}<option value="{{ e.id }}" {{ 'selected' if r and r.employee_id == e.id }}>{{ e.full_name }}</option>{% endfor %}
+        </optgroup>{% endif %}
     </select>
     <input name="planter_trays" type="number" min="0.01" max="100000" step="any" inputmode="decimal" placeholder="Trays" aria-label="Trays planted" value="{{ r.trays|trays|replace(',', '') if r else '' }}">
     <button type="button" class="btn small ghost" data-tray-remove aria-label="Remove this person">&times;</button>

@@ -555,7 +555,11 @@ GUIDE = {
     "who_bought": "Click any product name anywhere in the app to see who bought it: customers, phones, dates, quantities, prices and discounts, with a CSV. A planting record's Sold tile does the same.",
     "accounts": "Accounts (admins): every movement of money in and out, balances for cash, bank and mobile money (counted by hand, then kept up to date), who owes us and whom we owe, profit and the financial standing.",
     "reports": "Reports: sales, purchases and profit by department and period.",
-    "staff": "Staff (admins): employees, payroll, payslips with NAPSA and NHIMA, and statements. Daily Activities records the work done in each plot. A casual worker can be paid for the trays they planted: set the pay for a tray under HR > Settings, then Compute Payslip.",
+    "staff": "Staff (admins): employees, payroll, payslips with NAPSA and NHIMA, and statements. Daily Activities records the work done in each plot. "
+             "A casual worker is paid for the trays they planted at their own rate (set when they are registered, or with Edit). Each employee has a pay "
+             "schedule (monthly on a day, every two weeks, weekly, or a date set each time) and a next pay date. HR & Payroll's Pay due card shows what each "
+             "is owed; on the pay date admins are alerted and the payslip is filled in (the period since the last one, unpaid trays or salary less days absent). "
+             "Absences are recorded on the employee's page.",
     "alerts": "Alerts come in the app and optionally by WhatsApp (Settings): low stock, pre-orders and collections due, deliveries due, customer requests to follow up, "
               "and requests for admin permission.",
     "requests": "Customer Requests (Sell menu): log what a customer asked for that we do not have (never stocked, out of stock or not planted), with their phone, the quantity "
@@ -704,8 +708,9 @@ def staff(ctx, args):
     if who:
         sql, params = " AND LOWER(full_name) LIKE ?", [like(who)]
     people = db.all(
-        f"SELECT id, full_name, employment_type, basic_salary, start_date, expected_days_week FROM employees WHERE business_id=?{sql} ORDER BY full_name LIMIT ?", [biz] + params + [whole(args, "limit", 12)]
+        f"SELECT {H.EMPLOYEE_COLUMNS} FROM employees WHERE business_id=?{sql} ORDER BY full_name LIMIT ?", [biz] + params + [whole(args, "limit", 12)]
     )
+    hr_set = H.hr_settings_for(db, biz)
     pay_sql, pay_params = "", []
     if who:
         pay_sql, pay_params = " AND LOWER(employee_name) LIKE ?", [like(who)]
@@ -720,9 +725,12 @@ def staff(ctx, args):
     )}
     ctx.source("Payroll", H.url_for("hr"))
     return {
-        "employees": [{"name": clip(p["full_name"], 60), "type": p["employment_type"], "basic_salary": r2(p["basic_salary"]), "started": p["start_date"] or None, "days_a_week": p["expected_days_week"],
+        "employees": [{"name": clip(p["full_name"], 60), "type": p["employment_type"], "salary_each_pay": r2(p["basic_salary"]) if p["employment_type"] != "Casual Worker" else None,
+                       "pay_per_tray": r2(H.rate_for(p, hr_set)) if p["employment_type"] == "Casual Worker" else None, "paid": H.schedule_words(p),
+                       "next_pay_date": p["next_pay_date"], "owed_at_next_pay": r2(H.pay_preview(db, biz, p, hr_set, p["next_pay_date"] or ctx.today)["amount"]),
+                       "started": p["start_date"] or None, "days_a_week": p["expected_days_week"],
                        "unpaid_trays": r2(owed.get(p["id"])) if p["employment_type"] == "Casual Worker" else None} for p in people],
-        "payroll_month": month, "pay_per_tray": r2(H.hr_settings_for(db, biz)["tray_rate"]) or None,
+        "payroll_month": month, "pay_per_tray": r2(hr_set["tray_rate"]) or None,
         "paid_this_month": [{"name": clip(p["employee_name"], 60), "basic_for_days_worked": r2(p["calculated_basic"]) if p["trays"] is None else None,
                              "worked_days": p["worked_days"] if p["trays"] is None else None, "of_days": p["expected_days"] if p["trays"] is None else None,
                              "basic_for_trays": r2(p["calculated_basic"]) if p["trays"] is not None else None, "trays_planted": p["trays"], "pay_per_tray": p["tray_rate"] if p["trays"] is not None else None,
@@ -1292,7 +1300,7 @@ def prepare_planting(ctx, args):
       required=["employee", "payment_method"], admin=True)
 def prepare_tray_payslip(ctx, args):
     db, biz = ctx.db, ctx.biz
-    staff = db.all("SELECT id, full_name, nrc_number, employment_type FROM employees WHERE business_id=?", (biz,))
+    staff = db.all(f"SELECT {H.EMPLOYEE_COLUMNS} FROM employees WHERE business_id=?", (biz,))
     e = employee_named(ctx, text_of(args, "employee", 100), staff)
     if e["employment_type"] != "Casual Worker":
         raise ToolError(f"{e['full_name']} is permanent staff: they are paid their salary, not by the tray.")
@@ -1300,14 +1308,14 @@ def prepare_tray_payslip(ctx, args):
     if not (len(month) == 7 and month[4] == "-" and H.day_or_none(month + "-01")):
         raise ToolError("The pay month must be YYYY-MM.")
     rows_, trays = H.unpaid_trays(db, biz, e["id"], month)
-    rate = H.hr_settings_for(db, biz)["tray_rate"]
+    rate = H.rate_for(e, H.hr_settings_for(db, biz))
     bonus, deduction = number_of(args.get("bonus")) or 0.0, number_of(args.get("deduction")) or 0.0
     if bonus < 0 or deduction < 0:
         raise ToolError("A bonus or deduction cannot be negative.")
     if not rows_ and not bonus:
         raise ToolError(f"{e['full_name']} has no unpaid trays planted up to {month}.")
     if rows_ and rate <= 0:
-        raise ToolError("The pay for each tray is not set. An admin sets it under HR & Payroll > Settings.")
+        raise ToolError(f"{e['full_name']}'s pay for a tray is not set. An admin sets it on their page under HR & Payroll (Edit).")
     method = money_method(args, True)
     form = {"employee_id": e["id"], "pay_month": month, "pay_basis": "trays", "payment_method": method,
             "bonus_name": text_of(args, "bonus_name", 40) or ("Bonus" if bonus else ""), "bonus_amount": f"{bonus:.2f}" if bonus else "",
@@ -1452,17 +1460,21 @@ def attention_today(ctx, args):
         owed = db.one(f"SELECT COUNT(*) AS n, COALESCE(SUM(i.balance_due), 0) AS owed FROM invoices i WHERE i.business_id=? AND {SALE} AND i.balance_due > 0.005", (biz,))
         top = db.all(f"SELECT customer_name, SUM(balance_due) AS owed FROM invoices i WHERE i.business_id=? AND {SALE} AND i.balance_due > 0.005 GROUP BY customer_name ORDER BY owed DESC LIMIT 3", (biz,))
         we_owe = db.one("SELECT COALESCE(SUM(total_cost - COALESCE(amount_paid, total_cost)), 0) AS n FROM procurements WHERE business_id=?", (biz,))["n"]
-        rate = H.hr_settings_for(db, biz)["tray_rate"]
+        hr_set = H.hr_settings_for(db, biz)
         trays = db.all(
-            """SELECT t.employee_name, SUM(t.trays) AS trays FROM planting_trays t JOIN employees e ON e.id = t.employee_id AND e.business_id = t.business_id
-               WHERE t.business_id=? AND t.paid_payslip_id IS NULL AND e.employment_type='Casual Worker' GROUP BY t.employee_name ORDER BY trays DESC LIMIT 6""",
+            """SELECT t.employee_name, e.tray_rate, SUM(t.trays) AS trays FROM planting_trays t JOIN employees e ON e.id = t.employee_id AND e.business_id = t.business_id
+               WHERE t.business_id=? AND t.paid_payslip_id IS NULL AND e.employment_type='Casual Worker' GROUP BY t.employee_name, e.tray_rate ORDER BY trays DESC LIMIT 6""",
             (biz,),
         )
+        paydays = db.all(f"SELECT {H.EMPLOYEE_COLUMNS} FROM employees WHERE business_id=? AND next_pay_date IS NOT NULL AND next_pay_date <= ? ORDER BY next_pay_date LIMIT 8",
+                         (biz, today))
         asks = db.one("SELECT COUNT(*) AS n FROM permission_requests WHERE business_id=? AND status='pending'", (biz,))["n"]
         out.update({
             "customers_owe": {"invoices": owed["n"], "amount": r2(owed["owed"]), "most": [{"customer": clip(r["customer_name"], 50), "owes": r2(r["owed"])} for r in top]},
             "we_owe_suppliers": r2(we_owe),
-            "trays_to_pay": [{"worker": clip(r["employee_name"], 50), "trays": r2(r["trays"]), "pay": r2(r["trays"] * rate) if rate else None} for r in trays],
+            "trays_to_pay": [{"worker": clip(r["employee_name"], 50), "trays": r2(r["trays"]), "pay": r2(r["trays"] * H.rate_for(r, hr_set)) or None} for r in trays],
+            "pay_days": [{"employee": clip(p["full_name"], 50), "on": p["next_pay_date"], "overdue": p["next_pay_date"] < ctx.today,
+                          "owed": r2(H.pay_preview(db, biz, p, hr_set, p["next_pay_date"])["amount"])} for p in paydays],
             "requests_waiting_for_approval": asks,
         })
     ctx.source("Up next", H.url_for("up_next"))

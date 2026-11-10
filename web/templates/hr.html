@@ -21,22 +21,58 @@
     </a>
 </div>
 
+{# Who is paid when, and what they are owed: worked out the way their payslip will be #}
+<section class="card block" id="pay">
+    <div class="card-head">
+        <h2>Pay due</h2>
+        <a href="{{ url_for('new_payslip') }}">Compute payslip</a>
+    </div>
+    <p class="muted">Each person's next pay date and what they are owed for the period, before NAPSA and NHIMA. Casual workers: their unpaid trays at their rate.
+        Salaried staff: their salary for the period, less days absent. {% if reminders_on %}Admins get an alert on each pay date.{% else %}The pay date alert is switched off in Settings.{% endif %}</p>
+    {% if due %}
+    <div class="table-wrap">
+        <table class="fit-rows">
+            <thead><tr><th>Employee</th><th>Paid</th><th>Next pay date</th><th>Period</th><th>Worked out from</th><th class="num">Owed</th><th></th></tr></thead>
+            <tbody>
+            {% for d in due %}
+            {% set e = d.employee %}
+                <tr>
+                    <td><strong>{{ e.full_name }}</strong><br><span class="chip {{ 'gold' if e.employment_type == 'Casual Worker' else 'info' }}">{{ 'Casual' if e.employment_type == 'Casual Worker' else 'Salaried' }}</span></td>
+                    <td>{{ e.schedule_words }}</td>
+                    <td>{% if e.next_pay_date %}<strong class="{{ 'warn' if d.late else 'gold' if e.next_pay_date == today }}">{{ e.next_pay_date }}</strong><br><small class="muted">{{ d.when }}</small>
+                        {% else %}<a href="{{ url_for('edit_employee', employee_id=e.id) }}">Set a pay date</a>{% endif %}</td>
+                    <td><small>{{ d.start }} to {{ d.end }}</small></td>
+                    <td>{% if d.basis == 'trays' %}{{ d.trays|trays }} unpaid tray{{ 's' if d.trays != 1 }} &times; {{ d.rate|money }}
+                        {% else %}{{ '%g'|format(d.worked) }} of {{ '%g'|format(d.expected) }} days{% if d.absent %} <small class="warn">({{ '%g'|format(d.absent) }} absent)</small>{% endif %}{% endif %}</td>
+                    <td class="num"><strong>{{ d.amount|money }}</strong></td>
+                    <td class="num actions"><a class="btn small success" href="{{ url_for('new_payslip', employee=e.id, pay_date=e.next_pay_date or today) }}">Make payslip</a></td>
+                </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <div class="empty"><strong>No employees yet</strong>Register one to see what they are owed and when.</div>
+    {% endif %}
+</section>
+
 <div class="split">
     <section class="card grow">
         <h2>Registered Employees</h2>
         <div class="table-wrap">
             <table>
-                <thead><tr><th>Full name</th><th>NRC</th><th>Type</th><th class="num">Basic salary</th><th class="num">Days/wk</th><th>Start date</th><th></th></tr></thead>
+                <thead><tr><th>Full name</th><th>NRC</th><th>Type</th><th class="num">Pay</th><th>Paid</th><th>Start date</th><th></th></tr></thead>
                 <tbody>
                 {% for e in employees %}
                     <tr>
                         <td>{{ e.full_name }}</td>
                         <td>{{ e.nrc_number }}</td>
-                        <td>{{ e.employment_type }}</td>
-                        <td class="num">{{ e.basic_salary|money }}</td>
-                        <td class="num">{{ e.expected_days_week }}</td>
+                        <td><span class="chip {{ 'gold' if e.employment_type == 'Casual Worker' else 'info' }}">{{ 'Casual (wages)' if e.employment_type == 'Casual Worker' else 'Permanent' }}</span></td>
+                        <td class="num">{% if e.employment_type == 'Casual Worker' %}{{ e.rate|money }} a tray{% else %}{{ e.basic_salary|money }} each pay{% endif %}</td>
+                        <td>{{ e.schedule_words }}{% if e.next_pay_date %}<br><small class="muted">next {{ e.next_pay_date }}</small>{% endif %}</td>
                         <td>{{ e.start_date or '—' }}</td>
                         <td class="num actions">
+                            <a class="btn small" href="{{ url_for('edit_employee', employee_id=e.id) }}">Edit</a>
                             <a class="btn small" href="{{ url_for('employee_statement', employee_id=e.id) }}">Statement</a>
                             <form method="post" action="{{ url_for('delete_employee', employee_id=e.id) }}" onsubmit="return confirm('Remove this employee? Past payslips are kept.');">
                                 {{ csrf_field() }}
@@ -54,44 +90,9 @@
 
     <section class="card side">
         <h2>Register Employee</h2>
-        <form method="post" action="{{ url_for('add_employee') }}">
-            {{ csrf_field() }}
-            <label>Full name <input name="full_name" required></label>
-            <label>NRC number <input name="nrc_number" required></label>
-            <label>Basic monthly salary ({{ user.currency|trim }}) <input name="basic_salary" type="number" min="0" step="0.01" required></label>
-            <label>Employment status
-                <select name="employment_type"><option>Permanent</option><option>Casual Worker</option></select>
-            </label>
-            <label>Address <input name="address"></label>
-            <label>Age <input name="age" type="number" min="15" max="100" step="1"></label>
-            <label>Start date <input name="start_date" type="date" value="{{ today }}"></label>
-            <label>Expected work days per week <input name="expected_days_week" type="number" min="1" max="7" step="1" value="5"></label>
-            <button class="btn success wide">Save Employee</button>
-        </form>
+        {% include "_employee_form.html" %}
     </section>
 </div>
-
-{% if tray_owed %}
-<section class="card block">
-    <h2>Trays planted, not yet paid</h2>
-    <p class="muted">Casual workers are paid for the trays they planted{% if tray_rate %}, at {{ tray_rate|money }} each{% endif %}. Trays are added on each planting under Planting Records.
-        {% if not tray_rate %}<strong class="gold">The pay for each tray is not set yet:</strong> <a href="{{ url_for('hr_settings') }}">set it in HR Settings</a>.{% endif %}</p>
-    <div class="table-wrap">
-        <table>
-            <thead><tr><th>Employee</th><th class="num">Trays</th>{% if tray_rate %}<th class="num">Pay at today's rate</th>{% endif %}<th></th></tr></thead>
-            <tbody>
-            {% for w in tray_owed %}
-                <tr>
-                    <td>{{ w.employee_name }}</td><td class="num">{{ w.trays|trays }}</td>
-                    {% if tray_rate %}<td class="num">{{ (w.trays * tray_rate)|money }}</td>{% endif %}
-                    <td class="num"><a class="btn small" href="{{ url_for('new_payslip', employee=w.employee_id) }}">Make payslip</a></td>
-                </tr>
-            {% endfor %}
-            </tbody>
-        </table>
-    </div>
-</section>
-{% endif %}
 
 <section class="card block">
     <h2>Payroll History</h2>
@@ -101,12 +102,12 @@
     </form>
     <div class="table-wrap">
         <table>
-            <thead><tr><th></th><th>Month</th><th>Employee</th><th class="num">Basic</th><th class="num">Exp. days</th><th class="num">Worked</th><th class="num">NAPSA</th><th class="num">NHIMA</th><th class="num">Net pay</th><th></th></tr></thead>
+            <thead><tr><th></th><th>Paid on</th><th>Employee</th><th class="num">Basic</th><th class="num">Exp. days</th><th class="num">Worked</th><th class="num">NAPSA</th><th class="num">NHIMA</th><th class="num">Net pay</th><th></th></tr></thead>
             <tbody>
             {% for p in payslips %}
                 <tr>
                     <td><input type="checkbox" name="id" value="{{ p.id }}" form="print-form" class="slip-check"></td>
-                    <td>{{ p.pay_month|month }}</td>
+                    <td>{% if p.pay_date %}{{ p.pay_date }}<br><small class="muted">{{ p.period_start }} to {{ p.period_end }}</small>{% else %}{{ p.pay_month|month }}{% endif %}</td>
                     <td>{{ p.employee_name }}</td>
                     <td class="num">{{ p.basic_salary|money }}</td>
                     {% if p.trays is not none %}

@@ -3,7 +3,8 @@
 {% block content %}
 <p><a href="{{ url_for('hr') }}">&larr; Back to HR &amp; Payroll</a></p>
 <div class="card narrow-form">
-    <h1>Monthly Payslip Calculator</h1>
+    <h1>Payslip</h1>
+    <p class="muted">Filled in from the employee's pay date: the days since their last payslip, their unpaid trays or their salary less absences, and their next pay date. Check it and save.</p>
     <div class="rules-summary">
         <p><strong>Statutory rules applied to this payslip</strong> (on {{ 'gross pay' if hr.contribution_base == 'gross' else 'basic pay for the days worked' }})</p>
         <p>NAPSA: employee {{ '%g'|format(hr.napsa_employee_pct) }}% deducted from pay, employer {{ '%g'|format(hr.napsa_employer_pct) }}% paid on top.</p>
@@ -14,27 +15,33 @@
         {{ csrf_field() }}
         <label>Employee
             <select name="employee_id" id="payslip-employee" required>
-                {% for e in employees %}<option value="{{ e.id }}" data-type="{{ e.employment_type }}" {{ 'selected' if chosen == e.id }}>{{ e.full_name }} ({% if e.employment_type == 'Casual Worker' %}casual, {% endif %}basic {{ e.basic_salary|money }})</option>{% endfor %}
+                {% for e in employees %}<option value="{{ e.id }}" data-type="{{ e.employment_type }}" data-salary="{{ e.basic_salary or 0 }}" data-next="{{ e.next_pay_date or '' }}" {{ 'selected' if chosen == e.id }}>{{ e.full_name }} ({% if e.employment_type == 'Casual Worker' %}casual, {{ rates[e.id]|money }} a tray{% else %}{{ e.basic_salary|money }} each pay{% endif %})</option>{% endfor %}
             </select>
         </label>
-        <label>Pay month <input name="pay_month" id="pay-month" type="month" value="{{ this_month }}" pattern="\d{4}-\d{2}" placeholder="YYYY-MM" required></label>
+        <label>Pay date <input name="pay_date" id="pay-date" type="date" value="{{ pay_date }}" required></label>
+        <div class="grid">
+            <label>Period from <input name="period_start" id="period-start" type="date" required></label>
+            <label>Period to <input name="period_end" id="period-end" type="date" required></label>
+        </div>
+        <p class="muted hint" id="period-hint">The days since the last payslip, up to the pay date. Change them if this payslip covers other days.</p>
 
         {# A casual worker can be paid for the trays they planted. The choice and the trays appear only for a casual worker. #}
         <label id="basis-row" hidden>Pay this casual worker for
             <select name="pay_basis" id="pay-basis" disabled>
-                <option value="trays">Trays planted (at {% if hr.tray_rate %}{{ hr.tray_rate|money }}{% else %}the rate set in HR settings{% endif %} a tray)</option>
-                <option value="days">Days worked (their basic salary, pro rata)</option>
+                <option value="trays">Trays planted, at their rate for a tray</option>
+                <option value="days" id="basis-days">Days worked (their salary, pro rata)</option>
             </select>
         </label>
         <div id="tray-pay" class="rules-summary" hidden aria-live="polite">
             <p id="tray-summary"></p>
             <ul id="tray-list" class="muted"></ul>
-            <p class="muted hint">Every tray planted up to the end of this pay month and not paid yet is on this payslip, including earlier months' trays. They are marked paid when it is saved.</p>
+            <p class="muted hint">Every tray planted up to the period's last day and not paid yet is on this payslip, including earlier ones, at the worker's rate now. They are marked paid when it is saved.</p>
         </div>
 
         <div id="days-fields">
-            <label>Expected work days (filled in from the pay month) <input name="expected_days" id="expected-days" type="number" min="0.5" step="0.5" required></label>
-            <label>Actual days worked <input name="worked_days" id="worked-days" type="number" min="0" step="0.5" required></label>
+            <label>Working days in the period <input name="expected_days" id="expected-days" type="number" min="0.5" step="0.5" required></label>
+            <label>Days worked (less the absences recorded) <input name="worked_days" id="worked-days" type="number" min="0" step="0.5" required></label>
+            <p class="muted hint" id="days-summary"></p>
         </div>
 
         <h2 class="spaced">Bonuses &amp; additions</h2>
@@ -50,6 +57,8 @@
         <button type="button" class="btn small" data-add="deduction">+ Add deduction</button>
 
         <h2 class="spaced">Paying it</h2>
+        <label>Next pay date <input name="next_pay_date" id="next-pay" type="date">
+            <small class="muted">Filled in from their schedule. Leave it empty if it is not known yet; it can be set later on their page.</small></label>
         <label>How the pay is paid
             <select name="payment_method" required>
                 <option value="">Choose: cash, bank, Airtel Money or MTN Money</option>

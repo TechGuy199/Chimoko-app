@@ -280,6 +280,11 @@ SCHEMA = [
         status TEXT NOT NULL DEFAULT 'open', outcome TEXT DEFAULT '', closed_by TEXT, closed_at TEXT, source TEXT NOT NULL DEFAULT 'page',
         created_by TEXT, created_at TEXT
     )""",
+    # A day (or half day) an employee was absent: their salary for a pay period is worked out from the working days less these
+    """CREATE TABLE IF NOT EXISTS employee_absences (
+        id {pk}, business_id INTEGER NOT NULL, employee_id INTEGER NOT NULL, day TEXT NOT NULL, days DOUBLE PRECISION NOT NULL DEFAULT 1,
+        reason TEXT DEFAULT '', recorded_by TEXT, recorded_at TEXT
+    )""",
     # What happened to a request, oldest first: logged, a follow-up moved, a note, the item arrived (bought or planted), closed or reopened
     """CREATE TABLE IF NOT EXISTS customer_request_log (
         id {pk}, business_id INTEGER NOT NULL, request_id INTEGER NOT NULL, kind TEXT NOT NULL, detail TEXT DEFAULT '', created_by TEXT, created_at TEXT
@@ -313,6 +318,7 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS assistant_messages_by_user ON assistant_messages (business_id, user_id, id)",
     "CREATE INDEX IF NOT EXISTS assistant_actions_by_user ON assistant_actions (business_id, user_id, status)",
     "CREATE INDEX IF NOT EXISTS customer_requests_by_status ON customer_requests (business_id, status, follow_up_on)",
+    "CREATE INDEX IF NOT EXISTS employee_absences_by_employee ON employee_absences (business_id, employee_id, day)",
     "CREATE INDEX IF NOT EXISTS customer_request_log_by_request ON customer_request_log (business_id, request_id)",
     "CREATE INDEX IF NOT EXISTS planting_trays_by_planting ON planting_trays (business_id, planting_id)",
     "CREATE INDEX IF NOT EXISTS planting_trays_by_employee ON planting_trays (business_id, employee_id, paid_payslip_id)",
@@ -541,6 +547,22 @@ def init_schema():
         add_column(db, "invoices", "offline_ref", "TEXT")
         # The alert to follow up a customer's request (NULL counts as on)
         add_column(db, "businesses", "alert_requests", "INTEGER")
+        # How each employee is paid. A casual worker: pay_basis 'trays' and their own rate for a tray (NULL = the business's rate in HR
+        # settings). Everyone: a pay schedule (monthly on pay_day, biweekly, weekly, or manual: a date set each time), the next pay date,
+        # the last day their payslips cover (paid_through, where the next pay period starts) and the pay date already alerted
+        add_column(db, "employees", "pay_basis", "TEXT")
+        add_column(db, "employees", "tray_rate", "DOUBLE PRECISION")
+        add_column(db, "employees", "pay_schedule", "TEXT")
+        add_column(db, "employees", "pay_day", "INTEGER")
+        add_column(db, "employees", "next_pay_date", "TEXT")
+        add_column(db, "employees", "paid_through", "TEXT")
+        add_column(db, "employees", "pay_reminded_for", "TEXT")
+        # A payslip's period (first and last day it pays for) and the day it was paid; older payslips have only their pay month
+        add_column(db, "payroll", "period_start", "TEXT")
+        add_column(db, "payroll", "period_end", "TEXT")
+        add_column(db, "payroll", "pay_date", "TEXT")
+        # The alert on an employee's pay date (NULL counts as on)
+        add_column(db, "businesses", "alert_payroll", "INTEGER")
         # Restock advice: the days of stock to keep (NULL = 30). The evening brief (NULL counts as on), its WhatsApp copy to the alert
         # number (NULL counts as on), and the day that copy last went, so it goes once a day
         add_column(db, "businesses", "stock_cover_days", "INTEGER")

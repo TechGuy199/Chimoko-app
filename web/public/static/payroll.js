@@ -1,105 +1,100 @@
 (function () {
+    // The payslip form: choosing the employee or the pay date asks the server what the payslip would pay (hr_trays: the period since
+    // the last payslip, the unpaid trays at the worker's rate or the working days less absences, and the next pay date), and fills it in.
+    // Changing the period asks again for those days. Days worked can still be corrected by hand.
     const form = document.getElementById("payslip-form");
-    const month = document.getElementById("pay-month");
+    const employee = document.getElementById("payslip-employee");
+    const payDate = document.getElementById("pay-date");
+    const from = document.getElementById("period-start");
+    const to = document.getElementById("period-end");
+    const nextPay = document.getElementById("next-pay");
     const expected = document.getElementById("expected-days");
     const worked = document.getElementById("worked-days");
-    const nonWorking = form.dataset.nonWorking.split(",");
-    const employee = document.getElementById("payslip-employee");
+    const daysSummary = document.getElementById("days-summary");
     const basisRow = document.getElementById("basis-row");
     const basis = document.getElementById("pay-basis");
+    const basisDays = document.getElementById("basis-days");
     const trayBox = document.getElementById("tray-pay");
     const traySummary = document.getElementById("tray-summary");
     const trayList = document.getElementById("tray-list");
     const daysFields = document.getElementById("days-fields");
     const currency = form.dataset.currency || "";
-    let basisTouched = false;   // the person chose how to pay, so the trays found no longer decide it
-    let lookup = 0;             // which look-up is current: the answer to an older one is ignored
-    const dayNames = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
+    let lookup = 0;   // which look-up is current: the answer to an older one is ignored
 
-    function expectedDays(value) {
-        const match = /^(\d{4})-(\d{2})$/.exec(value);
-        if (!match) return null;
-        const year = parseInt(match[1], 10);
-        const monthIndex = parseInt(match[2], 10) - 1;
-        if (monthIndex < 0 || monthIndex > 11) return null;
-        const daysInMonth = new Date(year, monthIndex + 1, 0).getDate();
-        let count = 0;
-        for (let day = 1; day <= daysInMonth; day++) {
-            if (!nonWorking.includes(dayNames[new Date(year, monthIndex, day).getDay()])) count++;
-        }
-        return count;
+    function money(value) {
+        return currency + Number(value).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    }
+    function count(value) {
+        return (Math.round(value * 100) / 100).toLocaleString("en-US");
     }
 
-    function refresh() {
-        const days = expectedDays(month.value);
-        if (days === null) return;
-        // Keep "days worked" in step unless it was already changed to something different
-        const follow = worked.value === "" || worked.value === expected.value;
-        expected.value = days;
-        if (follow) worked.value = days;
-    }
-
-    // A casual worker paid for trays has no days to enter
+    // A casual worker is paid by the tray; one with a salary on record can be paid for days worked instead
     function applyBasis() {
-        const trays = !basisRow.hidden && basis.value === "trays";
+        const option = employee.selectedOptions[0];
+        const casual = !!option && option.dataset.type === "Casual Worker";
+        const salary = option ? parseFloat(option.dataset.salary || "0") : 0;
+        basisRow.hidden = !casual || !(salary > 0);
+        basis.disabled = !casual;
+        if (!casual) basis.value = "days";
+        else if (!(salary > 0)) basis.value = "trays";
+        basisDays.disabled = casual && !(salary > 0);
+        const trays = casual && basis.value === "trays";
         daysFields.hidden = trays;
         trayBox.hidden = !trays;
         expected.disabled = worked.disabled = trays;
         expected.required = worked.required = !trays;
     }
 
-    function money(value) {
-        return currency + value.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-    }
-
-    function trayCount(value) {
-        return (Math.round(value * 100) / 100).toLocaleString("en-US");
-    }
-
-    function lookUpTrays() {
-        const option = employee.selectedOptions[0];
-        const casual = !!option && option.dataset.type === "Casual Worker";
-        basisRow.hidden = !casual;
-        basis.disabled = !casual;
-        if (!casual) { applyBasis(); return; }
+    function ask(withPeriod) {
+        if (!payDate.value) return;
         const mine = ++lookup;
-        traySummary.textContent = "Looking up the trays planted...";
-        trayList.textContent = "";
-        applyBasis();
-        fetch(form.dataset.traysUrl + "?employee_id=" + encodeURIComponent(employee.value) + "&month=" + encodeURIComponent(month.value),
-              { credentials: "same-origin", headers: { Accept: "application/json" } })
+        let url = form.dataset.traysUrl + "?employee_id=" + encodeURIComponent(employee.value) + "&pay_date=" + encodeURIComponent(payDate.value);
+        if (withPeriod && from.value && to.value) url += "&from=" + encodeURIComponent(from.value) + "&to=" + encodeURIComponent(to.value);
+        traySummary.textContent = "Working it out...";
+        fetch(url, { credentials: "same-origin", headers: { Accept: "application/json" } })
             .then(function (response) { return response.json(); })
-            .then(function (data) {
+            .then(function (d) {
                 if (mine !== lookup) return;
-                if (data.error) { traySummary.textContent = data.error; return; }
+                if (d.error) { traySummary.textContent = daysSummary.textContent = d.error; return; }
+                from.value = d.start;
+                to.value = d.end;
+                if (!withPeriod) nextPay.value = d.next_pay_date || "";
                 trayList.textContent = "";
-                data.rows.forEach(function (row) {
-                    const item = document.createElement("li");
-                    item.textContent = row.planting + ": " + trayCount(row.trays) + " tray" + (row.trays === 1 ? "" : "s");
-                    trayList.appendChild(item);
-                });
-                if (!data.trays) {
-                    traySummary.textContent = "No unpaid trays up to this pay month.";
-                } else if (!data.rate) {
-                    traySummary.textContent = trayCount(data.trays) + " unpaid trays, but the pay for each tray is not set. Set it in HR settings first.";
+                if (d.basis === "trays") {
+                    (d.rows || []).forEach(function (row) {
+                        const item = document.createElement("li");
+                        item.textContent = row.planting + ": " + count(row.trays) + " tray" + (row.trays === 1 ? "" : "s");
+                        trayList.appendChild(item);
+                    });
+                    if (!d.trays) traySummary.textContent = "No unpaid trays planted up to " + d.end + ".";
+                    else if (!d.rate) traySummary.textContent = count(d.trays) + " unpaid trays, but this worker's pay for a tray is not set. Set it on their page first.";
+                    else traySummary.textContent = count(d.trays) + " tray" + (d.trays === 1 ? "" : "s") + " at " + money(d.rate) + " = " + money(d.amount) + " basic pay.";
                 } else {
-                    traySummary.textContent = trayCount(data.trays) + " tray" + (data.trays === 1 ? "" : "s") + " at " + money(data.rate) + " = " + money(data.pay) + " basic pay.";
+                    expected.value = d.expected;
+                    worked.value = d.worked;
+                    daysSummary.textContent = d.expected + " working days from " + d.start + " to " + d.end +
+                        (d.absent ? ", " + count(d.absent) + " recorded absent" : ", none recorded absent") + ": " + money(d.amount) + " basic pay.";
                 }
-                if (!basisTouched) basis.value = data.trays > 0 ? "trays" : "days";
                 applyBasis();
             })
             .catch(function () {
                 if (mine !== lookup) return;
-                traySummary.textContent = "The trays could not be looked up. Pay by days worked, or try again.";
+                traySummary.textContent = daysSummary.textContent = "It could not be worked out just now. Fill in the days, or try again.";
             });
     }
 
-    basis.addEventListener("change", function () { basisTouched = true; applyBasis(); });
-    employee.addEventListener("change", function () { basisTouched = false; lookUpTrays(); });
-    month.addEventListener("input", refresh);
-    month.addEventListener("change", function () { refresh(); lookUpTrays(); });
-    refresh();
-    lookUpTrays();
+    employee.addEventListener("change", function () {
+        const option = employee.selectedOptions[0];
+        if (option && option.dataset.next) payDate.value = option.dataset.next;
+        applyBasis();
+        ask(false);
+    });
+    payDate.addEventListener("change", function () { ask(false); });
+    from.addEventListener("change", function () { ask(true); });
+    to.addEventListener("change", function () { ask(true); });
+    basis.addEventListener("change", applyBasis);
+    applyBasis();
+    ask(false);
 
     document.querySelectorAll("[data-add]").forEach(function (button) {
         button.addEventListener("click", function () {

@@ -1,0 +1,86 @@
+{# The employee form, for registering (e is None) and editing. A casual worker is paid by the tray at their own rate; everyone else
+   a salary for each pay period. Everyone has a pay schedule and a next pay date. Expects: e, schedules, bases, tray_rate, today. #}
+{% set casual = e and e.employment_type == 'Casual Worker' %}
+{% set schedule = (e.pay_schedule if e else '') or 'monthly' %}
+<form method="post" action="{{ url_for('edit_employee', employee_id=e.id) if e else url_for('add_employee') }}" class="employee-form" data-employee-form>
+    {{ csrf_field() }}
+    <label>Full name <input name="full_name" required maxlength="100" value="{{ e.full_name if e else '' }}"></label>
+    <label>NRC number <input name="nrc_number" required maxlength="40" value="{{ e.nrc_number if e else '' }}"></label>
+    <label>Employment status
+        <select name="employment_type" data-emp-type>
+            <option value="Permanent" {{ 'selected' if not casual }}>Permanent (salary)</option>
+            <option value="Casual Worker" {{ 'selected' if casual }}>Casual Worker (wages)</option>
+        </select>
+    </label>
+
+    <div data-show-for="Permanent" {{ 'hidden' if casual }}>
+        <label>Salary for each pay ({{ user.currency|trim }})
+            <input name="basic_salary" type="number" min="0" step="0.01" inputmode="decimal" value="{{ '%g'|format(e.basic_salary) if e and not casual else '' }}" placeholder="0.00">
+            <small class="muted">The full amount for one pay period. Days recorded as absent are taken off it.</small>
+        </label>
+    </div>
+    <div data-show-for="Casual Worker" {{ 'hidden' if not casual }}>
+        <label>How they are paid
+            <select name="pay_basis">{% for value, label in bases %}<option value="{{ value }}" selected>{{ label }}</option>{% endfor %}</select>
+        </label>
+        <label>Pay for each tray planted ({{ user.currency|trim }})
+            <input name="tray_rate" type="number" min="0" step="0.01" inputmode="decimal" value="{{ '%g'|format(e.tray_rate) if e and e.tray_rate is not none else ('%g'|format(tray_rate) if tray_rate and not e else '') }}" placeholder="{{ '%g'|format(tray_rate) if tray_rate else '0.00' }}" {{ 'data-need-rate' if not tray_rate }}>
+            <small class="muted">Shown on Planting Records. A change applies to all their trays not yet paid.{% if tray_rate %} Left empty, the usual {{ tray_rate|money }} from HR Settings is used.{% endif %}</small>
+        </label>
+    </div>
+
+    <label>Paid
+        <select name="pay_schedule" data-schedule>
+            {% for value, label in schedules %}<option value="{{ value }}" {{ 'selected' if schedule == value }}>{{ label }}</option>{% endfor %}
+        </select>
+    </label>
+    <label data-show-schedule="monthly" {{ 'hidden' if schedule != 'monthly' }}>Day of the month
+        <input name="pay_day" type="number" min="1" max="31" step="1" inputmode="numeric" value="{{ e.pay_day if e and e.pay_day else '' }}" placeholder="for example 25">
+        <small class="muted">In a shorter month, the last day of the month.</small>
+    </label>
+    <label>Next pay date
+        <input name="next_pay_date" type="date" value="{{ e.next_pay_date if e and e.next_pay_date else '' }}">
+        <small class="muted" data-schedule-hint></small>
+    </label>
+
+    <details class="spaced" {{ 'open' if not e }}>
+        <summary>More details</summary>
+        <label>Address <input name="address" maxlength="200" value="{{ e.address if e else '' }}"></label>
+        <label>Age <input name="age" type="number" min="15" max="100" step="1" value="{{ e.age if e and e.age else '' }}"></label>
+        <label>Start date <input name="start_date" type="date" value="{{ e.start_date if e else today }}"></label>
+        <label>Expected work days per week <input name="expected_days_week" type="number" min="1" max="7" step="1" value="{{ e.expected_days_week if e else 5 }}"></label>
+    </details>
+    <button class="btn success wide spaced">{{ 'Save changes' if e else 'Save Employee' }}</button>
+</form>
+<script>
+    // Shows the salary or the tray rate for the status chosen, and the day of the month for a monthly schedule
+    (function () {
+        document.querySelectorAll("[data-employee-form]").forEach(function (form) {
+            const type = form.querySelector("[data-emp-type]");
+            const schedule = form.querySelector("[data-schedule]");
+            const hint = form.querySelector("[data-schedule-hint]");
+            const words = {
+                monthly: "Filled in from the day of the month when left empty. After each payslip it moves on a month.",
+                biweekly: "The first pay date: after each payslip it moves on two weeks.",
+                weekly: "The first pay date: after each payslip it moves on a week.",
+                manual: "Set it each time, on the payslip or here. Leave it empty if not known yet.",
+            };
+            function paint() {
+                form.querySelectorAll("[data-show-for]").forEach(function (box) {
+                    const on = box.dataset.showFor === type.value;
+                    box.hidden = !on;
+                    box.querySelectorAll("input, select").forEach(function (field) { field.disabled = !on; });
+                });
+                form.querySelectorAll("[data-show-schedule]").forEach(function (box) { box.hidden = box.dataset.showSchedule !== schedule.value; });
+                // With no usual rate in HR Settings, a casual worker's own rate must be given
+                form.querySelectorAll("[data-need-rate]").forEach(function (field) { field.required = type.value === "Casual Worker"; });
+                const next = form.querySelector('input[name="next_pay_date"]');
+                next.required = schedule.value === "weekly" || schedule.value === "biweekly";
+                hint.textContent = words[schedule.value] || "";
+            }
+            type.addEventListener("change", paint);
+            schedule.addEventListener("change", paint);
+            paint();
+        });
+    })();
+</script>

@@ -253,7 +253,7 @@ def user_row(db, uid):
         """SELECT u.id, u.business_id, u.username, u.role, u.can_sell, u.can_procure, u.can_transfer, u.can_delete, u.theme, u.glass, u.accent, u.text_size, u.font, u.text_spacing,
                   u.evening_brief AS my_brief, u.brief_day, u.assistant_voice,
                   b.name AS business_name, b.subtitle, b.contact, b.currency, b.low_stock_threshold,
-                  b.alert_phone, b.alert_low_stock, b.alert_permission, b.alert_preorders, b.alert_collections, b.alert_deliveries, b.alert_requests, b.preorder_remind_days,
+                  b.alert_phone, b.alert_low_stock, b.alert_permission, b.alert_preorders, b.alert_collections, b.alert_deliveries, b.alert_requests, b.alert_payroll, b.preorder_remind_days,
                   b.backup_hour, b.last_backup_at, b.last_backup_by, b.demo_expires_at, b.assistant_enabled,
                   b.wake_phrase, b.stop_phrase, b.stock_cover_days, b.evening_brief, b.brief_whatsapp
            FROM users u JOIN businesses b ON b.id = u.business_id WHERE u.id=?""",
@@ -3611,21 +3611,11 @@ def named_amounts(prefix):
 @need("admin")
 def hr():
     db, biz = get_db(), g.user["business_id"]
-    employees = db.all(
-        "SELECT id, full_name, nrc_number, employment_type, basic_salary, expected_days_week, start_date FROM employees WHERE business_id=? ORDER BY full_name",
-        (biz,),
-    )
+    hr_set = hr_settings_for(db, biz)
+    employees = db.all(f"SELECT {EMPLOYEE_COLUMNS} FROM employees WHERE business_id=? ORDER BY full_name", (biz,))
     payslips = db.all(
-        """SELECT id, pay_month, employee_name, basic_salary, expected_days, worked_days, trays, napsa_amt, nhima_amt, net_payable
+        """SELECT id, pay_month, pay_date, period_start, period_end, employee_name, basic_salary, expected_days, worked_days, trays, napsa_amt, nhima_amt, net_payable
            FROM payroll WHERE business_id=? ORDER BY id DESC LIMIT 500""",
-        (biz,),
-    )
-    # Trays planted by casual workers that no payslip has paid yet
-    unpaid_trays_by_worker = db.all(
-        """SELECT t.employee_id, t.employee_name, SUM(t.trays) AS trays
-           FROM planting_trays t JOIN employees e ON e.id = t.employee_id AND e.business_id = t.business_id
-           WHERE t.business_id=? AND t.paid_payslip_id IS NULL AND e.employment_type='Casual Worker'
-           GROUP BY t.employee_id, t.employee_name ORDER BY t.employee_name""",
         (biz,),
     )
     summary = db.all(
@@ -3636,39 +3626,147 @@ def hr():
            FROM payroll WHERE business_id=? GROUP BY pay_month ORDER BY pay_month DESC""",
         (biz,),
     )
+    # What each person is owed at their next pay date (or today, when no pay date is set): soonest first, people with no date last
+    today = today_str()
+    due = []
+    for e in employees:
+        e["rate"] = rate_for(e, hr_set)
+        e["schedule_words"] = schedule_words(e)
+        p = pay_preview(db, biz, e, hr_set, e["next_pay_date"] or today)
+        due.append(dict(p, employee=e, when=when_words(e["next_pay_date"], today, before="due ") if e["next_pay_date"] else "",
+                        late=bool(e["next_pay_date"]) and e["next_pay_date"] < today))
+    due.sort(key=lambda d: (d["employee"]["next_pay_date"] or "9999-99-99", d["employee"]["full_name"].lower()))
     return render_template(
-        "hr.html", employees=employees, payslips=payslips, summary=summary, today=now().strftime("%Y-%m-%d"), tray_owed=unpaid_trays_by_worker,
-        tray_rate=hr_settings_for(db, biz)["tray_rate"],
+        "hr.html", employees=employees, payslips=payslips, summary=summary, today=today, due=due, tray_rate=hr_set["tray_rate"],
+        schedules=PAY_SCHEDULES, bases=PAY_BASES, e=None, reminders_on=alert_enabled("payroll"),
     )
+
+
+def read_employee_form(hr_set, current=None):
+    """The employee form: (values, None), or (None, what is wrong). A casual worker is paid by the tray at their own rate (blank = the
+    business's rate); the form sends no salary for them, so one already on record is kept (it lets them still be paid for days worked).
+    Everyone else is paid a salary for each pay period. A monthly schedule with no next pay date set
+    takes the next time its day of the month comes round."""
+    name, nrc = clean_name(text("full_name"), 100), text("nrc_number")[:40]
+    kind = text("employment_type") if text("employment_type") in ("Permanent", "Casual Worker") else "Permanent"
+    try:
+        age = number("age", int, default=0) or None
+        days_week = number("expected_days_week", int, default=5)
+        if kind == "Casual Worker" and not text("basic_salary"):
+            salary = (current or {}).get("basic_salary") or 0.0
+        else:
+            salary = number("basic_salary", default=0.0)
+        rate = number("tray_rate") if kind == "Casual Worker" and text("tray_rate") else None
+        pay_day = number("pay_day", int) if text("pay_day") else None
+    except ValueError:
+        return None, "Salary, rate per tray, age, days per week and the day of the month must be numbers."
+    if not name or not nrc:
+        return None, "Full name and NRC number are required."
+    if salary < 0 or (rate is not None and not 0 <= rate <= 10_000_000) or not 1 <= days_week <= 7:
+        return None, "Salary and the rate per tray cannot be negative, and days per week must be 1 to 7."
+    schedule = text("pay_schedule") if text("pay_schedule") in dict(PAY_SCHEDULES) else "manual"
+    next_day = day_or_none(text("next_pay_date")) if text("next_pay_date") else None
+    if text("next_pay_date") and next_day is None:
+        return None, "The next pay date is not a date."
+    if schedule == "monthly":
+        if pay_day is None and next_day:
+            pay_day = int(next_day[8:])
+        if pay_day is None or not 1 <= pay_day <= 31:
+            return None, "Choose the day of the month this person is paid (1 to 31)."
+        if next_day is None:
+            next_day = month_day_on_or_after(today_str(), pay_day)
+    elif schedule in ("weekly", "biweekly") and next_day is None:
+        return None, "Choose the first pay date: the schedule counts on from it."
+    return {
+        "full_name": name, "nrc_number": nrc, "employment_type": kind, "basic_salary": round(salary, 2), "address": text("address")[:200], "age": age,
+        "start_date": day_or_none(text("start_date")) or "", "expected_days_week": days_week,
+        "pay_basis": "trays" if kind == "Casual Worker" else None, "tray_rate": round(rate, 2) if rate is not None else None,
+        "pay_schedule": schedule, "pay_day": pay_day if schedule == "monthly" else None, "next_pay_date": next_day,
+    }, None
+
+
+EMPLOYEE_FIELDS = ("full_name", "nrc_number", "employment_type", "basic_salary", "address", "age", "start_date", "expected_days_week",
+                   "pay_basis", "tray_rate", "pay_schedule", "pay_day", "next_pay_date")
 
 
 @app.post("/hr/employees")
 @need("admin")
 def add_employee():
     db, biz = get_db(), g.user["business_id"]
-    name, nrc = text("full_name"), text("nrc_number")
-    try:
-        salary = number("basic_salary")
-        age = number("age", int, default=0) or None
-        days_week = number("expected_days_week", int, default=5)
-    except ValueError:
-        flash("Salary, age and days per week must be numbers.", "error")
+    values, problem = read_employee_form(hr_settings_for(db, biz))
+    if problem:
+        flash(problem + " Nothing was saved.", "error")
         return redirect(url_for("hr"))
-    if not name or not nrc or salary < 0 or not 1 <= days_week <= 7:
-        flash("Full name and NRC number are required, salary cannot be negative and days per week must be 1 to 7.", "error")
-        return redirect(url_for("hr"))
-
-    employment_type = text("employment_type")
-    if employment_type not in ("Permanent", "Casual Worker"):
-        employment_type = "Permanent"
-    db.execute(
-        """INSERT INTO employees (business_id, full_name, nrc_number, basic_salary, employment_type, address, age, start_date, expected_days_week)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (biz, name, nrc, round(salary, 2), employment_type, text("address"), age, text("start_date"), days_week),
-    )
+    db.insert(f"INSERT INTO employees (business_id, {', '.join(EMPLOYEE_FIELDS)}) VALUES (?, {', '.join('?' for _ in EMPLOYEE_FIELDS)})",
+              [biz] + [values[f] for f in EMPLOYEE_FIELDS])
     db.commit()
-    flash(f"Employee '{name}' registered.", "ok")
+    flash(f"Employee '{values['full_name']}' registered" + (f", next paid on {values['next_pay_date']}." if values["next_pay_date"] else "."), "ok")
     return redirect(url_for("hr"))
+
+
+def get_employee(db, employee_id):
+    e = db.one(f"SELECT {EMPLOYEE_COLUMNS} FROM employees WHERE id=? AND business_id=?", (employee_id, g.user["business_id"]))
+    if e is None:
+        abort(404)
+    return e
+
+
+@app.route("/hr/employees/<int:employee_id>/edit", methods=["GET", "POST"])
+@need("admin")
+def edit_employee(employee_id):
+    db, biz = get_db(), g.user["business_id"]
+    e = get_employee(db, employee_id)
+    hr_set = hr_settings_for(db, biz)
+    if request.method == "POST":
+        values, problem = read_employee_form(hr_set, e)
+        if problem:
+            flash(problem + " Nothing was changed.", "error")
+            return redirect(url_for("edit_employee", employee_id=employee_id))
+        moved = values["next_pay_date"] != e["next_pay_date"]
+        db.execute(f"UPDATE employees SET {'=?, '.join(EMPLOYEE_FIELDS)}=?{', pay_reminded_for=NULL' if moved else ''} WHERE id=? AND business_id=?",
+                   [values[f] for f in EMPLOYEE_FIELDS] + [employee_id, biz])
+        db.commit()
+        flash(f"'{values['full_name']}' saved." + (" Unpaid trays are paid at the new rate on their next payslip." if values["tray_rate"] != e["tray_rate"] and e["employment_type"] == "Casual Worker" else ""), "ok")
+        return redirect(url_for("hr"))
+    today = today_str()
+    absences = db.all("SELECT * FROM employee_absences WHERE business_id=? AND employee_id=? ORDER BY day DESC, id DESC LIMIT 200", (biz, employee_id))
+    preview = pay_preview(db, biz, e, hr_set, e["next_pay_date"] or today)
+    return render_template("employee_edit.html", e=e, absences=absences, preview=preview, schedules=PAY_SCHEDULES, bases=PAY_BASES,
+                           tray_rate=hr_set["tray_rate"], today=today, rate=rate_for(e, hr_set), schedule=schedule_words(e))
+
+
+@app.post("/hr/employees/<int:employee_id>/absences")
+@need("admin")
+def add_absence(employee_id):
+    db, biz = get_db(), g.user["business_id"]
+    e = get_employee(db, employee_id)
+    back = redirect(url_for("edit_employee", employee_id=employee_id) + "#absences")
+    day = day_or_none(text("day")) if text("day") else None
+    days = 0.5 if text("days") == "0.5" else 1.0
+    if day is None:
+        flash("Choose the day they were absent.", "error")
+        return back
+    if db.one("SELECT id FROM employee_absences WHERE business_id=? AND employee_id=? AND day=?", (biz, employee_id, day)):
+        flash(f"An absence on {day} is already recorded for {e['full_name']}.", "error")
+        return back
+    db.insert("INSERT INTO employee_absences (business_id, employee_id, day, days, reason, recorded_by, recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+              (biz, employee_id, day, days, text("reason")[:120], g.user["username"], now().strftime("%Y-%m-%d %H:%M:%S")))
+    db.commit()
+    flash(f"{e['full_name']}: {'half a day' if days == 0.5 else 'a day'} absent on {day} recorded. It comes off the salary for the pay period it falls in.", "ok")
+    return back
+
+
+@app.post("/hr/absences/<int:absence_id>/delete")
+@need("admin")
+def delete_absence(absence_id):
+    db, biz = get_db(), g.user["business_id"]
+    row = db.one("SELECT employee_id, day FROM employee_absences WHERE id=? AND business_id=?", (absence_id, biz))
+    if row is None:
+        abort(404)
+    db.execute("DELETE FROM employee_absences WHERE id=? AND business_id=?", (absence_id, biz))
+    db.commit()
+    flash(f"The absence on {row['day']} was removed.", "ok")
+    return redirect(url_for("edit_employee", employee_id=row["employee_id"]) + "#absences")
 
 
 @app.post("/hr/employees/<int:employee_id>/delete")
@@ -3753,45 +3851,164 @@ def hr_tray_settings():
     return redirect(url_for("hr_settings"))
 
 
-def unpaid_trays(db, biz, employee_id, month):
-    """The trays a worker planted, on plantings dated up to the end of a pay month, that no payslip has paid yet:
-    ([{id, name, batch_no, planted_on, trays}], their total). Earlier months' unpaid trays are included, so nothing is missed."""
+def unpaid_trays(db, biz, employee_id, until):
+    """The trays a worker planted, on plantings dated up to a day (or the end of a month, given as YYYY-MM), that no payslip has paid yet:
+    ([{id, name, batch_no, planted_on, trays}], their total). Earlier unpaid trays are included, so nothing is missed."""
+    if len(until) == 7:
+        until += "-31"   # dates are YYYY-MM-DD text, so any day of the month sorts at or before the 31st
     rows = db.all(
         """SELECT t.id, t.trays, p.name, p.batch_no, p.planted_on
            FROM planting_trays t JOIN plantings p ON p.id = t.planting_id AND p.business_id = t.business_id
            WHERE t.business_id=? AND t.employee_id=? AND t.paid_payslip_id IS NULL AND p.planted_on <= ?
            ORDER BY p.planted_on, t.id""",
-        (biz, employee_id, month + "-31"),   # dates are YYYY-MM-DD text, so any day of the month sorts at or before the 31st
+        (biz, employee_id, until),
     )
     return rows, round(sum(r["trays"] for r in rows), 2)
+
+
+# --- How and when each employee is paid ---
+# A casual worker is paid for the trays they planted, at their own rate (or the business's usual rate when they have none): all their
+# unpaid trays at the rate in force when the payslip is made. Everyone else is paid their salary for each pay period, less days absent.
+# Each person has a pay schedule and a next pay date; a payslip covers the days since the last one, and moves the next pay date on.
+PAY_SCHEDULES = (("monthly", "Monthly, on a day of the month"), ("biweekly", "Every two weeks"), ("weekly", "Every week"), ("manual", "On a date set each time"))
+PAY_BASES = (("trays", "Per tray planted"),)
+EMPLOYEE_COLUMNS = ("id, full_name, nrc_number, employment_type, basic_salary, address, age, start_date, expected_days_week, pay_basis, tray_rate, "
+                    "pay_schedule, pay_day, next_pay_date, paid_through, pay_reminded_for")
+
+
+def rate_for(employee, hr_set):
+    """What a casual worker is paid for a tray: their own rate, or the business's usual one."""
+    own = employee.get("tray_rate")
+    return own if own is not None and own > 0 else (hr_set["tray_rate"] or 0.0)
+
+
+def is_casual(employee):
+    return employee.get("employment_type") == "Casual Worker"
+
+
+def month_day(year, month, day):
+    """That day of a month, or its last day when the month is shorter (the 31st in April is the 30th)."""
+    return datetime.date(year, month, min(day, calendar.monthrange(year, month)[1]))
+
+
+def month_day_on_or_after(day_str, pay_day):
+    d = datetime.date.fromisoformat(day_str)
+    candidate = month_day(d.year, d.month, pay_day)
+    if candidate < d:
+        y, m = (d.year + 1, 1) if d.month == 12 else (d.year, d.month + 1)
+        candidate = month_day(y, m, pay_day)
+    return candidate.isoformat()
+
+
+def shift_months(day_str, months, pay_day=None):
+    d = datetime.date.fromisoformat(day_str)
+    index = d.year * 12 + d.month - 1 + months
+    return month_day(index // 12, index % 12 + 1, pay_day or d.day).isoformat()
+
+
+def following_pay_date(employee, pay_date):
+    """The pay date after this one on the person's schedule; None when dates are set by hand."""
+    schedule = employee.get("pay_schedule") or "manual"
+    if schedule == "monthly":
+        return shift_months(pay_date, 1, employee.get("pay_day"))
+    if schedule in ("weekly", "biweekly"):
+        return add_days(pay_date, 7 if schedule == "weekly" else 14)
+    return None
+
+
+def pay_period(employee, pay_date):
+    """The days a payslip on this pay date covers: from the day after the last payslip's period (or, before any payslip, one schedule
+    step back), never before the person started, up to the pay date."""
+    if employee.get("paid_through"):
+        start = add_days(employee["paid_through"], 1)
+    else:
+        schedule = employee.get("pay_schedule") or "manual"
+        if schedule == "monthly":
+            start = add_days(shift_months(pay_date, -1, employee.get("pay_day")), 1)
+        elif schedule in ("weekly", "biweekly"):
+            start = add_days(pay_date, -(6 if schedule == "weekly" else 13))
+        else:
+            start = pay_date[:8] + "01"
+    began = day_or_none(employee.get("start_date") or "")
+    if began and began > start:
+        start = began
+    return min(start, pay_date), pay_date
+
+
+def working_days(start, end, non_working):
+    first, last = datetime.date.fromisoformat(start), datetime.date.fromisoformat(end)
+    return sum(1 for n in range((last - first).days + 1) if WEEKDAYS[(first + datetime.timedelta(days=n)).weekday()] not in non_working)
+
+
+def absent_days(db, biz, employee_id, start, end):
+    return db.one("SELECT COALESCE(SUM(days), 0) AS n FROM employee_absences WHERE business_id=? AND employee_id=? AND day >= ? AND day <= ?",
+                  (biz, employee_id, start, end))["n"] or 0.0
+
+
+def schedule_words(employee):
+    schedule = employee.get("pay_schedule")
+    if schedule == "monthly" and employee.get("pay_day"):
+        n = employee["pay_day"]
+        suffix = "th" if 11 <= n % 100 <= 13 else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+        return f"Monthly, on the {n}{suffix}"
+    return {"biweekly": "Every two weeks", "weekly": "Every week", "manual": "On a date set each time"}.get(schedule, "No pay date set")
+
+
+def pay_preview(db, biz, employee, hr_set, pay_date, start=None, end=None):
+    """What a payslip on this pay date would pay, worked out the way the payslip form works it out: the period, and either the unpaid
+    trays at the person's rate or the salary for the working days less absences. The payslip form, the HR page and the alert all use it."""
+    period_start, period_end = pay_period(employee, pay_date)
+    start, end = start or period_start, end or period_end
+    non_working = hr_set["non_working_days"].split(",")
+    out = {"pay_date": pay_date, "start": start, "end": end, "next_pay_date": following_pay_date(employee, pay_date)}
+    if is_casual(employee):
+        rows, trays = unpaid_trays(db, biz, employee["id"], end)
+        rate = rate_for(employee, hr_set)
+        out.update(basis="trays", rows=rows, trays=trays, rate=rate, amount=round(trays * rate, 2))
+    else:
+        expected = working_days(start, end, non_working) if start <= end else 0
+        absent = min(float(absent_days(db, biz, employee["id"], start, end)), float(expected))
+        worked = expected - absent
+        salary = employee["basic_salary"] or 0.0
+        out.update(basis="days", expected=expected, absent=absent, worked=worked, salary=salary,
+                   amount=round(salary * worked / expected, 2) if expected else 0.0)
+    return out
 
 
 @app.get("/hr/trays")
 @need("admin")
 def hr_trays():
-    """The unpaid trays and the pay for them, for the payslip form to show before it is saved."""
+    """What a payslip would pay (the period, the trays or the days), for the payslip form to show before it is saved."""
     db, biz = get_db(), g.user["business_id"]
-    month = request.args.get("month", "")
-    employee = db.one("SELECT id, employment_type FROM employees WHERE id=? AND business_id=?", (request.args.get("employee_id", type=int), biz))
-    try:
-        datetime.datetime.strptime(month, "%Y-%m")
-    except ValueError:
-        return jsonify(error="Choose the pay month."), 400
+    employee = db.one(f"SELECT {EMPLOYEE_COLUMNS} FROM employees WHERE id=? AND business_id=?", (request.args.get("employee_id", type=int), biz))
     if employee is None:
         return jsonify(error="Choose an employee."), 400
-    rows, total = unpaid_trays(db, biz, employee["id"], month)
-    rate = hr_settings_for(db, biz)["tray_rate"]
-    return jsonify(
-        casual=employee["employment_type"] == "Casual Worker", rate=rate, trays=total, pay=round(total * rate, 2),
-        rows=[{"planting": planting_label(r), "planted_on": r["planted_on"], "trays": r["trays"]} for r in rows],
-    )
+    month = request.args.get("month", "")
+    if month and not request.args.get("pay_date"):   # an older form: a pay month, paid on its last day
+        try:
+            first = datetime.datetime.strptime(month, "%Y-%m").date()
+        except ValueError:
+            return jsonify(error="Choose the pay month."), 400
+        pay_date, start = month_day(first.year, first.month, 31).isoformat(), first.isoformat()
+    else:
+        pay_date, start = day_or_none(request.args.get("pay_date", "")), day_or_none(request.args.get("from", "")) if request.args.get("from") else None
+        if pay_date is None:
+            return jsonify(error="Choose the pay date."), 400
+    end = day_or_none(request.args.get("to", "")) if request.args.get("to") else None
+    if start and end and start > end:
+        return jsonify(error="The period's first day is after its last day."), 400
+    p = pay_preview(db, biz, employee, hr_settings_for(db, biz), pay_date, start, end)
+    p["casual"] = is_casual(employee)
+    p["rows"] = [{"planting": planting_label(r), "planted_on": r["planted_on"], "trays": r["trays"]} for r in p.get("rows", [])]
+    p["pay"] = p["amount"]
+    return jsonify(p)
 
 
 @app.route("/hr/payslips/new", methods=["GET", "POST"])
 @need("admin")
 def new_payslip():
     db, biz = get_db(), g.user["business_id"]
-    employees = db.all("SELECT id, full_name, basic_salary, employment_type FROM employees WHERE business_id=? ORDER BY full_name", (biz,))
+    employees = db.all(f"SELECT {EMPLOYEE_COLUMNS} FROM employees WHERE business_id=? ORDER BY full_name", (biz,))
     if not employees:
         flash("Register an employee first.", "error")
         return redirect(url_for("hr"))
@@ -3799,38 +4016,70 @@ def new_payslip():
     non_working = hr_set["non_working_days"].split(",")
 
     if request.method == "POST":
+        again = redirect(url_for("new_payslip", employee=request.form.get("employee_id", type=int)))
         employee = next((e for e in employees if e["id"] == request.form.get("employee_id", type=int)), None)
-        # A casual worker can be paid for the trays they planted instead of for days worked
-        by_tray = bool(employee and employee["employment_type"] == "Casual Worker" and text("pay_basis") == "trays")
+        if employee is None:
+            flash("Choose an employee.", "error")
+            return again
+        # The pay date and the period it covers. An older form (and the assistant) sends only a pay month: the whole month, paid today.
+        if text("pay_date"):
+            pay_date = day_or_none(text("pay_date"))
+            start = day_or_none(text("period_start")) if text("period_start") else None
+            end = day_or_none(text("period_end")) if text("period_end") else None
+            if pay_date is None or (text("period_start") and start is None) or (text("period_end") and end is None):
+                flash("Check the pay date and the period's first and last days.", "error")
+                return again
+            default_start, default_end = pay_period(employee, pay_date)
+            start, end = start or default_start, end or default_end
+            pay_month = pay_date[:7]
+        else:
+            try:
+                first = datetime.datetime.strptime(text("pay_month"), "%Y-%m").date()
+            except ValueError:
+                flash("Choose the pay date.", "error")
+                return again
+            start, end, pay_date = first.isoformat(), month_day(first.year, first.month, 31).isoformat(), today_str()
+            pay_month = first.strftime("%Y-%m")   # filed under the month it pays for, as before
+        if start > end:
+            flash("The period's first day is after its last day.", "error")
+            return again
+        # A casual worker is paid by the tray; one with a salary on record (from before) can still be paid for days worked
+        by_tray = is_casual(employee) and (text("pay_basis") or "trays") == "trays"
         try:
-            period = datetime.datetime.strptime(text("pay_month"), "%Y-%m")
             if by_tray:
                 expected = worked = 0.0
             else:
-                expected = number("expected_days", default=float(expected_work_days(period.year, period.month, non_working)))
-                worked = number("worked_days")
+                expected = number("expected_days", default=float(working_days(start, end, non_working)))
+                default_worked = max(0.0, expected - float(absent_days(db, biz, employee["id"], start, end)))
+                worked = number("worked_days", default=default_worked)
             bonuses, deductions = named_amounts("bonus"), named_amounts("deduction")
         except ValueError:
-            flash("Check the pay month (YYYY-MM), the day counts, and that every bonus or deduction has a name and a positive amount.", "error")
-            return redirect(url_for("new_payslip"))
-        if employee is None or (not by_tray and (expected <= 0 or worked < 0)):
-            flash("Choose an employee; expected days must be above zero and days worked cannot be negative.", "error")
-            return redirect(url_for("new_payslip"))
+            flash("Check the day counts, and that every bonus or deduction has a name and a positive amount.", "error")
+            return again
+        if not by_tray and (expected <= 0 or worked < 0 or worked > expected):
+            flash("Expected days must be above zero, and days worked between zero and the expected days.", "error")
+            return again
+        next_pay = None
+        if "next_pay_date" in request.form:
+            next_pay = day_or_none(text("next_pay_date")) if text("next_pay_date") else None
+            if text("next_pay_date") and (next_pay is None or next_pay <= pay_date):
+                flash("The next pay date must be a date after this pay date.", "error")
+                return again
         method, _, problem = read_money_method()
         if problem:
             flash(problem.replace("the money was paid", "the pay was paid"), "error")
-            return redirect(url_for("new_payslip"))
+            return again
 
         tray_rows, trays, tray_rate = [], None, None
         if by_tray:
-            tray_rows, trays = unpaid_trays(db, biz, employee["id"], period.strftime("%Y-%m"))
-            tray_rate = hr_settings_for(db, biz)["tray_rate"]
+            tray_rows, trays = unpaid_trays(db, biz, employee["id"], end)
+            tray_rate = rate_for(employee, hr_set)
             if not tray_rows and not bonuses:
-                flash(f"{employee['full_name']} has no unpaid trays up to {period.strftime('%Y-%m')}. Trays are recorded on each planting under Planting Records.", "error")
-                return redirect(url_for("new_payslip"))
+                flash(f"{employee['full_name']} has no unpaid trays planted up to {end}. Trays are recorded on each planting under Planting Records.", "error")
+                return again
             if tray_rows and tray_rate <= 0:
-                flash("Set the pay for each tray under HR & Payroll > Settings first.", "error")
-                return redirect(url_for("new_payslip"))
+                flash(f"Set how much {employee['full_name']} is paid for each tray (Edit, on HR & Payroll) first.", "error")
+                return again
             basic = 0.0
             calculated_basic = round(trays * tray_rate, 2)
         else:
@@ -3844,12 +4093,13 @@ def new_payslip():
 
         payslip_id = db.insert(
             """INSERT INTO payroll (business_id, employee_id, employee_name, pay_month, basic_salary, expected_days, worked_days, calculated_basic,
-                                    bonuses_json, deductions_json, napsa_amt, nhima_amt, employer_napsa, employer_nhima, net_payable, created_at, trays, tray_rate)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                    bonuses_json, deductions_json, napsa_amt, nhima_amt, employer_napsa, employer_nhima, net_payable, created_at, trays, tray_rate,
+                                    period_start, period_end, pay_date)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
-                biz, employee["id"], employee["full_name"], period.strftime("%Y-%m"), basic, expected, worked, calculated_basic,
+                biz, employee["id"], employee["full_name"], pay_month, basic, expected, worked, calculated_basic,
                 json.dumps(bonuses), json.dumps(deductions), emp_napsa, emp_nhima, employer_napsa, employer_nhima, net,
-                now().strftime("%Y-%m-%d %H:%M:%S"), trays, tray_rate,
+                now().strftime("%Y-%m-%d %H:%M:%S"), trays, tray_rate, start, end, pay_date,
             ),
         )
         if tray_rows:
@@ -3862,17 +4112,27 @@ def new_payslip():
             if taken != len(tray_rows):
                 db.rollback()
                 flash("The trays changed while the payslip was being made. Nothing was saved; please try again.", "error")
-                return redirect(url_for("new_payslip"))
+                return again
+        # The next period starts the day after this one; the next pay date is the one chosen on the form, or the next on the schedule
+        if "next_pay_date" not in request.form:
+            due_now = employee["next_pay_date"]
+            next_pay = following_pay_date(employee, due_now) if due_now and due_now <= pay_date else due_now
+        db.execute("UPDATE employees SET paid_through=?, next_pay_date=?, pay_reminded_for=NULL WHERE id=? AND business_id=?",
+                   (max(end, employee["paid_through"] or ""), next_pay, employee["id"], biz))
         record_payslip_money(
-            db, biz, payslip_id, employee["full_name"], period.strftime("%Y-%m"), net, emp_napsa + emp_nhima + employer_napsa + employer_nhima,
-            method, now().strftime("%Y-%m-%d %H:%M:%S"),
+            db, biz, payslip_id, employee["full_name"], f"{start} to {end}", net, emp_napsa + emp_nhima + employer_napsa + employer_nhima,
+            method, stamp_for_day(pay_date) if pay_date != today_str() else now().strftime("%Y-%m-%d %H:%M:%S"),
         )
         db.commit()
+        flash(f"Payslip saved for {employee['full_name']}." + (f" Next paid on {next_pay}." if next_pay else " No next pay date is set."), "ok")
         return redirect(url_for("payslips", id=payslip_id))
 
+    chosen = request.args.get("employee", type=int)
+    picked = next((e for e in employees if e["id"] == chosen), employees[0])
+    pay_date = day_or_none(request.args.get("pay_date", "")) if request.args.get("pay_date") else None
     return render_template(
-        "payslip_new.html", employees=employees, hr=hr_set, this_month=now().strftime("%Y-%m"), methods=PAYMENT_METHODS,
-        chosen=request.args.get("employee", type=int),
+        "payslip_new.html", employees=employees, hr=hr_set, methods=PAYMENT_METHODS, chosen=picked["id"],
+        pay_date=pay_date or picked["next_pay_date"] or today_str(), rates={e["id"]: rate_for(e, hr_set) for e in employees},
     )
 
 
@@ -3901,7 +4161,12 @@ def payslips():
 @need("admin")
 def delete_payslip(payslip_id):
     db = get_db()
+    slip = db.one("SELECT employee_id FROM payroll WHERE id=? AND business_id=?", (payslip_id, g.user["business_id"]))
     db.execute("DELETE FROM payroll WHERE id=? AND business_id=?", (payslip_id, g.user["business_id"]))
+    if slip and slip["employee_id"]:
+        # Their next pay period starts again after the latest payslip that is left
+        last = db.one("SELECT MAX(period_end) AS d FROM payroll WHERE business_id=? AND employee_id=?", (g.user["business_id"], slip["employee_id"]))["d"]
+        db.execute("UPDATE employees SET paid_through=? WHERE id=? AND business_id=?", (last, slip["employee_id"], g.user["business_id"]))
     db.execute("DELETE FROM cashbook WHERE business_id=? AND source='payslip' AND source_id=?", (g.user["business_id"], payslip_id))
     # The trays that payslip paid are owed again, to be paid on the next payslip
     db.execute("UPDATE planting_trays SET paid_payslip_id=NULL WHERE business_id=? AND paid_payslip_id=?", (g.user["business_id"], payslip_id))
@@ -3918,7 +4183,7 @@ def delete_payslip(payslip_id):
 #   WHATSAPP_PROVIDER=callmebot  WHATSAPP_CALLMEBOT_KEY (the key CallMeBot issued to the alert phone number)
 # Until one is configured, alerts still appear in the app and the WhatsApp copy is recorded as skipped.
 ALERT_KINDS = (("low_stock", "Low stock"), ("permission", "Requests for admin permission"), ("preorders", "Pre-orders almost due"),
-               ("collections", "Sales to be collected"), ("deliveries", "Deliveries due today"), ("requests", "Customer requests"))
+               ("collections", "Sales to be collected"), ("deliveries", "Deliveries due today"), ("requests", "Customer requests"), ("payroll", "Pay dates"))
 ITEM_ACTIONS = (("procure", "edit this item's details"), ("transfer", "transfer or use this item's stock"), ("delete", "delete this item"))
 GRANT_MINUTES = 60
 # An operator's request to delete one invoice travels through the same request/approve/spend-once flow as the item actions
@@ -4059,6 +4324,7 @@ def notifications_poll():
     remind_collections_due(get_db(), g.user["business_id"])
     remind_deliveries_due(get_db(), g.user["business_id"])
     remind_requests_due(get_db(), g.user["business_id"])
+    remind_pay_due(get_db(), g.user["business_id"])
     where, params = my_notifications_clause()
     rows = get_db().all(
         f"SELECT id, kind, title, body, created_at FROM notifications WHERE {where} AND read_at IS NULL ORDER BY id DESC LIMIT 20", params
@@ -4108,10 +4374,10 @@ def save_alerts():
         flash("Enter the WhatsApp number with its country code, for example +260 972 047 233.", "error")
         return redirect(url_for("settings"))
     db.execute(
-        "UPDATE businesses SET alert_phone=?, alert_low_stock=?, alert_permission=?, alert_preorders=?, alert_collections=?, alert_deliveries=?, alert_requests=? WHERE id=?",
+        "UPDATE businesses SET alert_phone=?, alert_low_stock=?, alert_permission=?, alert_preorders=?, alert_collections=?, alert_deliveries=?, alert_requests=?, alert_payroll=? WHERE id=?",
         (phone, 1 if request.form.get("alert_low_stock") else 0, 1 if request.form.get("alert_permission") else 0,
          1 if request.form.get("alert_preorders") else 0, 1 if request.form.get("alert_collections") else 0,
-         1 if request.form.get("alert_deliveries") else 0, 1 if request.form.get("alert_requests") else 0, g.user["business_id"]),
+         1 if request.form.get("alert_deliveries") else 0, 1 if request.form.get("alert_requests") else 0, 1 if request.form.get("alert_payroll") else 0, g.user["business_id"]),
     )
     db.commit()
     flash("Alert settings saved.", "ok")
@@ -6306,6 +6572,11 @@ def overview():
         todo.append({"kind": "Pre-order", "title": r["customer_name"], "detail": f"{r['qty']:,} x {r['name']}", "day": r["day"], "href": url_for("up_next") + f"#preorder-{r['id']}"})
     for r in db.all("SELECT * FROM customer_requests WHERE business_id=? AND status='open' AND follow_up_on <= ? ORDER BY follow_up_on, id LIMIT 6", (biz, today)):
         todo.append({"kind": "Request", "title": r["customer_name"], "detail": "Follow up: " + request_label(r), "day": r["follow_up_on"], "href": url_for("customer_request", cr_id=r["id"])})
+    if admin:
+        for r in db.all("SELECT id, full_name, employment_type, next_pay_date AS day FROM employees WHERE business_id=? AND next_pay_date IS NOT NULL AND next_pay_date <= ? ORDER BY next_pay_date LIMIT 6",
+                        (biz, add_days(today, 1))):
+            todo.append({"kind": "Pay", "title": r["full_name"], "detail": "Pay day: their payslip is filled in", "day": r["day"],
+                         "href": url_for("new_payslip", employee=r["id"], pay_date=r["day"])})
     todo.sort(key=lambda t: t["day"])
     for t in todo:
         t["late"] = t["day"] < today
@@ -7362,8 +7633,12 @@ def tray_count(raw):
 
 
 def planting_staff(db, biz):
-    """The employees a planting's trays can be given to. Only a name and a kind: what a person is paid is not for the planting pages."""
-    return db.all("SELECT id, full_name, employment_type FROM employees WHERE business_id=? ORDER BY full_name", (biz,))
+    """The employees a planting's trays can be given to: the casual workers (paid by the tray) first, with their rate for a tray, then
+    everyone else. Nothing else about their pay."""
+    hr_set = hr_settings_for(db, biz)
+    rows = db.all("""SELECT id, full_name, employment_type, tray_rate FROM employees WHERE business_id=?
+                     ORDER BY CASE WHEN employment_type='Casual Worker' THEN 0 ELSE 1 END, full_name""", (biz,))
+    return [dict(r, rate=rate_for(r, hr_set) if is_casual(r) else None) for r in rows]
 
 
 def read_trays_form(db, biz, paid=0.0):
@@ -7678,13 +7953,18 @@ def planting_tray_rows(db, biz, planting_id):
     """Who planted how many trays of a planting, and whether each is paid: on a payslip, still to be paid (a casual worker),
     or not paid by the tray (permanent staff are on a salary; a person since removed from HR is only a name)."""
     rows = db.all(
-        """SELECT t.id, t.employee_id, t.employee_name, t.trays, t.paid_payslip_id, e.employment_type
+        """SELECT t.id, t.employee_id, t.employee_name, t.trays, t.paid_payslip_id, e.employment_type, e.tray_rate, pr.tray_rate AS paid_rate
            FROM planting_trays t LEFT JOIN employees e ON e.id = t.employee_id AND e.business_id = t.business_id
+           LEFT JOIN payroll pr ON pr.id = t.paid_payslip_id AND pr.business_id = t.business_id
            WHERE t.business_id=? AND t.planting_id=? ORDER BY t.id""",
         (biz, planting_id),
     )
+    hr_set = hr_settings_for(db, biz)
     for r in rows:
         r["state"] = "paid" if r["paid_payslip_id"] else ("due" if r["employment_type"] == "Casual Worker" else "salaried" if r["employment_type"] else "gone")
+        # What the trays earn: at the rate they were paid at, or at the worker's rate now (unpaid trays are paid at the rate in force)
+        r["rate"] = r["paid_rate"] if r["state"] == "paid" else (rate_for(r, hr_set) if r["state"] == "due" else None)
+        r["earns"] = round(r["trays"] * r["rate"], 2) if r["rate"] else None
     return rows
 
 
@@ -8429,6 +8709,38 @@ def remind_requests_due(db, biz):
         body = "Due today: " + "; ".join(f"{r['customer_name']}: {request_label(r)}" for r in claimed[:10]) + (" and more." if len(claimed) > 10 else ".")
         link = url_for("customer_requests", show="due")
     notify(db, "request", title, body, link, whatsapp=True)
+    db.commit()
+
+
+def remind_pay_due(db, biz):
+    """On an employee's pay date the admins are alerted, once for that date, with what is owed and a link to their payslip, filled in and
+    waiting to be checked and saved. Runs from the alerts poll; each employee is claimed before the alert is raised."""
+    if not alert_enabled("payroll"):
+        return
+    today = today_str()
+    due = db.all(f"SELECT {EMPLOYEE_COLUMNS} FROM employees WHERE business_id=? AND next_pay_date IS NOT NULL AND next_pay_date <= ? "
+                 "AND COALESCE(pay_reminded_for, '') <> next_pay_date ORDER BY next_pay_date, full_name", (biz, today))
+    claimed = [e for e in due if db.execute("UPDATE employees SET pay_reminded_for=? WHERE id=? AND COALESCE(pay_reminded_for, '') <> ?",
+                                            (e["next_pay_date"], e["id"], e["next_pay_date"])).rowcount == 1]
+    if not claimed:
+        return
+    hr_set = hr_settings_for(db, biz)
+    lines = []
+    for e in claimed:
+        p = pay_preview(db, biz, e, hr_set, e["next_pay_date"])
+        how = f"{p['trays']:g} trays at {money(p['rate'])}" if p["basis"] == "trays" else f"{p['worked']:g} of {p['expected']:g} days"
+        lines.append((e, p, how))
+    if len(lines) == 1:
+        e, p, how = lines[0]
+        title = f"Pay due: {e['full_name']}, {money(p['amount'])}"
+        body = (f"{e['full_name']} is paid {'today' if e['next_pay_date'] == today else 'since ' + e['next_pay_date']}: {money(p['amount'])} before NAPSA and NHIMA "
+                f"({how}, {p['start']} to {p['end']}). The payslip is filled in, ready to check and save.")
+        link = url_for("new_payslip", employee=e["id"], pay_date=e["next_pay_date"])
+    else:
+        title = f"Pay due for {len(lines)} employees"
+        body = "Due: " + "; ".join(f"{e['full_name']} {money(p['amount'])}" for e, p, _ in lines[:10]) + ". Each payslip is filled in on HR & Payroll."
+        link = url_for("hr") + "#pay"
+    notify(db, "payroll", title, body, link, whatsapp=True)
     db.commit()
 
 
@@ -11348,6 +11660,8 @@ assistant.bind(
     # customer requests: what was asked for, matched to what we have
     request_fits=request_fits, requests_with_stock=requests_with_stock, known_item=known_item, most_requested=most_requested, request_label=request_label,
     customer_group_key=customer_group_key,
+    # pay: each employee's rate for a tray and what their next payslip would pay
+    rate_for=rate_for, pay_preview=pay_preview, schedule_words=schedule_words, EMPLOYEE_COLUMNS=EMPLOYEE_COLUMNS,
 )
 
 

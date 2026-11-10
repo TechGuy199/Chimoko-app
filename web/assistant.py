@@ -871,6 +871,8 @@ def money_lines(ctx, a):
         lines.append(f"Customers owe {ctx.money(a['customers_owe']['amount'])}")
     if a.get("trays_to_pay"):
         lines.append(plural(len(a["trays_to_pay"]), "casual worker has", "casual workers have") + " trays to be paid")
+    if a.get("pay_days"):
+        lines.append("Pay due: " + ", ".join(f"{p['employee']} {ctx.money(p['owed'])}" for p in a["pay_days"][:4]))
     return lines
 
 

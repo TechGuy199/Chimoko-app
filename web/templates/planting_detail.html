@@ -109,13 +109,15 @@
     {% if planted_by %}
     <div class="table-wrap">
         <table>
-            <thead><tr><th>Planted by</th><th class="num">Trays</th><th>Pay</th></tr></thead>
+            <thead><tr><th>Planted by</th><th class="num">Trays</th><th class="num">Rate a tray</th><th class="num">Earns</th><th>Pay</th></tr></thead>
             <tbody>
             {% for r in planted_by %}
                 <tr>
                     <td>{{ r.employee_name }}</td><td class="num">{{ r.trays|trays }}</td>
-                    <td>{% if r.state == 'paid' %}<span class="ok">Paid on a payslip</span>
-                        {% elif r.state == 'due' %}<strong class="gold">To be paid</strong>
+                    <td class="num">{{ r.rate|money if r.rate else '—' }}</td>
+                    <td class="num">{{ r.earns|money if r.earns is not none else '—' }}</td>
+                    <td>{% if r.state == 'paid' %}<span class="chip ok">Paid on a payslip</span>
+                        {% elif r.state == 'due' %}<span class="chip gold">To be paid</span>
                         {% elif r.state == 'salaried' %}<span class="muted">Salaried, not paid by the tray</span>
                         {% else %}<span class="muted">No longer an employee</span>{% endif %}</td>
                 </tr>

@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block title %}{{ e.full_name }} — {% endblock %}
+{% block content %}
+<div class="page-head">
+    <div>
+        <a class="back" href="{{ url_for('hr') }}">&larr; HR &amp; Payroll</a>
+        <h1>{{ e.full_name }}</h1>
+        <p class="muted">{{ 'Casual worker, paid by the tray' if e.employment_type == 'Casual Worker' else 'Permanent, on a salary' }} &middot; {{ schedule }} &middot; NRC {{ e.nrc_number }}</p>
+    </div>
+    <div class="head-actions">
+        <a class="btn" href="{{ url_for('employee_statement', employee_id=e.id) }}">Statement</a>
+        <a class="btn success" href="{{ url_for('new_payslip', employee=e.id, pay_date=e.next_pay_date or today) }}">Make payslip</a>
+    </div>
+</div>
+
+<div class="stats">
+    <div class="stat"><span>Next pay date</span><strong class="{{ 'warn' if e.next_pay_date and e.next_pay_date < today else 'gold' if e.next_pay_date == today }}">{{ e.next_pay_date or 'Not set' }}</strong>
+        <small>{{ preview.start }} to {{ preview.end }}</small></div>
+    <a class="stat" href="{{ url_for('new_payslip', employee=e.id, pay_date=e.next_pay_date or today) }}"><span>Owed for the period</span><strong>{{ preview.amount|money }}</strong>
+        <small>{% if preview.basis == 'trays' %}{{ preview.trays|trays }} unpaid trays &times; {{ preview.rate|money }}{% else %}{{ '%g'|format(preview.worked) }} of {{ '%g'|format(preview.expected) }} days{% endif %}, before NAPSA and NHIMA</small></a>
+    {% if e.employment_type == 'Casual Worker' %}
+    <div class="stat"><span>Pay for each tray</span><strong>{{ rate|money }}</strong><small>{{ 'their own rate' if e.tray_rate else 'the usual rate from HR Settings' }}</small></div>
+    {% else %}
+    <div class="stat"><span>Absent this period</span><strong class="{{ 'warn' if preview.absent }}">{{ '%g'|format(preview.absent) }} day{{ 's' if preview.absent != 1 }}</strong><small>taken off the salary</small></div>
+    {% endif %}
+</div>
+
+<div class="dash-grid">
+    <section class="card span-6">
+        <h2>Details and pay</h2>
+        {% include "_employee_form.html" %}
+    </section>
+
+    <section class="card span-6" id="absences">
+        <h2>Absences</h2>
+        <p class="muted">A day absent comes off the salary for the pay period it falls in{% if e.employment_type == 'Casual Worker' %} (casual workers are paid by the tray, so absences are only a record){% endif %}.</p>
+        <form method="post" action="{{ url_for('add_absence', employee_id=e.id) }}" class="toolbar">
+            {{ csrf_field() }}
+            <input name="day" type="date" max="{{ today }}" value="{{ today }}" required aria-label="Day absent" style="flex: 1 1 150px">
+            <select name="days" aria-label="How long"><option value="1">Whole day</option><option value="0.5">Half day</option></select>
+            <input name="reason" maxlength="120" placeholder="Reason (optional)" aria-label="Reason" style="flex: 2 1 180px">
+            <button class="btn primary">Record absence</button>
+        </form>
+        {% if absences %}
+        <ul class="rows">
+            {% for a in absences %}
+            <li><div class="row">
+                <span class="row-main"><strong>{{ a.day }}</strong><small>{{ 'Half day' if a.days == 0.5 else 'Whole day' }}{% if a.reason %} &middot; {{ a.reason }}{% endif %} &middot; recorded by {{ a.recorded_by }}</small></span>
+                <form method="post" action="{{ url_for('delete_absence', absence_id=a.id) }}" data-confirm="Remove the absence on {{ a.day }}?">
+                    {{ csrf_field() }}<button class="btn danger small">Remove</button>
+                </form>
+            </div></li>
+            {% endfor %}
+        </ul>
+        {% else %}
+        <div class="empty"><strong>No absences recorded</strong>Their full salary is paid for each period.</div>
+        {% endif %}
+    </section>
+</div>
+{% endblock %}
