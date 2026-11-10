@@ -1,0 +1,98 @@
+{% extends "base.html" %}
+{% block title %}Request: {{ r.customer_name }} — {% endblock %}
+{% block content %}
+<div class="page-head">
+    <div>
+        <a class="back" href="{{ url_for('customer_requests', show='open' if r.status == 'open' else 'closed') }}">&larr; Customer requests</a>
+        <h1>{{ r.label }}</h1>
+        <p class="muted">
+            Asked for by <strong>{{ r.customer_name }}</strong>{% if r.customer_phone %} ({{ r.customer_phone }}){% endif %}
+            &middot; logged {{ r.created_at[:10] }} by {{ r.created_by }}{% if r.source == 'assistant' %}, with the assistant{% endif %}
+        </p>
+    </div>
+</div>
+
+<div class="stats">
+    <div class="stat"><span>Status</span><strong class="{{ 'gold' if r.status == 'open' else 'ok' if r.status == 'fulfilled' }}">{{ statuses[r.status] }}</strong>
+        <small>{% if r.status == 'open' %}waiting for the item{% else %}{{ (r.closed_at or '')[:10] }} by {{ r.closed_by }}{% endif %}</small></div>
+    {% if r.status == 'open' %}
+    <div class="stat"><span>Follow up</span><strong class="{{ 'warn' if r.follow_up_on < today else 'gold' if r.follow_up_on == today }}">{{ r.follow_up_on }}</strong><small>{{ r.when }}</small></div>
+    <div class="stat"><span>We have now</span>
+        {% if r.have_now %}<strong class="ok">{{ '{:,}'.format(r.in_stock or r.growing) }}</strong>
+            <small>{% if r.in_stock %}in stock{% if r.growing %}, and {{ '{:,}'.format(r.growing) }} seedlings free{% endif %}{% else %}seedlings free, ready {{ r.growing_ready }}{% endif %}</small>
+        {% else %}<strong class="muted">None</strong><small>{{ 'nothing in stock' if r.item_code else 'not an item we stock' }}, nothing growing</small>{% endif %}</div>
+    {% endif %}
+    <div class="stat"><span>Quantity</span><strong>{{ '{:,}'.format(r.quantity) if r.quantity else '—' }}</strong><small>{{ 'as asked' if r.quantity else 'not said' }}</small></div>
+</div>
+{% if r.note %}<p><strong>Note:</strong> {{ r.note }}</p>{% endif %}
+{% if r.status != 'open' and r.outcome %}<p><strong>{{ statuses[r.status] }}:</strong> {{ r.outcome }}</p>{% endif %}
+
+{% if can('sell') %}
+<section class="card no-print">
+    <h2>Next step</h2>
+    {% if r.status == 'open' %}
+    <div class="request-actions">
+        <form method="post" action="{{ url_for('customer_request_follow_up', cr_id=r.id) }}" class="preorder-form">
+            {{ csrf_field() }}
+            <h3>Follow up again</h3>
+            <label>On <input name="follow_up_on" type="date" min="{{ today }}" required></label>
+            <label>What was said (optional) <input name="note" maxlength="200" placeholder="e.g. called, still wants them"></label>
+            <button class="btn primary wide">Save the new day</button>
+        </form>
+        <form method="post" action="{{ url_for('customer_request_close', cr_id=r.id) }}" class="preorder-form">
+            {{ csrf_field() }}
+            <h3>Close it</h3>
+            <label class="check"><input type="radio" name="outcome" value="fulfilled" required> <span>Fulfilled: the customer got it</span></label>
+            <label class="check"><input type="radio" name="outcome" value="dropped"> <span>Dropped: no longer wanted, or we cannot get it</span></label>
+            <label>Note (optional) <input name="note" maxlength="300" placeholder="e.g. sold on INV-2026-0123"></label>
+            <button class="btn success wide">Close the request</button>
+        </form>
+        <form method="post" action="{{ url_for('customer_request_note', cr_id=r.id) }}" class="preorder-form">
+            {{ csrf_field() }}
+            <h3>Add a note</h3>
+            <label>Note <input name="note" maxlength="300" required></label>
+            <button class="btn wide">Add note</button>
+        </form>
+    </div>
+    {% else %}
+    <form method="post" action="{{ url_for('customer_request_reopen', cr_id=r.id) }}" class="toolbar">
+        {{ csrf_field() }}
+        <label>Reopen, to follow up on <input name="follow_up_on" type="date" min="{{ today }}" required></label>
+        <button class="btn">Reopen</button>
+    </form>
+    {% endif %}
+</section>
+{% endif %}
+
+<section class="card">
+    <h2>History</h2>
+    <div class="table-wrap">
+        <table class="fit-rows">
+            <thead><tr><th>When</th><th>What</th><th>Details</th><th>By</th></tr></thead>
+            <tbody>
+            {% for e in log %}
+                <tr><td>{{ e.created_at[:16] }}</td><td>{{ words.get(e.kind, e.kind) }}</td><td>{{ e.detail }}</td><td>{{ e.created_by or '—' }}</td></tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+
+{% if others %}
+<section class="card">
+    <h2>{{ r.customer_name }}'s other requests</h2>
+    <div class="table-wrap">
+        <table class="fit-rows">
+            <thead><tr><th>Asked for</th><th>Status</th><th>Logged</th></tr></thead>
+            <tbody>
+            {% for o in others %}
+                <tr><td><a href="{{ url_for('customer_request', cr_id=o.id) }}">{{ ('{:,} x '.format(o.quantity) if o.quantity else '') ~ o.item_name }}</a></td>
+                    <td>{{ statuses[o.status] }}{% if o.status == 'open' %} <small class="muted">follow up {{ o.follow_up_on }}</small>{% endif %}</td>
+                    <td>{{ o.created_at[:10] }}</td></tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endif %}
+{% endblock %}

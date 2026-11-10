@@ -1,0 +1,110 @@
+{% extends "base.html" %}
+{% block title %}Customer Requests — {% endblock %}
+{% block content %}
+<div class="page-head">
+    <div>
+        <h1>Customer requests</h1>
+        <p class="muted">
+            What customers asked for that we do not have: never stocked, out of stock or not planted. Each has a day to follow it up;
+            {% if reminders_on %}that day the admins get an alert, and they are told too when a requested item is bought or planted.
+            {% else %}the request alert is switched off in Settings.{% endif %}
+        </p>
+    </div>
+    {% if can('sell') %}
+    <div class="head-actions"><button type="button" class="btn primary" data-modal-open="new-request">Log a request</button></div>
+    {% endif %}
+</div>
+
+<div class="stats">
+    <a class="stat stat-link" href="{{ url_for('customer_requests', show='due') }}"><span>To follow up</span><strong class="{{ 'gold' if counts.due }}">{{ counts.due }}</strong><small>today or overdue</small></a>
+    <a class="stat stat-link" href="{{ url_for('customer_requests', show='open') }}"><span>Open</span><strong>{{ counts.open }}</strong><small>waiting for the item</small></a>
+    <a class="stat stat-link" href="{{ url_for('customer_requests', show='closed') }}"><span>Closed</span><strong class="ok">{{ counts.closed }}</strong><small>fulfilled or dropped</small></a>
+</div>
+
+{% if top %}
+<section class="card">
+    <h2>Most asked for</h2>
+    <p class="muted">Open requests by what was asked for. These count towards the assistant's restock advice.</p>
+    <div class="table-wrap">
+        <table class="fit-rows">
+            <thead><tr><th>Item</th><th class="num">Customers</th><th class="num">Quantity asked</th><th>We have it now</th></tr></thead>
+            <tbody>
+            {% for t in top %}
+                <tr>
+                    <td><a href="{{ url_for('customer_requests', show='open', q=t.item) }}">{{ t.item }}</a></td>
+                    <td class="num">{{ t.customers }}</td>
+                    <td class="num">{{ '{:,}'.format(t.quantity) if t.quantity else '—' }}</td>
+                    <td>{% if t.have_now %}<span class="ok">Yes</span>{% else %}<span class="muted">No</span>{% endif %}</td>
+                </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endif %}
+
+<div class="inv-switch no-print">
+    <span class="segmented" role="group" aria-label="Which requests">
+        {% for key, label in (('due', 'To follow up'), ('open', 'Open'), ('closed', 'Closed'), ('all', 'All')) %}
+        <a href="{{ url_for('customer_requests', show=key, q=q or None) }}" class="{{ 'active' if show == key }}">{{ label }} ({{ counts[key] }})</a>
+        {% endfor %}
+    </span>
+    <form method="get" class="inv-search" role="search">
+        <input type="hidden" name="show" value="{{ show }}">
+        <input name="q" type="search" value="{{ q }}" placeholder="Search a customer, phone or item" aria-label="Search requests">
+    </form>
+</div>
+
+<section class="card">
+    <div class="table-wrap">
+        <table class="fit-rows request-rows">
+            <thead><tr><th>Customer</th><th>Asked for</th><th>We have now</th><th>{{ 'Closed' if show == 'closed' else 'Follow up' }}</th><th>Logged</th><th></th></tr></thead>
+            <tbody>
+            {% for r in rows %}
+                <tr id="request-{{ r.id }}">
+                    <td class="c-title"><strong>{{ r.customer_name }}</strong>{% if r.customer_phone %}<br><small class="muted">{{ r.customer_phone }}</small>{% endif %}</td>
+                    <td><a href="{{ url_for('customer_request', cr_id=r.id) }}">{{ r.label }}</a>
+                        {% if r.note %}<br><small class="muted">{{ r.note }}</small>{% endif %}</td>
+                    <td>{% if r.status != 'open' %}<span class="muted">—</span>
+                        {% elif r.have_now %}
+                            {% if r.in_stock %}<span class="ok">{{ '{:,}'.format(r.in_stock) }} in stock</span>{% endif %}
+                            {% if r.growing %}{% if r.in_stock %}<br>{% endif %}<span class="ok">{{ '{:,}'.format(r.growing) }} seedlings free</span><br><small class="muted">ready {{ r.growing_ready }}</small>{% endif %}
+                        {% else %}<span class="muted">None</span>{% endif %}</td>
+                    <td>{% if r.status == 'open' %}<strong class="{{ 'warn' if r.follow_up_on < today else 'gold' if r.follow_up_on == today }}">{{ r.follow_up_on }}</strong><br><small class="muted">{{ r.when }}</small>
+                        {% else %}<span class="{{ 'ok' if r.status == 'fulfilled' else 'muted' }}">{{ statuses[r.status] }}</span><br><small class="muted">{{ (r.closed_at or '')[:10] }} by {{ r.closed_by }}</small>{% endif %}</td>
+                    <td>{{ r.created_at[:10] }}<br><small class="muted">by {{ r.created_by }}{% if r.source == 'assistant' %}, with the assistant{% endif %}</small></td>
+                    <td class="actions"><a class="btn small" href="{{ url_for('customer_request', cr_id=r.id) }}">Open</a></td>
+                </tr>
+            {% else %}
+                <tr><td colspan="6" class="muted center">
+                    {% if q %}No request matches &ldquo;{{ q }}&rdquo;.
+                    {% elif show == 'due' %}Nothing to follow up today.
+                    {% else %}No requests here yet.{% endif %}
+                </td></tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+
+{% if can('sell') %}
+<dialog class="modal" id="new-request" aria-labelledby="new-request-title">
+    <div class="modal-body">
+        <h2 id="new-request-title">Log a request</h2>
+        <form method="post" action="{{ url_for('customer_request_create') }}" class="stack-form">
+            {{ csrf_field() }}
+            <label>Customer name <input name="customer_name" required maxlength="100" autocomplete="off"></label>
+            <label>Phone (optional) <input name="customer_phone" type="tel" maxlength="40" autocomplete="off"></label>
+            <label>What they asked for <input name="item_name" required maxlength="100" list="request-items" autocomplete="off" placeholder="e.g. Cabbage seedlings, Tomato Rio Grande seed"></label>
+            <datalist id="request-items">{% for name in items %}<option value="{{ name }}">{% endfor %}</datalist>
+            <label>Quantity (optional) <input name="quantity" type="number" min="1" step="1"></label>
+            <label>Follow up on <input name="follow_up_on" type="date" min="{{ today }}" required></label>
+            <small class="muted">The admins are reminded that day.</small>
+            <label>Note (optional) <input name="note" maxlength="300" placeholder="e.g. needs them before the rains"></label>
+            <button class="btn success wide">Log request</button>
+            <p class="center"><button type="button" class="btn ghost" data-modal-close>Cancel</button></p>
+        </form>
+    </div>
+</dialog>
+{% endif %}
+{% endblock %}

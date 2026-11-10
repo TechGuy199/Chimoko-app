@@ -245,7 +245,7 @@
     if (!(document.body && document.body.dataset.offlineApp)) {
         try {
             const root = document.documentElement;
-            localStorage.setItem("ms-look", JSON.stringify({ theme: root.dataset.theme, accent: root.dataset.accent || "", size: root.dataset.size || "normal",
+            localStorage.setItem("ms-look", JSON.stringify({ theme: root.dataset.theme, accent: root.dataset.accent || "", size: root.dataset.size || "normal", font: root.dataset.font || "inter", spacing: root.dataset.spacing || "normal",
                 glass: Math.round(parseFloat(getComputedStyle(root).getPropertyValue("--glass")) * 100) || 50 }));
         } catch (e) { /* the offline screens use the default look */ }
     }

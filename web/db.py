@@ -270,6 +270,20 @@ SCHEMA = [
         id {pk}, business_id INTEGER NOT NULL, item_key TEXT NOT NULL, item_name TEXT NOT NULL, cover_days INTEGER,
         never_suggest INTEGER NOT NULL DEFAULT 0, supplier TEXT DEFAULT '', set_by TEXT, set_at TEXT, UNIQUE (business_id, item_key)
     )""",
+    # A customer asking for something we do not have: never stocked, out of stock, or not planted. item_code is set when it is an item
+    # we know (inventory, the POS or a planted plant), so its stock can be shown. quantity NULL = not said. follow_up_on is the day an
+    # admin is reminded to follow it up, reminded_at when that alert went (cleared when the day changes). status is open, fulfilled or
+    # dropped; a request is closed, never deleted. source is 'page' or 'assistant'.
+    """CREATE TABLE IF NOT EXISTS customer_requests (
+        id {pk}, business_id INTEGER NOT NULL, customer_name TEXT NOT NULL, customer_phone TEXT DEFAULT '', item_name TEXT NOT NULL,
+        item_code TEXT DEFAULT '', quantity INTEGER, note TEXT DEFAULT '', follow_up_on TEXT NOT NULL, reminded_at TEXT,
+        status TEXT NOT NULL DEFAULT 'open', outcome TEXT DEFAULT '', closed_by TEXT, closed_at TEXT, source TEXT NOT NULL DEFAULT 'page',
+        created_by TEXT, created_at TEXT
+    )""",
+    # What happened to a request, oldest first: logged, a follow-up moved, a note, the item arrived (bought or planted), closed or reopened
+    """CREATE TABLE IF NOT EXISTS customer_request_log (
+        id {pk}, business_id INTEGER NOT NULL, request_id INTEGER NOT NULL, kind TEXT NOT NULL, detail TEXT DEFAULT '', created_by TEXT, created_at TEXT
+    )""",
     # Which version of the start-up work (the schema above, its migrations and the app's one-off repairs) has been run
     "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRIMARY KEY, value TEXT)",
 ]
@@ -298,6 +312,8 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS invoices_by_delivery ON invoices (business_id, deliver_on)",
     "CREATE INDEX IF NOT EXISTS assistant_messages_by_user ON assistant_messages (business_id, user_id, id)",
     "CREATE INDEX IF NOT EXISTS assistant_actions_by_user ON assistant_actions (business_id, user_id, status)",
+    "CREATE INDEX IF NOT EXISTS customer_requests_by_status ON customer_requests (business_id, status, follow_up_on)",
+    "CREATE INDEX IF NOT EXISTS customer_request_log_by_request ON customer_request_log (business_id, request_id)",
     "CREATE INDEX IF NOT EXISTS planting_trays_by_planting ON planting_trays (business_id, planting_id)",
     "CREATE INDEX IF NOT EXISTS planting_trays_by_employee ON planting_trays (business_id, employee_id, paid_payslip_id)",
     "CREATE INDEX IF NOT EXISTS assistant_memory_by_business ON assistant_memory (business_id, user_id)",
@@ -462,6 +478,9 @@ def init_schema():
         # And their accent colour (NULL = the theme's own) and text size (NULL = normal)
         add_column(db, "users", "accent", "TEXT")
         add_column(db, "users", "text_size", "TEXT")
+        # The typeface and how much air the text gets (NULL = Inter, normal)
+        add_column(db, "users", "font", "TEXT")
+        add_column(db, "users", "text_spacing", "TEXT")
         # Alert settings per business: the WhatsApp number and which alerts are switched on (NULL counts as on)
         # How many seeds one pack holds (seed items only); stock of a seed item is counted in packs
         add_column(db, "products", "seeds_per_pack", "INTEGER")
@@ -520,6 +539,8 @@ def init_schema():
         add_column(db, "users", "assistant_voice", "TEXT")
         # A sale made offline keeps the number it had on the device (OFF-...) until it was uploaded and given its invoice number
         add_column(db, "invoices", "offline_ref", "TEXT")
+        # The alert to follow up a customer's request (NULL counts as on)
+        add_column(db, "businesses", "alert_requests", "INTEGER")
         # Restock advice: the days of stock to keep (NULL = 30). The evening brief (NULL counts as on), its WhatsApp copy to the alert
         # number (NULL counts as on), and the day that copy last went, so it goes once a day
         add_column(db, "businesses", "stock_cover_days", "INTEGER")

@@ -13,6 +13,8 @@
             if (look.theme) document.documentElement.dataset.theme = look.theme;
             if (look.accent !== undefined) document.documentElement.dataset.accent = look.accent || "";
             if (look.size) document.documentElement.dataset.size = look.size;
+            if (look.font) document.documentElement.dataset.font = look.font;
+            if (look.spacing) document.documentElement.dataset.spacing = look.spacing;
             if (look.glass !== undefined) document.documentElement.style.setProperty("--glass", look.glass / 100);
         } catch (e) { /* the default look */ }
     </script>

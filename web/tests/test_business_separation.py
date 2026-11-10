@@ -40,6 +40,7 @@ PARAM_TABLES = {
     "pos_id": "pos_products", "po_id": "preorders", "request_id": "permission_requests", "notification_id": "notifications",
     "payment_id": "supplier_payments", "category_id": "categories", "dept_id": "departments", "plot_id": "plots",
     "op_id": "users", "admin_id": "users", "action_id": "assistant_actions", "memory_id": "assistant_memory", "pref_id": "stock_preferences",
+    "cr_id": "customer_requests",
 }
 # "entry_id" means a different table on different pages
 ENTRY_TABLES = {"assign_account_entry": "cashbook", "delete_account_entry": "cashbook", "delete_activity": "activities"}
@@ -201,6 +202,11 @@ class BusinessSeparation(unittest.TestCase):
         x.insert("INSERT INTO assistant_memory (business_id, user_id, note, created_by, created_at) VALUES (?, NULL, 'Alpha secret note', 'alphaowner', ?)", (biz, stamp))
         x.insert("""INSERT INTO stock_preferences (business_id, item_key, item_name, cover_days, never_suggest, supplier, set_by, set_at)
                     VALUES (?, 'code:ALPHA', 'Alpha secret note', 40, 0, '', 'alphaowner', ?)""", (biz, stamp))
+        # A customer's request: Beta must not read, follow up, note or close it
+        request_no = x.insert("""INSERT INTO customer_requests (business_id, customer_name, item_name, follow_up_on, status, note, created_by, created_at)
+                                 VALUES (?, 'Alpha secret note', 'Alpha secret note', '2999-01-01', 'open', 'Alpha secret note', 'alphaowner', ?)""", (biz, stamp))
+        x.insert("INSERT INTO customer_request_log (business_id, request_id, kind, detail, created_by, created_at) VALUES (?, ?, 'note', 'Alpha secret note', 'alphaowner', ?)",
+                 (biz, request_no, stamp))
         # Who planted how many trays of a planting, and what Alpha pays for a tray: Beta must not read, change or pay either
         x.insert("""INSERT INTO planting_trays (business_id, planting_id, employee_id, employee_name, trays, created_by, created_at)
                     VALUES (?, ?, ?, ?, 12, 'alphaowner', ?)""", (biz, planting["id"], employee["id"], employee["full_name"], stamp))
@@ -425,7 +431,7 @@ class BusinessSeparation(unittest.TestCase):
         try:
             # The words of every area, so every look-up is offered (a question gets only the tools its words call for)
             response = self.beta.post("/assistant/chat", data={"csrf": csrf_of(self.beta),
-                                                               "message": "look at everything: sales, stock, plants, money, staff, records, alerts, remember today"})
+                                                               "message": "look at everything: sales, stock, plants, money, staff, records, alerts, remember today, customer requests"})
         finally:
             stand_in.ask = None
         self.assertEqual(response.status_code, 200, response.get_data(as_text=True))

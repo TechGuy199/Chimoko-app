@@ -242,8 +242,8 @@
     <div class="stat"><span>Money out</span><strong class="warn">{{ summary.out|money }}</strong><small>in this period</small></div>
     <div class="stat"><span>Net cash flow</span><strong class="{{ 'ok' if summary.net >= 0 else 'warn' }}">{{ summary.net|signed }}</strong>
         <small>{{ 'more came in than went out' if summary.net >= 0 else 'more went out than came in' }}</small></div>
-    <div class="stat"><span>Customers owe us</span><strong class="gold">{{ owed_to_us|money }}</strong><small>on unpaid invoices, today</small></div>
-    <div class="stat"><span>We owe suppliers</span><strong class="warn">{{ we_owe|money }}</strong><small>on unpaid purchases, today</small></div>
+    <a class="stat" href="{{ url_for('customers') }}"><span>Customers owe us</span><strong class="gold">{{ owed_to_us|money }}</strong><small>on unpaid invoices, today</small></a>
+    <a class="stat" href="{{ url_for('suppliers') }}"><span>We owe suppliers</span><strong class="warn">{{ we_owe|money }}</strong><small>on unpaid purchases, today</small></a>
 </div>
 
 <div class="accounts-grid">

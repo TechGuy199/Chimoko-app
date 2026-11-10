@@ -820,6 +820,9 @@ def due_lines(a, when):
         due.append(plural(len(pre), "pre-order", "pre-orders") + f" to collect by {short_day(a['preorders_to_collect_by']['until'])}")
     if due:
         lines.append(("Due today" if when == "today" else f"Due by {when}") + ": " + ", ".join(due))
+    follow = a.get("customer_requests_to_follow_up") or []
+    if follow:
+        due.append(plural(len(follow), "customer request", "customer requests") + " to follow up")
     ready = a.get("batches_ready") or []
     if ready:
         lines.append("Ready: " + ", ".join(f"{b['batch']} ({b['free']} free)" for b in ready[:3]))
@@ -851,6 +854,10 @@ def stock_lines(ctx, s):
         "price_up": lambda w: f"{w['item']} cost up {w['up_pct']}%",
         "not_selling": lambda w: f"{w['item']} not selling",
     }
+    asked = [x for x in (s.get("customers_asked_for", {}).get("items") or []) if not x["have_now"]][:3]
+    if asked:
+        lines.append("Customers asked for: " + ", ".join(
+            x["item"] + " (" + plural(x["customers"], "customer", "customers") + (f", {x['quantity']:,}" if x.get("quantity") else "") + ")" for x in asked))
     watch = (s.get("watch", {}).get("items") or [])[:4]
     if watch:
         lines.append("Watch: " + ", ".join(words[w["type"]](w) for w in watch))
@@ -918,7 +925,7 @@ def speak(db, user, text, voice=None):
 # Only these pages may be reached by a confirmed change (the shape of each address is checked again when it is sent)
 ALLOWED_PATHS = re.compile(
     r"^/(checkout|planting|planting/\d+/preorder|invoices/\d+/(payment|delivered|collected|deliver-day|collect-day)|inventory/purchase"
-    r"|inventory/\d+/transfer|suppliers/\d+/payment|accounts/record|hr/payslips/new)$"
+    r"|inventory/\d+/transfer|suppliers/\d+/payment|accounts/record|hr/payslips/new|customer-requests|customer-requests/\d+/(follow-up|close))$"
 )
 
 

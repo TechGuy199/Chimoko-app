@@ -1,18 +1,23 @@
 <!doctype html>
-<html lang="en" data-theme="{{ look.theme }}" data-accent="{{ look.accent }}" data-size="{{ look.size }}" style="--glass: {{ look.glass / 100 }}">
+<html lang="en" data-theme="{{ look.theme }}" data-accent="{{ look.accent }}" data-size="{{ look.size }}" data-font="{{ look.font }}" data-spacing="{{ look.spacing }}" style="--glass: {{ look.glass / 100 }}">
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <title>{% block title %}{% endblock %}{{ user.business_name if user else "MS-POS" }}</title>
     <link rel="stylesheet" href="{{ asset('styles.css') }}">
-    {# Phones get their own look on top: a bottom tab bar, bigger touch targets and the Inter typeface #}
+    {# The person's typeface (Appearance), loaded without holding up the page (media="print" until it arrives): the device's
+       own font shows meanwhile, and offline. "This device's own" loads nothing. #}
+    {% if look.font in font_files %}
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    {# Loaded without holding up the page (media="print" until it arrives): the system font shows meanwhile, and offline #}
-    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" media="print" onload="this.media='(max-width: 760px)'">
+    <link rel="stylesheet" id="font-sheet" href="https://fonts.googleapis.com/css2?family={{ font_files[look.font] }}&display=swap" media="print" onload="this.media='all'">
+    {% endif %}
+    {# Phones get their own look on top: a bottom tab bar and bigger touch targets #}
     <link rel="stylesheet" href="{{ asset('mobile.css') }}" media="(max-width: 760px)">
     {# The launch screen covers the page from its first paint, so it runs here rather than at the end of the body #}
     <script src="{{ asset('splash.js') }}"></script>
+    {# The navigation bar folded to its icons, if this device left it so: set before the first paint, so nothing jumps #}
+    <script>try { if (localStorage.getItem("ms-side") === "collapsed") document.documentElement.classList.add("side-collapsed"); } catch (e) { /* shown in full */ }</script>
 
     {# Installable app (PWA): lets Windows, Android and desktop Chrome/Edge offer "Install" so it opens like its own app #}
     {# Fetched signed in (use-credentials), so the installed app is named after this business #}
@@ -27,46 +32,79 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="apple-mobile-web-app-title" content="{{ user.business_name if user else 'MS-POS' }}">
 </head>
-<body>
+<body class="{{ 'has-side' if user }}">
 {% if user %}
-{# Every page of the app, grouped for the menu: (label, endpoint, endpoints that count as "here", admin only) #}
+{# Every page of the app, grouped for the menu: (label, endpoint, endpoints that count as "here", admin only, its icon's outline) #}
 {% set nav = [
+    ('Home', [
+        ('Overview', 'overview', ['overview'], false, 'M4 4h7v7H4zM13 4h7v4h-7zM13 10h7v10h-7zM4 13h7v7H4z'),
+    ]),
     ('Sell', [
-        ('Sales & POS', 'pos', ['pos'], false),
-        ('Sales & Invoices', 'history', ['history', 'invoice', 'item_sales'], false),
-        ('Deliveries', 'deliveries', ['deliveries', 'delivery_list'], false),
-        ('Customers', 'customers', ['customers', 'customer_statement', 'customer_duplicates'], true),
+        ('Sales & POS', 'pos', ['pos'], false, 'M3 4h2l2.4 10.2a1 1 0 0 0 1 .8h8.9a1 1 0 0 0 1-.8L20 8H6.2M9 20a1 1 0 1 0 0-2 1 1 0 0 0 0 2Zm9 0a1 1 0 1 0 0-2 1 1 0 0 0 0 2Z'),
+        ('Sales & Invoices', 'history', ['history', 'invoice', 'item_sales'], false, 'M7 3h10a1 1 0 0 1 1 1v17l-3-2-3 2-3-2-3 2V4a1 1 0 0 1 1-1Zm2 5h6m-6 4h6m-6 4h3'),
+        ('Deliveries', 'deliveries', ['deliveries', 'delivery_list'], false, 'M3 7h11v9H3zM14 10h4l3 3v3h-7M7.5 19a2 2 0 1 0 0-4 2 2 0 0 0 0 4Zm9.5 0a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z'),
+        ('Customer Requests', 'customer_requests', ['customer_requests', 'customer_request'], false, 'M4 5h16v11H9l-5 4V5Zm8 3v5m-2.5-2.5h5'),
+        ('Customers', 'customers', ['customers', 'customer_statement', 'customer_duplicates'], true, 'M9 11a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Zm-6 9a6 6 0 0 1 12 0M16 4.5a3.5 3.5 0 0 1 0 6.5m2 9a6 6 0 0 0-3-5.2'),
     ]),
     ('Stock', [
-        ('Inventory', 'inventory', ['inventory', 'item', 'inventory_new', 'categories_page'], false),
-        ('Inventory Analysis', 'inventory_analysis', ['inventory_analysis'], false),
-        ('Planting Records', 'planting_list', ['planting_list', 'planting_new', 'planting_detail', 'up_next'], false),
-        ('Procurements', 'procurements', ['procurements', 'procurement', 'procurement_new'], false),
-        ('Suppliers', 'suppliers', ['suppliers', 'supplier_statement', 'supplier_duplicates'], true),
-        ('Import', 'import_data', ['import_data'], true),
+        ('Inventory', 'inventory', ['inventory', 'item', 'inventory_new', 'categories_page'], false, 'M4 7.5 12 3l8 4.5v9L12 21l-8-4.5v-9Zm0 0 8 4.5m0 0 8-4.5M12 12v9'),
+        ('Inventory Analysis', 'inventory_analysis', ['inventory_analysis'], false, 'M12 3v9h9a9 9 0 1 1-9-9Zm3 .5A9 9 0 0 1 20.5 9H15V3.5Z'),
+        ('Planting Records', 'planting_list', ['planting_list', 'planting_new', 'planting_detail', 'up_next'], false, 'M12 21v-9m0 0c0-4-3-6-7-6 0 4 3 6 7 6Zm0 3c0-3 2.5-5 7-5 0 3.5-3 5-7 5Z'),
+        ('Procurements', 'procurements', ['procurements', 'procurement', 'procurement_new'], false, 'M9 4h6v3H9zM7 5.5H5V21h14V5.5h-2M9 12h6m-6 4h4'),
+        ('Suppliers', 'suppliers', ['suppliers', 'supplier_statement', 'supplier_duplicates'], true, 'M4 9l1.5-5h13L20 9M4 9v11h16V9M4 9h16M9 20v-6h6v6'),
+        ('Import', 'import_data', ['import_data'], true, 'M12 16V4m0 0-4 4m4-4 4 4M4 16v4h16v-4'),
     ]),
     ('Insights', [
-        ('Accounts', 'accounts', ['accounts'], true),
-        ('Reports', 'reports', ['reports', 'report_department'], false),
-        ('Deletion Records', 'deleted_invoices', ['deleted_invoices'], true),
-        ('Stock Adjustments', 'stock_adjustments', ['stock_adjustments'], true),
+        ('Accounts', 'accounts', ['accounts'], true, 'M3 7h16a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Zm0 0 12-3v3m2 6.5h.01'),
+        ('Reports', 'reports', ['reports', 'report_department'], false, 'M4 20h16M7 16v-5m5 5V7m5 9v-3'),
+        ('Deletion Records', 'deleted_invoices', ['deleted_invoices'], true, 'M5 7h14M10 7V4h4v3M7 7l1 13h8l1-13M10 11v6m4-6v6'),
+        ('Stock Adjustments', 'stock_adjustments', ['stock_adjustments'], true, 'M5 7h8m4 0h2M5 17h2m4 0h8M15 5v4M9 15v4'),
     ]),
     ('People', [
-        ('Daily Activities', 'activities', ['activities', 'plot_day'], false),
-        ('HR & Payroll', 'hr', ['hr', 'hr_settings', 'new_payslip', 'payslips', 'employee_statements', 'employee_statement'], true),
-        ('Operators & Admins', 'operators', ['operators'], true),
-        ('Permission Requests', 'permission_requests', ['permission_requests'], true),
+        ('Daily Activities', 'activities', ['activities', 'plot_day'], false, 'M5 6h14v14H5zM5 10h14M9 4v4m6-4v4m-5.5 7 2 2 3.5-4'),
+        ('HR & Payroll', 'hr', ['hr', 'hr_settings', 'new_payslip', 'payslips', 'employee_statements', 'employee_statement'], true, 'M4 6h16v13H4zM9 12a2 2 0 1 0 0-4 2 2 0 0 0 0 4Zm-3 4a3 3 0 0 1 6 0m3-6h3m-3 3h3'),
+        ('Operators & Admins', 'operators', ['operators'], true, 'M12 3l7 3v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6l7-3Zm0 9a2 2 0 1 0 0-4 2 2 0 0 0 0 4Zm-3.5 4a3.5 3.5 0 0 1 7 0'),
+        ('Permission Requests', 'permission_requests', ['permission_requests'], true, 'M7 11V8a5 5 0 0 1 10 0v3M5 11h14v9H5zM12 15v2'),
     ]),
     ('Business', [
-        ('Settings', 'settings', ['settings', 'reset_page'], true),
-        ('Backups', 'backup_page', ['backup_page'], true),
+        ('Settings', 'settings', ['settings', 'reset_page'], true, 'M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7ZM12 3v2.5m0 13V21M3 12h2.5m13 0H21M5.6 5.6l1.8 1.8m9.2 9.2 1.8 1.8m0-12.8-1.8 1.8M7.4 16.6l-1.8 1.8'),
+        ('Backups', 'backup_page', ['backup_page'], true, 'M5 6c0-1.7 3.1-3 7-3s7 1.3 7 3-3.1 3-7 3-7-1.3-7-3Zm0 0v12c0 1.700 3.1 3 7 3s7-1.3 7-3V6M5 12c0 1.7 3.1 3 7 3s7-1.3 7-3'),
     ]),
 ] %}
 {% set here = namespace(label='') %}
-{% for group, links in nav %}{% for label, endpoint, active, admin_only in links if request.endpoint in active %}{% set here.label = label %}{% endfor %}{% endfor %}
+{% for group, links in nav %}{% for label, endpoint, active, admin_only, icon in links if request.endpoint in active %}{% set here.label = label %}{% endfor %}{% endfor %}
+{% if request.endpoint == 'appearance' %}{% set here.label = 'My Account & Appearance' %}{% elif request.endpoint == 'notifications' %}{% set here.label = 'Alerts' %}{% endif %}
+
+{# Big screens: the navigation bar down the left. It folds to its icons with the button at its foot. #}
+<aside class="sidebar no-print" id="app-sidebar" aria-label="Main">
+    <a class="side-brand" href="{{ url_for('overview') }}" title="{{ user.business_name }}">
+        <span class="side-mark" aria-hidden="true">{{ user.business_name[:1]|upper }}</span><span class="side-name">{{ user.business_name }}</span>
+    </a>
+    <nav class="side-nav">
+        {% for group, links in nav %}
+        {% set shown = [] %}
+        {% for link in links if user.role == 'admin' or not link[3] %}{% set _ = shown.append(link) %}{% endfor %}
+        {% if shown %}
+        <div class="side-group">
+            <span class="side-heading">{{ group }}</span>
+            {% for label, endpoint, active, admin_only, icon in shown %}
+            <a class="side-link {{ 'active' if request.endpoint in active }}" href="{{ url_for(endpoint) }}" title="{{ label }}" {{ 'aria-current="page"'|safe if request.endpoint in active }}>
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="{{ icon }}"/></svg><span>{{ label }}</span>
+            </a>
+            {% endfor %}
+        </div>
+        {% endif %}
+        {% endfor %}
+    </nav>
+    <div class="side-foot">
+        <button type="button" class="side-link side-toggle" data-side-toggle title="Fold or unfold the navigation bar" aria-label="Fold or unfold the navigation bar">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4zM9 5v14M15.500 9.500 13 12l2.500 2.500"/></svg><span>Fold menu</span>
+        </button>
+    </div>
+</aside>
 
 <header class="topbar no-print" id="app-header">
-    <a class="brand" href="{{ url_for('pos') }}">{{ user.business_name }}</a>
+    <a class="brand" href="{{ url_for('overview') }}">{{ user.business_name }}</a>
     {% if here.label %}<span class="here">{{ here.label }}</span>{% endif %}
     <span class="spacer"></span>
 
@@ -88,7 +126,7 @@
             {% if shown %}
             <div class="menu-group">
                 <span class="menu-heading">{{ group }}</span>
-                {% for label, endpoint, active, admin_only in shown %}
+                {% for label, endpoint, active, admin_only, icon in shown %}
                 <a class="menu-item {{ 'active' if request.endpoint in active }}" href="{{ url_for(endpoint) }}">{{ label }}</a>
                 {% endfor %}
             </div>
@@ -172,6 +210,12 @@
         });
         document.addEventListener("keydown", function (e) {
             if (e.key === "Escape") closeAll(null);
+        });
+        // The navigation bar's fold button: remembered on this device
+        document.addEventListener("click", function (e) {
+            if (!e.target.closest("[data-side-toggle]")) return;
+            const folded = document.documentElement.classList.toggle("side-collapsed");
+            try { localStorage.setItem("ms-side", folded ? "collapsed" : "open"); } catch (err) { /* not remembered */ }
         });
     })();
 </script>

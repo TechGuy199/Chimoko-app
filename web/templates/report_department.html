@@ -7,8 +7,8 @@
 
 <h2>Money</h2>
 <div class="stats">
-    <div class="stat"><span>In: sales</span><strong>{{ totals.sales|money }}</strong><small>Received: {{ totals.received|money }} &middot; Owed: {{ (totals.sales - totals.received)|money }}</small></div>
-    <div class="stat"><span>Out: purchases</span><strong>{{ totals.purchases|money }}</strong><small>Paid: {{ totals.paid|money }} &middot; Owed: {{ (totals.purchases - totals.paid)|money }}</small></div>
+    <a class="stat" href="{{ url_for('history') }}"><span>In: sales</span><strong>{{ totals.sales|money }}</strong><small>Received: {{ totals.received|money }} &middot; Owed: {{ (totals.sales - totals.received)|money }}</small></a>
+    <a class="stat" href="{{ url_for('procurements') }}"><span>Out: purchases</span><strong>{{ totals.purchases|money }}</strong><small>Paid: {{ totals.paid|money }} &middot; Owed: {{ (totals.purchases - totals.paid)|money }}</small></a>
     <div class="stat"><span>Sales minus purchases</span><strong>{{ (totals.sales - totals.purchases)|money }}</strong><small>Cash received minus paid: {{ (totals.received - totals.paid)|money }}</small></div>
 </div>
 <h2>Stock</h2>

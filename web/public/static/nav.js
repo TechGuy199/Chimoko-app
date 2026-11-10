@@ -79,14 +79,19 @@
         if (!doc.getElementById("page-main")) return false;   // not one of our own pages (e.g. a bare error page)
         if (!!doc.getElementById("app-header") !== !!document.getElementById("app-header")) return "reload";
         document.title = doc.title;
-        ["data-theme", "data-accent", "data-size"].forEach(function (name) {
+        ["data-theme", "data-accent", "data-size", "data-font", "data-spacing"].forEach(function (name) {
             const value = doc.documentElement.getAttribute(name);
             if (value !== null) document.documentElement.setAttribute(name, value);
         });
         const lookStyle = doc.documentElement.getAttribute("style");
         if (lookStyle) document.documentElement.setAttribute("style", lookStyle);
+        // The navigation bar keeps its place: it is drawn again with the page, so where it was scrolled to is put back
+        const sideNav = document.querySelector(".side-nav");
+        const sideAt = sideNav ? sideNav.scrollTop : 0;
         document.body.innerHTML = doc.body.innerHTML;
         document.body.className = doc.body.className;
+        const newSide = document.querySelector(".side-nav");
+        if (newSide && sideAt) newSide.scrollTop = sideAt;
         // The page's own scripts: those in its content, and the ones it lists in #page-scripts. The app-wide ones outside
         // these two are loaded once and keep running.
         runScripts(document.getElementById("page-main"));

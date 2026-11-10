@@ -556,7 +556,11 @@ GUIDE = {
     "accounts": "Accounts (admins): every movement of money in and out, balances for cash, bank and mobile money (counted by hand, then kept up to date), who owes us and whom we owe, profit and the financial standing.",
     "reports": "Reports: sales, purchases and profit by department and period.",
     "staff": "Staff (admins): employees, payroll, payslips with NAPSA and NHIMA, and statements. Daily Activities records the work done in each plot. A casual worker can be paid for the trays they planted: set the pay for a tray under HR > Settings, then Compute Payslip.",
-    "alerts": "Alerts come in the app and optionally by WhatsApp (Settings): low stock, pre-orders and collections due, deliveries due, and requests for admin permission.",
+    "alerts": "Alerts come in the app and optionally by WhatsApp (Settings): low stock, pre-orders and collections due, deliveries due, customer requests to follow up, "
+              "and requests for admin permission.",
+    "requests": "Customer Requests (Sell menu): log what a customer asked for that we do not have (never stocked, out of stock or not planted), with their phone, the quantity "
+                "and the day to follow it up. The admins are alerted that day, and when the item is bought or planted. Open a request to follow it up again, add a note, or "
+                "close it as fulfilled or dropped. Most asked for items count in the restock advice. The assistant can log one too.",
     "assistant": "The assistant (this chat) can look things up, explain the app, say what needs attention today (the sun button), what to restock and what to watch out for, and plan plantings. "
                  "It prepares sales, pre-orders, payments, delivery changes, purchases, plantings with trays, tray payslips, stock transfers, supplier payments and money entries for you to confirm; "
                  "nothing is done until you press Confirm. The camera button sends a photo or PDF: a supplier's receipt becomes a purchase, a tally of trays a planting. It writes customer "
@@ -891,6 +895,113 @@ def prepare_preorder(ctx, args):
         rows.append(["Collect on", day])
     title = f"Pre-order {qty} × {f['label']} for {name}"
     ctx.propose("preorder", "sell", title, rows, f"/planting/{f['id']}/preorder", form)
+    return shown(title, rows)
+
+
+# ================= Customer requests: things customers asked for that we do not have =================
+@tool("Customer requests: items customers asked for that we do not have, with the follow-up day and what we have of it now.",
+      {"status": E("due", "open", "closed", "all"), "item": S(), "customer": S(), "limit": LIMIT})
+def customer_requests(ctx, args):
+    db, biz = ctx.db, ctx.biz
+    status, item, who = choice(args, "status", ("due", "open", "closed", "all"), "open"), text_of(args, "item", 60), text_of(args, "customer", 60)
+    sql, params = "", []
+    if status in ("due", "open"):
+        sql += " AND status='open'"
+    elif status == "closed":
+        sql += " AND status<>'open'"
+    if status == "due":
+        sql += " AND follow_up_on <= ?"
+        params.append(ctx.today)
+    if who:
+        sql += " AND (LOWER(customer_name) LIKE ? OR customer_phone LIKE ?)"
+        params += [like(who), like(who)]
+    rows = db.all(f"SELECT * FROM customer_requests WHERE business_id=?{sql} ORDER BY CASE WHEN status='open' THEN 0 ELSE 1 END, follow_up_on, id DESC LIMIT 300",
+                  [biz] + params)
+    if item:
+        rows = [r for r in rows if H.request_fits(item, r["item_name"]) or H.request_fits(r["item_name"], item)]
+    rows = H.requests_with_stock(db, biz, rows)
+    ctx.source("Customer requests", H.url_for("customer_requests", show="due" if status == "due" else "open"))
+    return {
+        "today": ctx.today, "matching": len(rows), "requests": [
+            {"no": r["id"], "customer": clip(r["customer_name"], 60), "phone": r["customer_phone"] or "", "item": clip(r["item_name"], 60), "quantity": r["quantity"],
+             "follow_up_on": r["follow_up_on"], "status": r["status"], "logged": (r["created_at"] or "")[:10], "note": clip(r["note"], 80),
+             **({"in_stock": r["in_stock"]} if r["in_stock"] else {}), **({"seedlings_free": r["growing"], "ready": r["growing_ready"]} if r["growing"] else {})}
+            for r in rows[:whole(args, "limit", 12)]
+        ],
+        "most_asked_for": [{"item": clip(t["item"], 60), "customers": t["customers"], "quantity": t["quantity"] or None}
+                           for t in H.most_requested([r for r in rows if r["status"] == "open"])[:5]],
+    }
+
+
+@tool("Prepare a customer request (an item a customer wants that we do not have) for the person to confirm. Ask for the follow-up day if not given.",
+      {"customer_name": S(), "customer_phone": S(), "item": S("What they want"), "quantity": N("Leave out if not said"), "follow_up_on": S("YYYY-MM-DD"), "note": S()},
+      required=["customer_name", "item", "follow_up_on"], perm="sell")
+def prepare_customer_request(ctx, args):
+    name, wanted = text_of(args, "customer_name", 100), text_of(args, "item", 100)
+    if not name:
+        raise ToolError("Ask for the customer's name.")
+    if not wanted:
+        raise ToolError("Ask what the customer wants.")
+    day = H.day_or_none(str(args.get("follow_up_on") or ""))
+    if day is None or day < ctx.today:
+        raise ToolError(f"Ask the person which day to follow it up: {ctx.today} or later (as YYYY-MM-DD).")
+    item_name, code = H.known_item(ctx.db, ctx.biz, wanted)
+    form = {"customer_name": name, "customer_phone": text_of(args, "customer_phone", 40), "item_name": item_name, "follow_up_on": day,
+            "note": text_of(args, "note", 300), "source": "assistant"}
+    rows = [["Customer", name]] + ([["Phone", form["customer_phone"]]] if form["customer_phone"] else []) + [["Wants", item_name]]
+    if args.get("quantity") not in (None, ""):
+        try:
+            qty = int(args.get("quantity"))
+        except (TypeError, ValueError):
+            qty = 0
+        if qty < 1:
+            raise ToolError("The quantity must be a whole number above zero, or left out.")
+        form["quantity"] = qty
+        rows.append(["Quantity", f"{qty:,}"])
+    rows.append(["Follow up on", day])
+    if form["note"]:
+        rows.append(["Note", form["note"]])
+    have = H.requests_with_stock(ctx.db, ctx.biz, [{"item_name": item_name, "item_code": code}])[0]
+    if have["have_now"]:
+        rows.append(["We have now", ", ".join(x for x in (f"{have['in_stock']:,} in stock" if have["in_stock"] else "",
+                                                           f"{have['growing']:,} seedlings free, ready {have['growing_ready']}" if have["growing"] else "") if x)])
+    title = f"Log a request: {name} wants " + (f"{form['quantity']:,} x " if "quantity" in form else "") + item_name
+    ctx.propose("customer_request", "sell", title, rows, "/customer-requests", form)
+    return shown(title, rows)
+
+
+@tool("Prepare a change to an open customer request for the person to confirm: follow it up on another day, or close it as fulfilled or dropped.",
+      {"request_no": N("From customer_requests"), "change": E("follow_up", "fulfilled", "dropped"), "day": S("New follow-up day, YYYY-MM-DD"), "note": S()},
+      required=["request_no", "change"], perm="sell")
+def prepare_request_update(ctx, args):
+    try:
+        number = int(args.get("request_no"))
+    except (TypeError, ValueError):
+        number = 0
+    r = ctx.db.one("SELECT * FROM customer_requests WHERE id=? AND business_id=?", (number, ctx.biz))
+    if r is None:
+        raise ToolError("There is no such request: look it up with customer_requests first.")
+    if r["status"] != "open":
+        raise ToolError(f"That request is already {r['status']}.")
+    change = choice(args, "change", ("follow_up", "fulfilled", "dropped"), "")
+    note = text_of(args, "note", 200)
+    rows = [["Customer", clip(r["customer_name"], 60)], ["Wants", H.request_label(r)]]
+    if change == "follow_up":
+        day = H.day_or_none(str(args.get("day") or ""))
+        if day is None or day < ctx.today:
+            raise ToolError(f"Ask for the new follow-up day: {ctx.today} or later.")
+        form, path = {"follow_up_on": day, "note": note}, f"/customer-requests/{r['id']}/follow-up"
+        rows.append(["Follow up on", f"{day} (was {r['follow_up_on']})"])
+        title = f"Follow up {r['customer_name']}'s request on {day}"
+    elif change in ("fulfilled", "dropped"):
+        form, path = {"outcome": change, "note": note}, f"/customer-requests/{r['id']}/close"
+        rows.append(["Close as", "Fulfilled" if change == "fulfilled" else "Dropped"])
+        title = f"Mark {r['customer_name']}'s request {change}"
+    else:
+        raise ToolError("Say the change: follow_up (with a day), fulfilled or dropped.")
+    if note:
+        rows.append(["Note", note])
+    ctx.propose("request_update", "sell", title, rows, path, form)
     return shown(title, rows)
 
 
@@ -1326,12 +1437,16 @@ def attention_today(ctx, args):
     coming = [f for f in growing if f["stage"] == "growing" and f["days"] <= H.RELEASE_DAYS]
     threshold = user["low_stock_threshold"]
     low = db.all("SELECT name, quantity FROM pos_products WHERE business_id=? AND quantity < ? ORDER BY quantity, name LIMIT 8", (biz, threshold))
+    follow = db.all("SELECT id, customer_name, item_name, quantity, follow_up_on FROM customer_requests WHERE business_id=? AND status='open' AND follow_up_on <= ? "
+                    "ORDER BY follow_up_on, id LIMIT 8", (biz, today))
     out = {
         "due_by": today, "deliveries_due": handovers("deliver_on", "delivered_at"), "collections_due": handovers("collect_on", "collected_at"),
         "preorders_to_collect_by": {"until": soon, "list": [{"customer": clip(r["customer_name"], 50), "qty": r["qty"], "plant": clip(r["plant"], 50), "on": r["collect_on"]} for r in collect]},
         "batches_ready": [{"batch": f["label"], "free": f["available"], "preordered": f["pending"]} for f in ready[:8]],
         "batches_ready_within_a_week": [{"batch": f["label"], "in_days": f["days"]} for f in coming[:8]],
         "pos_low_stock": {"under": threshold, "items": [{"name": clip(r["name"], 50), "left": r["quantity"]} for r in low]},
+        "customer_requests_to_follow_up": [{"no": r["id"], "customer": clip(r["customer_name"], 50), "item": H.request_label(r), "on": r["follow_up_on"],
+                                            "overdue": r["follow_up_on"] < ctx.today} for r in follow],
     }
     if user["role"] == "admin":
         owed = db.one(f"SELECT COUNT(*) AS n, COALESCE(SUM(i.balance_due), 0) AS owed FROM invoices i WHERE i.business_id=? AND {SALE} AND i.balance_due > 0.005", (biz,))
@@ -1671,10 +1786,21 @@ def stock_report(ctx, focus="all", only="", limit=6):
     move.sort(key=lambda x: x["pos_days_left"])
     kinds = ("expired", "overbooked", "below_cost", "expiring", "losses", "price_up", "thin_margin", "not_selling")
     watch.sort(key=lambda x: (kinds.index(x["type"]), -(x.get("tied_up") or 0)))
+    # What customers asked for that we do not have (Customer requests): a reason to buy or plant it, shown with the advice
+    asking = H.requests_with_stock(db, biz, db.all("SELECT * FROM customer_requests WHERE business_id=? AND status='open'", (biz,)))
+    for b in buy + plant:
+        named = b.get("item") or b.get("plant") or ""
+        who = {H.customer_group_key(r["customer_name"], r["customer_phone"]) for r in asking if H.request_fits(r["item_name"], named)}
+        if who:
+            b["customers_asked"] = len(who)
+    asked = [a for a in H.most_requested(asking) if chosen(a["item"])]
     ctx.source("Inventory", H.url_for("inventory"))
     out = {"basis": f"speed from sales and farm use of the last {WATCH_DAYS} days; enough is bought for {keep_days} days (unless an item says otherwise) plus {SPARE_DAYS} spare"}
     if focus != "watch":
         out.update(buy={"count": len(buy), "items": buy[:limit]}, move_to_pos={"count": len(move), "items": move[:limit]}, plant={"count": len(plant), "items": plant[:limit]})
+        if asked:
+            out["customers_asked_for"] = {"count": len(asked), "items": [{"item": clip(a["item"], 60), "customers": a["customers"], "quantity": a["quantity"] or None,
+                                                                         "have_now": a["have_now"]} for a in asked[:limit]]}
     if focus != "restock":
         out["watch"] = {"count": len(watch), "items": watch[:limit + 2]}
     if unsure:
@@ -1682,6 +1808,7 @@ def stock_report(ctx, focus="all", only="", limit=6):
     if skipped:
         out["left_out_by_preference"] = skipped
     out["say"] = ("The app worked these numbers out: do not recalculate them. Most urgent first. Offer to prepare the purchase, transfer or planting. "
+                  "customers_asked_for is what customers requested that we do not have: suggest getting what several asked for. "
                   "If 'ask' has something, end with one short question about it and offer to remember the answer.")
     return out
 
@@ -1700,7 +1827,8 @@ MAX_NOTES_BUSINESS = 40
 NOTE_CHARS = 200
 
 
-@tool("Remember a lasting preference the person told you (never one from a record). for_everyone (admins): for the whole business. Restock settings: stock_preference.",
+@tool("Remember a lasting preference the person told you (never one from a record). for_everyone (admins): for the whole business. Restock settings: stock_preference. "
+      "A customer wanting an item we do not have is a customer request (prepare_customer_request), not this.",
       {"note": S(), "for_everyone": B()}, required=["note"])
 def remember_this(ctx, args):
     note = " ".join(str(args.get("note") or "").split())[:NOTE_CHARS]
@@ -1838,7 +1966,9 @@ GROUPS = {
     "staff+": ("prepare_tray_payslip",),
     "records": ("audit_log", "my_alerts"),
     "memory": ("remember_this", "forget_this", "stock_preference"),
-    "today": ("attention_today", "deliveries_and_collections", "preorders"),
+    "today": ("attention_today", "deliveries_and_collections", "preorders", "customer_requests"),
+    "requests": ("customer_requests", "stock_watch"),
+    "requests+": ("prepare_customer_request", "prepare_request_update"),
 }
 AREAS = tuple(a for a in GROUPS if not a.endswith("+"))
 # A question (rather than something to do) gets only the areas' look-ups
@@ -1856,12 +1986,14 @@ AREA_WORDS = {area: re.compile(r"\b(" + words + r")\b") for area, words in {
     "records": r"delet\w*|adjust\w*|removed|requests?|permissions?|alerts?|notifications?|audit|who changed",
     "memory": r"remember\w*|forget|forgot|prefer\w*|always|never|from now on|keep (about |around )?\d+",
     "today": r"today|tomorrow|tonight|attention|due|urgent|to do|brief|this morning|this week",
+    "requests": r"requests?|requested|wants?|wanted|needs?|asked for|asking for|looking for|enquir\w*|inquir\w*|follow(ing)?[- ]?ups?|out of stock|"
+                r"do not have|don't have|dont have|fulfill?(ed)?|dropped",
 }.items()}
 
 
 @tool("Get more tools (look-ups and prepare tools) when none offered fits. Areas: sales (invoices, customers, deliveries, payments, messages), stock (restock, "
       "purchases, suppliers, transfers), planting (batches, pre-orders, trays, plots), money (accounts, expenses), staff (payroll), records (alerts, "
-      "adjustments, deleted), memory (preferences), today.", {"areas": {"type": "array", "items": E(*AREAS)}}, required=["areas"])
+      "adjustments, deleted), memory (preferences), today, requests (items customers asked for that we do not have).", {"areas": {"type": "array", "items": E(*AREAS)}}, required=["areas"])
 def more_tools(ctx, args):
     wanted = {a for a in (args.get("areas") or []) if a in AREAS} if isinstance(args.get("areas"), list) else set()
     if not wanted:

@@ -30,8 +30,8 @@
 <div class="stats">
     <div class="stat"><span>Total cost</span><strong class="gold">{{ totals.cost|money }}</strong><small>{{ totals['items'] }} item(s)</small></div>
     <div class="stat"><span>Quantity bought</span><strong>{{ '{:,}'.format(totals.qty) }}</strong><small>units, in the pack or unit each item is counted in</small></div>
-    <div class="stat"><span>Purchases</span><strong>{{ totals.purchases }}</strong></div>
-    <div class="stat"><span>Still owed to suppliers</span><strong class="{{ 'warn' if totals.owed > 0.005 else 'ok' }}">{{ totals.owed|money }}</strong><small>Paid: {{ totals.paid|money }}</small></div>
+    <a class="stat" href="{{ url_for('procurements') }}"><span>Purchases</span><strong>{{ totals.purchases }}</strong></a>
+    {% if user.role == 'admin' %}<a class="stat" href="{{ url_for('suppliers') }}"><span>Still owed to suppliers</span><strong class="{{ 'warn' if totals.owed > 0.005 else 'ok' }}">{{ totals.owed|money }}</strong><small>Paid: {{ totals.paid|money }}</small></a>{% else %}<div class="stat"><span>Still owed to suppliers</span><strong class="{{ 'warn' if totals.owed > 0.005 else 'ok' }}">{{ totals.owed|money }}</strong><small>Paid: {{ totals.paid|money }}</small></div>{% endif %}
 </div>
 
 <section class="card">

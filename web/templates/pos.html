@@ -4,11 +4,11 @@
 {# On a phone the selling comes first (styles.css): search, products and cart, then the figures and tiles #}
 <div class="pos-layout">
 <div class="stats">
-    <div class="stat"><span>Listed POS items</span><strong class="accent">{{ stats.listed }}</strong></div>
-    <div class="stat"><span>Low stock (&lt;{{ user.low_stock_threshold }})</span><strong class="warn">{{ stats.low }}</strong></div>
-    <div class="stat"><span>Units sold</span><strong class="ok">{{ stats.units }}</strong></div>
-    <div class="stat"><span>Revenue (received)</span><strong class="gold">{{ stats.revenue|money }}</strong><small>Owed by customers: {{ stats.receivable|money }}</small></div>
-    <div class="stat"><span>Expenditure (paid for purchases)</span><strong class="warn">{{ stats.expenditure|money }}</strong><small>Owed to suppliers: {{ stats.payable|money }}</small></div>
+    <a class="stat" href="{{ url_for('inventory') }}"><span>Listed POS items</span><strong class="accent">{{ stats.listed }}</strong></a>
+    <a class="stat" href="{{ url_for('inventory') }}"><span>Low stock (&lt;{{ user.low_stock_threshold }})</span><strong class="warn">{{ stats.low }}</strong></a>
+    <a class="stat" href="{{ url_for('history') }}"><span>Units sold</span><strong class="ok">{{ stats.units }}</strong></a>
+    <a class="stat" href="{{ url_for('accounts') if user.role == 'admin' else url_for('history') }}"><span>Revenue (received)</span><strong class="gold">{{ stats.revenue|money }}</strong><small>Owed by customers: {{ stats.receivable|money }}</small></a>
+    <a class="stat" href="{{ url_for('procurements') }}"><span>Expenditure (paid for purchases)</span><strong class="warn">{{ stats.expenditure|money }}</strong><small>Owed to suppliers: {{ stats.payable|money }}</small></a>
 </div>
 
 <div class="dept-tiles home-tiles">

@@ -250,10 +250,10 @@ def load_user_and_check_csrf():
 def user_row(db, uid):
     """A login with its business's settings: what g.user holds while they are signed in."""
     return db.one(
-        """SELECT u.id, u.business_id, u.username, u.role, u.can_sell, u.can_procure, u.can_transfer, u.can_delete, u.theme, u.glass, u.accent, u.text_size,
+        """SELECT u.id, u.business_id, u.username, u.role, u.can_sell, u.can_procure, u.can_transfer, u.can_delete, u.theme, u.glass, u.accent, u.text_size, u.font, u.text_spacing,
                   u.evening_brief AS my_brief, u.brief_day, u.assistant_voice,
                   b.name AS business_name, b.subtitle, b.contact, b.currency, b.low_stock_threshold,
-                  b.alert_phone, b.alert_low_stock, b.alert_permission, b.alert_preorders, b.alert_collections, b.alert_deliveries, b.preorder_remind_days,
+                  b.alert_phone, b.alert_low_stock, b.alert_permission, b.alert_preorders, b.alert_collections, b.alert_deliveries, b.alert_requests, b.preorder_remind_days,
                   b.backup_hour, b.last_backup_at, b.last_backup_by, b.demo_expires_at, b.assistant_enabled,
                   b.wake_phrase, b.stop_phrase, b.stock_cover_days, b.evening_brief, b.brief_whatsapp
            FROM users u JOIN businesses b ON b.id = u.business_id WHERE u.id=?""",
@@ -290,6 +290,7 @@ def template_globals():
     return {
         "csrf_field": csrf_field, "user": g.get("user"), "can": can, "look": appearance_of(g.get("user")), "themes": THEMES,
         "theme_swatches": THEME_SWATCHES, "accents": ACCENTS, "accent_colours": ACCENT_COLOURS, "text_sizes": TEXT_SIZES,
+        "fonts": FONTS, "font_files": FONT_FILES, "text_spacings": TEXT_SPACINGS, "dark_themes": DARK_THEMES,
         "asset": asset, "csrf_token": csrf_token, "inv_link": inv_link, "assistant_on": assistant.enabled_for(g.get("user")),
         "assistant_phrases": assistant.phrases_of(g.user) if g.get("user") else (assistant.DEFAULT_WAKE, assistant.DEFAULT_STOP),
         "brief_waiting": bool(g.get("user")) and assistant.brief_due(g.user),
@@ -298,10 +299,24 @@ def template_globals():
 
 # The colour sets a person can choose (styles.css has one block for each), with the two colours their swatch shows
 THEMES = (("dark", "Midnight"), ("light", "Daylight"), ("system", "Match my device"), ("forest", "Forest"), ("ocean", "Ocean"),
-          ("sunset", "Sunset"), ("graphite", "Graphite"), ("sand", "Sand"), ("mint", "Mint"), ("contrast", "High contrast"))
+          ("sunset", "Sunset"), ("graphite", "Graphite"), ("sand", "Sand"), ("mint", "Mint"), ("contrast", "High contrast"),
+          ("slate", "Slate"), ("plum", "Plum"), ("coffee", "Coffee"), ("nord", "Nordic"), ("emerald", "Emerald"), ("crimson", "Crimson"),
+          ("paper", "Paper"), ("sky", "Sky"), ("blush", "Blush"), ("lavender", "Lavender"), ("stone", "Stone"))
 THEME_SWATCHES = {"dark": ("#0c0d13", "#3b82f6"), "light": ("#f2f4f9", "#2563eb"), "system": ("#0c0d13", "#f2f4f9"), "forest": ("#0b130e", "#22a35a"),
                   "ocean": ("#08121a", "#14a3b8"), "sunset": ("#160d0b", "#f0703a"), "graphite": ("#111214", "#a1a1aa"), "sand": ("#f6f1e7", "#b45309"),
-                  "mint": ("#eef7f2", "#0f9d6a"), "contrast": ("#000000", "#ffd400")}
+                  "mint": ("#eef7f2", "#0f9d6a"), "contrast": ("#000000", "#ffd400"), "slate": ("#0f172a", "#3b82f6"), "plum": ("#130d1a", "#8b5cf6"),
+                  "coffee": ("#14100c", "#b7791f"), "nord": ("#2e3440", "#88c0d0"), "emerald": ("#06140f", "#0d9488"), "crimson": ("#150b0e", "#e11d48"),
+                  "paper": ("#fafaf7", "#18181b"), "sky": ("#eef6fd", "#0284c7"), "blush": ("#fdf2f4", "#e11d48"), "lavender": ("#f5f2fd", "#7c3aed"),
+                  "stone": ("#f3f2f0", "#0d9488")}
+# For the picker, which lists the dark ones and the light ones apart
+DARK_THEMES = {"dark", "forest", "ocean", "sunset", "graphite", "contrast", "slate", "plum", "coffee", "nord", "emerald", "crimson"}
+# The typefaces a person can choose (styles.css has a line for each) and what to ask Google Fonts for; "system" is the device's own
+FONTS = (("inter", "Inter"), ("jakarta", "Plus Jakarta Sans"), ("manrope", "Manrope"), ("dm", "DM Sans"), ("outfit", "Outfit"), ("lexend", "Lexend"),
+         ("atkinson", "Atkinson Hyperlegible"), ("plex", "IBM Plex Sans"), ("system", "This device's own"))
+FONT_FILES = {"inter": "Inter:wght@400;500;600;700", "jakarta": "Plus+Jakarta+Sans:wght@400;500;600;700", "manrope": "Manrope:wght@400;500;600;700",
+              "dm": "DM+Sans:wght@400;500;600;700", "outfit": "Outfit:wght@400;500;600;700", "lexend": "Lexend:wght@400;500;600;700",
+              "atkinson": "Atkinson+Hyperlegible:wght@400;700", "plex": "IBM+Plex+Sans:wght@400;500;600;700"}
+TEXT_SPACINGS = (("compact", "Compact"), ("normal", "Normal"), ("relaxed", "Relaxed"))
 # An accent colour for buttons, links and highlights, over any theme ("" = the theme's own)
 ACCENTS = (("", "The theme's own"), ("blue", "Blue"), ("green", "Green"), ("teal", "Teal"), ("purple", "Purple"), ("orange", "Orange"),
            ("rose", "Rose"), ("gold", "Gold"))
@@ -317,24 +332,27 @@ def asset(filename):
 
 
 def appearance_of(user):
-    """The theme, transparency (0-100), accent colour and text size to draw the page with.
+    """The theme, transparency (0-100), accent colour, text size, typeface and text spacing to draw the page with.
 
     A signed-in user's saved choice wins. Signed-out pages (login) reuse the look last used on this
     device, kept in a cookie. Anything unset or invalid falls back to the defaults.
     """
-    theme = glass = accent = size = None
+    theme = glass = accent = size = font = spacing = None
     if user:
         theme, glass, accent, size = user["theme"], user["glass"], user.get("accent"), user.get("text_size")
+        font, spacing = user.get("font"), user.get("text_spacing")
     else:
         remembered = request.cookies.get("look", "").split(":")
         if len(remembered) >= 2 and remembered[1].isdigit():
             theme, glass = remembered[0], int(remembered[1])
-            accent, size = (remembered[2:4] + ["", ""])[:2]
+            accent, size, font, spacing = (remembered[2:6] + ["", "", "", ""])[:4]
     return {
         "theme": theme if theme in dict(THEMES) else "dark",
         "glass": glass if isinstance(glass, int) and 0 <= glass <= 100 else DEFAULT_GLASS,
         "accent": accent if accent in ACCENT_COLOURS else "",
         "size": size if size in dict(TEXT_SIZES) else "normal",
+        "font": font if font in dict(FONTS) else "inter",
+        "spacing": spacing if spacing in dict(TEXT_SPACINGS) else "normal",
     }
 
 
@@ -351,7 +369,7 @@ def remember_look(response):
     user = g.get("user")
     if user:
         look = appearance_of(user)
-        value = f"{look['theme']}:{look['glass']}:{look['accent']}:{look['size']}"
+        value = f"{look['theme']}:{look['glass']}:{look['accent']}:{look['size']}:{look['font']}:{look['spacing']}"
         if request.cookies.get("look") != value:
             response.set_cookie("look", value, max_age=365 * 24 * 3600, samesite="Lax", secure=ON_VERCEL, httponly=True)
     return response
@@ -372,12 +390,17 @@ def appearance():
         # Accent and text size: kept as they were when a form does not send them
         accent = text("accent") if "accent" in request.form else (g.user.get("accent") or "")
         size = text("text_size") if "text_size" in request.form else (g.user.get("text_size") or "normal")
-        valid = theme in dict(THEMES) and 0 <= glass <= 100 and (accent == "" or accent in ACCENT_COLOURS) and size in dict(TEXT_SIZES)
+        font = text("font") if "font" in request.form else (g.user.get("font") or "inter")
+        spacing = text("text_spacing") if "text_spacing" in request.form else (g.user.get("text_spacing") or "normal")
+        valid = (theme in dict(THEMES) and 0 <= glass <= 100 and (accent == "" or accent in ACCENT_COLOURS) and size in dict(TEXT_SIZES)
+                 and font in dict(FONTS) and spacing in dict(TEXT_SPACINGS))
         if valid:
             db = get_db()
-            db.execute("UPDATE users SET theme=?, glass=?, accent=?, text_size=? WHERE id=?", (theme, glass, accent or None, size, g.user["id"]))
+            db.execute("UPDATE users SET theme=?, glass=?, accent=?, text_size=?, font=?, text_spacing=? WHERE id=?",
+                       (theme, glass, accent or None, size, font, spacing, g.user["id"]))
             db.commit()
             g.user["theme"], g.user["glass"], g.user["accent"], g.user["text_size"] = theme, glass, accent or None, size
+            g.user["font"], g.user["text_spacing"] = font, spacing
         if background:
             return ("", 204) if valid else ("Choose a theme and a transparency between 0 and 100.", 400)
         if valid:
@@ -2545,6 +2568,7 @@ def record_purchase(db, biz, p):
         )
     if inventory:
         db.execute("UPDATE pos_products SET price=? WHERE business_id=? AND item_code=?", (price, biz, p["item_code"]))
+    requests_arrived(db, biz, existing["name"] if existing else p["name"], p["item_code"] if inventory else "", f"{p['quantity']:,} bought on {p['purchase_date']}")
     return existing["name"] if existing else None
 
 
@@ -3894,7 +3918,7 @@ def delete_payslip(payslip_id):
 #   WHATSAPP_PROVIDER=callmebot  WHATSAPP_CALLMEBOT_KEY (the key CallMeBot issued to the alert phone number)
 # Until one is configured, alerts still appear in the app and the WhatsApp copy is recorded as skipped.
 ALERT_KINDS = (("low_stock", "Low stock"), ("permission", "Requests for admin permission"), ("preorders", "Pre-orders almost due"),
-               ("collections", "Sales to be collected"), ("deliveries", "Deliveries due today"))
+               ("collections", "Sales to be collected"), ("deliveries", "Deliveries due today"), ("requests", "Customer requests"))
 ITEM_ACTIONS = (("procure", "edit this item's details"), ("transfer", "transfer or use this item's stock"), ("delete", "delete this item"))
 GRANT_MINUTES = 60
 # An operator's request to delete one invoice travels through the same request/approve/spend-once flow as the item actions
@@ -4034,6 +4058,7 @@ def notifications_poll():
     remind_preorders_due(get_db(), g.user["business_id"])
     remind_collections_due(get_db(), g.user["business_id"])
     remind_deliveries_due(get_db(), g.user["business_id"])
+    remind_requests_due(get_db(), g.user["business_id"])
     where, params = my_notifications_clause()
     rows = get_db().all(
         f"SELECT id, kind, title, body, created_at FROM notifications WHERE {where} AND read_at IS NULL ORDER BY id DESC LIMIT 20", params
@@ -4083,10 +4108,10 @@ def save_alerts():
         flash("Enter the WhatsApp number with its country code, for example +260 972 047 233.", "error")
         return redirect(url_for("settings"))
     db.execute(
-        "UPDATE businesses SET alert_phone=?, alert_low_stock=?, alert_permission=?, alert_preorders=?, alert_collections=?, alert_deliveries=? WHERE id=?",
+        "UPDATE businesses SET alert_phone=?, alert_low_stock=?, alert_permission=?, alert_preorders=?, alert_collections=?, alert_deliveries=?, alert_requests=? WHERE id=?",
         (phone, 1 if request.form.get("alert_low_stock") else 0, 1 if request.form.get("alert_permission") else 0,
          1 if request.form.get("alert_preorders") else 0, 1 if request.form.get("alert_collections") else 0,
-         1 if request.form.get("alert_deliveries") else 0, g.user["business_id"]),
+         1 if request.form.get("alert_deliveries") else 0, 1 if request.form.get("alert_requests") else 0, g.user["business_id"]),
     )
     db.commit()
     flash("Alert settings saved.", "ok")
@@ -6173,6 +6198,138 @@ def sum_rows(rows):
     return total
 
 
+# --- OVERVIEW: the business at a glance ---
+# The first page of the menu. Read top to bottom: the figures that say how things stand (each against the period before it), why
+# they look that way (sales day by day, what sells), then what needs doing and the latest sales. Every card opens the page behind it.
+def change_against(now_value, before):
+    """How a figure moved against the one before it: {"pct", "dir"} or None when there is nothing to compare with."""
+    if before <= 0.005:
+        return None
+    pct = (now_value - before) / before * 100
+    return {"pct": abs(round(pct, 1 if abs(pct) < 10 else 0)), "dir": "up" if pct > 0.05 else "down" if pct < -0.05 else "flat"}
+
+
+def plural_sales(n):
+    return f"{n:,} sale{'s' if n != 1 else ''}"
+
+
+def spark_points(values, width=100, height=30):
+    """A list of values as the points of a small line, left to right, highest at the top."""
+    if len(values) < 2:
+        return ""
+    top = max(values) or 1
+    step = width / (len(values) - 1)
+    return " ".join(f"{i * step:.1f},{height - 2 - (v / top) * (height - 4):.1f}" for i, v in enumerate(values))
+
+
+def trend_chart(days, values, before):
+    """A line of daily values with the same days of the period before as a dashed line behind it, drawn as SVG by the page."""
+    width, height, left, right, top, bottom = 720, 240, 46, 12, 12, 26
+    peak = nice_ceiling(max(values + before + [0]))
+    plot_w, plot_h = width - left - right, height - top - bottom
+    step = plot_w / max(1, len(days) - 1)
+
+    def y(v):
+        return top + plot_h - (v / peak) * plot_h
+
+    def path(series):
+        return " ".join(f"{left + i * step:.1f},{y(v):.1f}" for i, v in enumerate(series))
+
+    base = top + plot_h
+    every = max(1, len(days) // 6)
+    return {
+        "width": width, "height": height, "left": left, "right": width - right, "base": base, "empty": not any(values) and not any(before),
+        "ticks": [{"y": round(y(peak * k / 4), 1), "label": compact(peak * k / 4)} for k in range(5)],
+        "line": path(values), "before": path(before),
+        "area": f"{left:.1f},{base:.1f} " + path(values) + f" {left + (len(days) - 1) * step:.1f},{base:.1f}",
+        "last": {"x": round(left + (len(days) - 1) * step, 1), "y": round(y(values[-1]), 1)},
+        "xlabels": [{"x": round(left + i * step, 1), "label": datetime.date.fromisoformat(d).strftime("%d %b")} for i, d in enumerate(days) if i % every == 0],
+        "hits": [{"x": round(left + i * step - step / 2, 1), "w": round(step, 1),
+                  "tip": f"{datetime.date.fromisoformat(d).strftime('%a %d %b')}\nSales: {money(values[i])}\n30 days earlier: {money(before[i])}"} for i, d in enumerate(days)],
+    }
+
+
+@app.get("/overview")
+@need(None)
+def overview():
+    db, biz, today = get_db(), g.user["business_id"], today_str()
+    admin = g.user["role"] == "admin"
+    sale = "business_id=? AND kind='SALE' AND COALESCE(payment_status, '') <> 'Cancelled'"
+    yesterday, month_start = add_days(today, -1), today[:8] + "01"
+    last_month_end = add_days(month_start, -1)
+    last_month_start = last_month_end[:8] + "01"
+    # The same stretch of last month as has passed of this one, so a part-month is compared with a part-month
+    last_month_same_day = min(last_month_end, last_month_start[:8] + today[8:])
+
+    by_day = {r["day"]: r for r in db.all(
+        f"SELECT SUBSTR(created_at, 1, 10) AS day, COALESCE(SUM(total), 0) AS total, COUNT(*) AS n FROM invoices WHERE {sale} AND created_at >= ? GROUP BY SUBSTR(created_at, 1, 10)",
+        (biz, min(add_days(today, -59), last_month_start)))}
+
+    def total_between(first, last):
+        return round(sum(r["total"] for day, r in by_day.items() if first <= day <= last), 2)
+
+    days = [add_days(today, -n) for n in range(29, -1, -1)]
+    values = [round((by_day.get(d) or {}).get("total", 0) or 0, 2) for d in days]
+    before = [round((by_day.get(add_days(d, -30)) or {}).get("total", 0) or 0, 2) for d in days]
+    sold_today, sold_yesterday = values[-1], values[-2]
+    month, last_month = total_between(month_start, today), total_between(last_month_start, last_month_same_day)
+
+    kpis = [
+        {"label": "Sales this month", "value": month, "money": True, "lead": True, "change": change_against(month, last_month), "good_up": True,
+         "against": "the same days last month", "note": plural_sales(sum(r["n"] for d, r in by_day.items() if month_start <= d <= today)) + f" since {datetime.date.fromisoformat(month_start).strftime('%d %b')}",
+         "spark": spark_points(values[-14:]), "href": url_for("reports"), "tip": "Sales and purchases by department and over time"},
+        {"label": "Sales today", "value": sold_today, "money": True, "change": change_against(sold_today, sold_yesterday), "good_up": True, "against": "yesterday",
+         "note": plural_sales((by_day.get(today) or {}).get("n", 0)), "href": url_for("history"), "tip": "Every sale and its invoice"},
+    ]
+    low = db.one("SELECT COUNT(*) AS n FROM pos_products WHERE business_id=? AND quantity < ?", (biz, g.user["low_stock_threshold"]))["n"]
+    if admin:
+        owed = db.one(f"SELECT COUNT(*) AS n, COALESCE(SUM(balance_due), 0) AS owed FROM invoices WHERE {sale} AND balance_due > 0.005", (biz,))
+        we_owe = db.one("SELECT COALESCE(SUM(total_cost - COALESCE(amount_paid, total_cost)), 0) AS n FROM procurements WHERE business_id=?", (biz,))["n"]
+        kpis += [
+            {"label": "Customers owe us", "value": owed["owed"], "money": True, "note": f"on {owed['n']} unpaid invoice{'s' if owed['n'] != 1 else ''}",
+             "href": url_for("customers"), "tip": "Each customer's account and what they owe", "tone": "gold" if owed["owed"] > 0.005 else ""},
+            {"label": "We owe suppliers", "value": we_owe, "money": True, "note": "for purchases not yet paid", "href": url_for("suppliers"),
+             "tip": "Each supplier's account and what we owe", "tone": "gold" if we_owe > 0.005 else ""},
+        ]
+    kpis.append({"label": "Low on the POS", "value": low, "note": f"items under {g.user['low_stock_threshold']} in stock", "href": url_for("inventory"),
+                 "tip": "Stock by category", "tone": "warn" if low else "ok"})
+
+    # What needs doing: one row for each thing waiting, the overdue ones first
+    todo = []
+    for r in db.all(f"SELECT id, invoice_no, customer_name, deliver_on AS day {TO_DELIVER_SQL} AND deliver_on <= ? ORDER BY deliver_on, id LIMIT 6", (biz, today)):
+        todo.append({"kind": "Delivery", "title": r["customer_name"], "detail": f"Deliver invoice {r['invoice_no']}", "day": r["day"], "href": url_for("invoice", invoice_id=r["id"])})
+    for r in db.all(f"SELECT id, invoice_no, customer_name, collect_on AS day {WAITING_SQL} AND collect_on <= ? ORDER BY collect_on, id LIMIT 6", (biz, add_days(today, 1))):
+        todo.append({"kind": "Collection", "title": r["customer_name"], "detail": f"Collects invoice {r['invoice_no']}", "day": r["day"], "href": url_for("invoice", invoice_id=r["id"])})
+    for r in db.all("""SELECT po.id, po.customer_name, po.qty, po.collect_on AS day, p.name FROM preorders po JOIN plantings p ON p.id = po.planting_id
+                       WHERE po.business_id=? AND po.status='pending' AND po.collect_on IS NOT NULL AND po.collect_on <= ? ORDER BY po.collect_on, po.id LIMIT 6""",
+                    (biz, add_days(today, 1))):
+        todo.append({"kind": "Pre-order", "title": r["customer_name"], "detail": f"{r['qty']:,} x {r['name']}", "day": r["day"], "href": url_for("up_next") + f"#preorder-{r['id']}"})
+    for r in db.all("SELECT * FROM customer_requests WHERE business_id=? AND status='open' AND follow_up_on <= ? ORDER BY follow_up_on, id LIMIT 6", (biz, today)):
+        todo.append({"kind": "Request", "title": r["customer_name"], "detail": "Follow up: " + request_label(r), "day": r["follow_up_on"], "href": url_for("customer_request", cr_id=r["id"])})
+    todo.sort(key=lambda t: t["day"])
+    for t in todo:
+        t["late"] = t["day"] < today
+        t["when"] = when_words(t["day"], today, before="due ")
+    kpis.append({"label": "Needs doing", "value": len(todo), "note": f"{sum(1 for t in todo if t['late'])} overdue" if any(t["late"] for t in todo) else "due today or tomorrow",
+                 "href": "#todo", "tip": "Deliveries, collections, pre-orders and requests that are due", "tone": "warn" if any(t["late"] for t in todo) else "gold" if todo else "ok"})
+
+    top = db.all(
+        f"""SELECT ii.item_code AS code, ii.item_name AS name, SUM(ii.qty) AS units, SUM(ii.line_total) AS value
+            FROM invoice_items ii JOIN invoices i ON i.id = ii.invoice_id
+            WHERE i.business_id=? AND i.kind='SALE' AND COALESCE(i.payment_status, '') <> 'Cancelled' AND i.created_at >= ?
+            GROUP BY ii.item_code, ii.item_name ORDER BY value DESC LIMIT 6""", (biz, add_days(today, -29)))
+    best = top[0]["value"] if top else 0
+    recent = db.all(f"SELECT id, invoice_no, customer_name, total, balance_due, payment_status, created_at FROM invoices WHERE {sale} ORDER BY created_at DESC, id DESC LIMIT 7", (biz,))
+    growing = [f for f in with_figures(db, biz, db.all("SELECT * FROM plantings WHERE business_id=? AND still_in_greenhouse=1 ORDER BY ready_on, id", (biz,)))
+               if f["available"] + f["pending"] > 0][:5]
+    return render_template(
+        "overview.html", kpis=kpis, chart=trend_chart(days, values, before), todo=todo[:8], todo_count=len(todo), admin=admin,
+        top=[dict(r, pct=round(100 * (r["value"] or 0) / best, 1) if best else 0, href=sold_url(r["code"], r["name"])) for r in top],
+        recent=recent, growing=growing, today=today, updated=now().strftime("%H:%M"), last_30=round(sum(values), 2), prior_30=round(sum(before), 2),
+        change_30=change_against(sum(values), sum(before)),
+    )
+
+
 @app.get("/reports")
 @need(None)
 def reports():
@@ -6184,8 +6341,20 @@ def reports():
     names = sorted(set(department_names(db, biz)) | set(by_dept))
     departments = [dict(by_dept.get(name, blank_totals()), label=name) for name in names]
     timeline = timeline_rows(start, end, sales, buys)
+    totals = sum_rows(departments)
+    # Against the stretch of the same length just before (only the days that have passed, so a part-month is not set against a whole one)
+    compare = None
+    if start and end:
+        last = min(end, now().date())
+        if last >= start:
+            days = (last - start).days + 1
+            before_end = start - datetime.timedelta(days=1)
+            old_sales, old_buys = gather_report(db, biz, before_end - datetime.timedelta(days=days - 1), before_end)
+            old = summarise(old_sales, old_buys, lambda r: "all", lambda r: "all").get("all", blank_totals())
+            compare = {"against": f"the {days} day{'s' if days != 1 else ''} before", "sales": change_against(totals["sales"], old["sales"]),
+                       "purchases": change_against(totals["purchases"], old["purchases"])}
     return render_template(
-        "reports.html", departments=departments, totals=sum_rows(departments), timeline=timeline,
+        "reports.html", departments=departments, totals=totals, timeline=timeline, compare=compare,
         dept_charts=report_charts(departments), time_charts=report_charts(timeline), **report_context(choice, start, end),
     )
 
@@ -7175,6 +7344,8 @@ def insert_planting(db, biz, d):
         ),
     )
     db.execute("UPDATE plantings SET pos_code=? WHERE id=?", (f"{d['seed_code']}{PLANTING_MARK}{planting_id}", planting_id))
+    if d.get("still_in_greenhouse", True):
+        requests_arrived(db, biz, d["name"], "", f"{d['seedlings']:,} seedlings planted, ready about {d['ready_on']}")
     return planting_id
 
 
@@ -7968,6 +8139,317 @@ def preorder_cancel(po_id):
     db.commit()
     flash(f"Pre-order for {po['customer_name']} cancelled. The {po['qty']:,} seedlings are free again.", "ok")
     return back
+
+
+# --- Customer requests: things customers asked for that we do not have ---
+# Logged with the day to follow it up; that day the admins are alerted. When the item is bought or planted, the admins are told who
+# asked for it. A request is fulfilled or dropped, never deleted, and everything that happened to it is kept in its log.
+REQUEST_STATUSES = {"open": "Open", "fulfilled": "Fulfilled", "dropped": "Dropped"}
+REQUEST_LOG_WORDS = {"logged": "Logged", "follow_up": "Follow-up moved", "note": "Note", "arrived": "Arrived", "fulfilled": "Fulfilled",
+                     "dropped": "Dropped", "reopened": "Reopened", "reminded": "Reminder sent"}
+# Words that say what form something comes in rather than what it is, left out when a request is matched to an item by name
+REQUEST_FILLER = {"seedling", "seedlings", "seed", "seeds", "plant", "plants", "pack", "packs", "packet", "packets", "of", "the", "a", "an", "some",
+                  "kg", "bag", "bags", "tray", "trays", "variety", "type"}
+
+
+def request_words(name):
+    words = [w for w in re.findall(r"[a-z0-9]+", norm(name)) if w not in REQUEST_FILLER]
+    return words or re.findall(r"[a-z0-9]+", norm(name))
+
+
+def request_fits(item_name, other_name):
+    """True when every word that names what was asked for is in the other name: 'cabbage seedlings' fits 'Cabbage Gloria F1'."""
+    wanted, have = request_words(item_name), set(re.findall(r"[a-z0-9]+", norm(other_name)))
+    return bool(wanted) and all(w in have for w in wanted)
+
+
+def known_item(db, biz, typed):
+    """(name, code) for a request: the inventory or POS item it names (by code or exact name), else the name as typed and no code."""
+    name = clean_name(typed, 100)
+    for table in ("products", "pos_products"):
+        row = db.one(f"SELECT item_code, name FROM {table} WHERE business_id=? AND (UPPER(item_code)=? OR LOWER(name)=?) ORDER BY id LIMIT 1",
+                     (biz, name.upper(), norm(name)))
+        if row:
+            return row["name"], row["item_code"]
+    return name, ""
+
+
+def request_item_choices(db, biz):
+    """What the item box suggests: stock, the POS and what has been planted, by name."""
+    names = [r["name"] for r in db.all("SELECT name FROM products WHERE business_id=? UNION SELECT name FROM pos_products WHERE business_id=?", (biz, biz))]
+    names += [r["name"] for r in db.all("SELECT DISTINCT name FROM plantings WHERE business_id=?", (biz,))]
+    return sorted({n for n in names if n}, key=str.lower)[:600]
+
+
+def requests_with_stock(db, biz, rows):
+    """Adds to each request what we have of it now: in stock (inventory and POS, when it is a known item) and seedlings free in the greenhouse."""
+    if not rows:
+        return rows
+    stock = {}
+    for table in ("products", "pos_products"):
+        for r in db.all(f"SELECT item_code, quantity FROM {table} WHERE business_id=?", (biz,)):
+            stock[r["item_code"]] = stock.get(r["item_code"], 0) + (r["quantity"] or 0)
+    growing = with_figures(db, biz, db.all("SELECT * FROM plantings WHERE business_id=? AND still_in_greenhouse=1", (biz,)))
+    for r in rows:
+        r["in_stock"] = stock.get(r["item_code"]) if r["item_code"] else None
+        fits = [f for f in growing if f["available"] > 0 and request_fits(r["item_name"], f["name"])]
+        r["growing"] = sum(f["available"] for f in fits)
+        r["growing_ready"] = min((f["actual_ready_on"] or f["ready_on"] or "") for f in fits) if fits else ""
+        r["have_now"] = bool(r["in_stock"]) or r["growing"] > 0
+    return rows
+
+
+def request_log(db, biz, cr_id, kind, detail=""):
+    db.insert("INSERT INTO customer_request_log (business_id, request_id, kind, detail, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+              (biz, cr_id, kind, detail[:300], g.user["username"] if g.get("user") else "", now().strftime("%Y-%m-%d %H:%M:%S")))
+
+
+def request_label(r):
+    return (f"{r['quantity']:,} x " if r["quantity"] else "") + r["item_name"]
+
+
+def most_requested(rows):
+    """The open requests by what was asked for: how many customers, how many in all. Most customers first."""
+    groups = {}
+    for r in rows:
+        key = " ".join(request_words(r["item_name"]))
+        grp = groups.setdefault(key, {"item": r["item_name"], "customers": set(), "quantity": 0, "requests": 0, "have_now": False})
+        grp["customers"].add(customer_group_key(r["customer_name"], r["customer_phone"]))
+        grp["quantity"] += r["quantity"] or 0
+        grp["requests"] += 1
+        grp["have_now"] = grp["have_now"] or r.get("have_now", False)
+    out = [dict(g_, customers=len(g_["customers"])) for g_ in groups.values()]
+    return sorted(out, key=lambda x: (-x["customers"], -x["quantity"], x["item"].lower()))
+
+
+def read_follow_up_day(field="follow_up_on"):
+    """The follow-up day from the form: (day, None), or (None, what is wrong). Today or later, within a year."""
+    day = day_or_none(text(field)) if text(field) else None
+    if day is None:
+        return None, "Choose the day to follow it up."
+    if day < today_str():
+        return None, "The follow-up day cannot be in the past."
+    if day > add_days(today_str(), 366):
+        return None, "Choose a follow-up day within the next year."
+    return day, None
+
+
+def get_customer_request(db, cr_id):
+    r = db.one("SELECT * FROM customer_requests WHERE id=? AND business_id=?", (cr_id, g.user["business_id"]))
+    if r is None:
+        abort(404)
+    return r
+
+
+@app.get("/customer-requests")
+@need(None)
+def customer_requests():
+    db, biz, today = get_db(), g.user["business_id"], today_str()
+    show = request.args.get("show", "due")
+    show = show if show in ("due", "open", "closed", "all") else "due"
+    q = " ".join(request.args.get("q", "").split())[:100]
+    where, params = "business_id=?", [biz]
+    for word in norm(q).split():
+        where += " AND (LOWER(customer_name) LIKE ? OR LOWER(COALESCE(customer_phone, '')) LIKE ? OR LOWER(item_name) LIKE ? OR LOWER(COALESCE(note, '')) LIKE ?)"
+        params += [f"%{word}%"] * 4
+    rows = db.all(f"SELECT * FROM customer_requests WHERE {where} ORDER BY CASE WHEN status='open' THEN 0 ELSE 1 END, follow_up_on, id DESC LIMIT 500", params)
+    open_rows = requests_with_stock(db, biz, [r for r in rows if r["status"] == "open"])
+    counts = {"due": sum(1 for r in open_rows if r["follow_up_on"] <= today), "open": len(open_rows), "closed": len(rows) - len(open_rows), "all": len(rows)}
+    if show == "due":
+        listed = [r for r in open_rows if r["follow_up_on"] <= today]
+    elif show == "open":
+        listed = open_rows
+    elif show == "closed":
+        listed = sorted((r for r in rows if r["status"] != "open"), key=lambda r: r["closed_at"] or "", reverse=True)
+    else:
+        listed = open_rows + [r for r in rows if r["status"] != "open"]
+    for r in listed:
+        r["label"] = request_label(r)
+        r["when"] = when_words(r["follow_up_on"], today, before="due ") if r["status"] == "open" else ""
+    return render_template(
+        "customer_requests.html", rows=listed, show=show, counts=counts, q=q, today=today, top=most_requested(open_rows)[:8],
+        items=request_item_choices(db, biz) if can("sell") else [], statuses=REQUEST_STATUSES, reminders_on=alert_enabled("requests"),
+    )
+
+
+@app.post("/customer-requests")
+@need("sell")
+def customer_request_create():
+    db, biz = get_db(), g.user["business_id"]
+    back = redirect(url_for("customer_requests", show="open"))
+    customer = clean_name(text("customer_name"), 100)
+    item_name, code = known_item(db, biz, text("item_name"))
+    if not customer or not item_name:
+        flash("Enter the customer's name and what they asked for. Nothing was logged.", "error")
+        return back
+    quantity = None
+    if text("quantity"):
+        try:
+            quantity = number("quantity", int)
+            if not 1 <= quantity <= 10_000_000:
+                raise ValueError
+        except ValueError:
+            flash("The quantity must be a whole number above zero, or left empty. Nothing was logged.", "error")
+            return back
+    day, problem = read_follow_up_day()
+    if problem:
+        flash(problem + " Nothing was logged.", "error")
+        return back
+    source = "assistant" if text("source") == "assistant" else "page"
+    cr_id = db.insert(
+        """INSERT INTO customer_requests (business_id, customer_name, customer_phone, item_name, item_code, quantity, note, follow_up_on, status, source, created_by, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)""",
+        (biz, customer, text("customer_phone")[:40], item_name, code, quantity, text("note")[:300], day, source, g.user["username"], now().strftime("%Y-%m-%d %H:%M:%S")),
+    )
+    request_log(db, biz, cr_id, "logged", f"Follow up {day}" + (" (with the assistant)" if source == "assistant" else ""))
+    db.commit()
+    label = (f"{quantity:,} x " if quantity else "") + item_name
+    flash(f"Request logged for {customer}: {label}. The admins are reminded to follow it up on {day}.", "ok")
+    return redirect(url_for("customer_request", cr_id=cr_id))
+
+
+@app.get("/customer-requests/<int:cr_id>")
+@need(None)
+def customer_request(cr_id):
+    db, biz, today = get_db(), g.user["business_id"], today_str()
+    r = requests_with_stock(db, biz, [get_customer_request(db, cr_id)])[0]
+    r["label"], r["when"] = request_label(r), (when_words(r["follow_up_on"], today, before="due ") if r["status"] == "open" else "")
+    log_rows = db.all("SELECT * FROM customer_request_log WHERE business_id=? AND request_id=? ORDER BY id", (biz, cr_id))
+    others = db.all(
+        "SELECT id, item_name, quantity, status, follow_up_on, created_at FROM customer_requests WHERE business_id=? AND id<>? AND LOWER(customer_name)=? ORDER BY id DESC LIMIT 10",
+        (biz, cr_id, norm(r["customer_name"])),
+    )
+    return render_template("customer_request.html", r=r, log=log_rows, words=REQUEST_LOG_WORDS, statuses=REQUEST_STATUSES, today=today, others=others)
+
+
+def open_request_or_back(db, cr_id):
+    r = get_customer_request(db, cr_id)
+    back = redirect(url_for("customer_request", cr_id=cr_id))
+    if r["status"] != "open":
+        flash("That request is already closed. Reopen it first.", "error")
+        return r, back, True
+    return r, back, False
+
+
+@app.post("/customer-requests/<int:cr_id>/follow-up")
+@need("sell")
+def customer_request_follow_up(cr_id):
+    db, biz = get_db(), g.user["business_id"]
+    r, back, closed = open_request_or_back(db, cr_id)
+    if closed:
+        return back
+    day, problem = read_follow_up_day()
+    if problem:
+        flash(problem + " Nothing was changed.", "error")
+        return back
+    db.execute("UPDATE customer_requests SET follow_up_on=?, reminded_at=NULL WHERE id=? AND business_id=?", (day, cr_id, biz))
+    request_log(db, biz, cr_id, "follow_up", f"From {r['follow_up_on']} to {day}" + (f": {text('note')[:200]}" if text("note") else ""))
+    db.commit()
+    flash(f"{r['customer_name']}'s request is followed up again on {day}.", "ok")
+    return back
+
+
+@app.post("/customer-requests/<int:cr_id>/note")
+@need("sell")
+def customer_request_note(cr_id):
+    db, biz = get_db(), g.user["business_id"]
+    get_customer_request(db, cr_id)
+    back = redirect(url_for("customer_request", cr_id=cr_id))
+    if not text("note"):
+        flash("Write the note first.", "error")
+        return back
+    request_log(db, biz, cr_id, "note", text("note")[:300])
+    db.commit()
+    flash("Note added.", "ok")
+    return back
+
+
+@app.post("/customer-requests/<int:cr_id>/close")
+@need("sell")
+def customer_request_close(cr_id):
+    db, biz = get_db(), g.user["business_id"]
+    r, back, closed = open_request_or_back(db, cr_id)
+    if closed:
+        return back
+    outcome = text("outcome")
+    if outcome not in ("fulfilled", "dropped"):
+        flash("Say whether the customer got it or the request was dropped.", "error")
+        return back
+    note = text("note")[:300]
+    db.execute("UPDATE customer_requests SET status=?, outcome=?, closed_by=?, closed_at=? WHERE id=? AND business_id=? AND status='open'",
+               (outcome, note, g.user["username"], now().strftime("%Y-%m-%d %H:%M:%S"), cr_id, biz))
+    request_log(db, biz, cr_id, outcome, note)
+    db.commit()
+    flash(f"{r['customer_name']}'s request is marked {REQUEST_STATUSES[outcome].lower()}.", "ok")
+    return back
+
+
+@app.post("/customer-requests/<int:cr_id>/reopen")
+@need("sell")
+def customer_request_reopen(cr_id):
+    db, biz = get_db(), g.user["business_id"]
+    r = get_customer_request(db, cr_id)
+    back = redirect(url_for("customer_request", cr_id=cr_id))
+    if r["status"] == "open":
+        return back
+    day, problem = read_follow_up_day()
+    if problem:
+        flash(problem + " Nothing was changed.", "error")
+        return back
+    db.execute("UPDATE customer_requests SET status='open', outcome='', closed_by=NULL, closed_at=NULL, follow_up_on=?, reminded_at=NULL WHERE id=? AND business_id=?",
+               (day, cr_id, biz))
+    request_log(db, biz, cr_id, "reopened", f"Follow up {day}")
+    db.commit()
+    flash(f"{r['customer_name']}'s request is open again, to follow up on {day}.", "ok")
+    return back
+
+
+def remind_requests_due(db, biz):
+    """On a request's follow-up day the admins are alerted, once. Runs from the alerts poll; each request is claimed before its alert
+    is raised, so two pages polling at once cannot both raise it. Several due together make one alert."""
+    if not alert_enabled("requests"):
+        return
+    due = db.all("SELECT * FROM customer_requests WHERE business_id=? AND status='open' AND reminded_at IS NULL AND follow_up_on <= ? ORDER BY follow_up_on, id",
+                 (biz, today_str()))
+    if not due:
+        return
+    stamp = now().strftime("%Y-%m-%d %H:%M:%S")
+    claimed = [r for r in due if db.execute("UPDATE customer_requests SET reminded_at=? WHERE id=? AND reminded_at IS NULL", (stamp, r["id"])).rowcount == 1]
+    if not claimed:
+        return
+    for r in claimed:
+        request_log(db, biz, r["id"], "reminded", f"Follow-up day {r['follow_up_on']}")
+    if len(claimed) == 1:
+        r = claimed[0]
+        title = f"Follow up: {r['customer_name']} asked for {request_label(r)}"
+        body = f"{r['customer_name']}{' (' + r['customer_phone'] + ')' if r['customer_phone'] else ''} asked for {request_label(r)} on {r['created_at'][:10]}. Today is the day to follow it up."
+        link = url_for("customer_request", cr_id=r["id"])
+    else:
+        title = f"Follow up {len(claimed)} customer requests"
+        body = "Due today: " + "; ".join(f"{r['customer_name']}: {request_label(r)}" for r in claimed[:10]) + (" and more." if len(claimed) > 10 else ".")
+        link = url_for("customer_requests", show="due")
+    notify(db, "request", title, body, link, whatsapp=True)
+    db.commit()
+
+
+def requests_arrived(db, biz, name, code, how):
+    """Something was bought or planted: the admins are told which customers with an open request asked for it, and each request's log says so.
+    The caller commits, so the alert goes only if what arrived is saved."""
+    user = g.get("user")
+    # Only for the signed-in person's own business (demo data is filled in for a business before anyone uses it)
+    if not user or user.get("business_id") != biz or user.get("alert_requests") == 0:
+        return
+    waiting = [r for r in db.all("SELECT * FROM customer_requests WHERE business_id=? AND status='open'", (biz,))
+               if (code and r["item_code"] == code) or request_fits(r["item_name"], name)]
+    if not waiting:
+        return
+    for r in waiting:
+        request_log(db, biz, r["id"], "arrived", f"{name}: {how}")
+    people = [f"{r['customer_name']}" + (f" ({r['quantity']:,})" if r["quantity"] else "") for r in waiting]
+    title = f"{len(waiting)} customer request{'s' if len(waiting) != 1 else ''} for {name}"
+    body = f"{name}: {how}. Asked for by " + ", ".join(people[:10]) + (" and more" if len(people) > 10 else "") + ". Let them know."
+    link = url_for("customer_request", cr_id=waiting[0]["id"]) if len(waiting) == 1 else url_for("customer_requests", show="open", q=" ".join(request_words(waiting[0]["item_name"])))
+    notify(db, "request", title, body, link, whatsapp=True)
 
 
 def pos_preorders(db, biz, ids):
@@ -10863,6 +11345,9 @@ assistant.bind(
     planting_staff=planting_staff, match_person=match_person, unpaid_trays=unpaid_trays, tray_count=tray_count, seedlings_from=seedlings_from,
     planting_label=planting_label, MANUAL_IN=MANUAL_IN, MANUAL_OUT=MANUAL_OUT, CATEGORY_LABELS=CATEGORY_LABELS, MAX_TRAY_HOLES=MAX_TRAY_HOLES,
     RELEASE_DAYS=RELEASE_DAYS,
+    # customer requests: what was asked for, matched to what we have
+    request_fits=request_fits, requests_with_stock=requests_with_stock, known_item=known_item, most_requested=most_requested, request_label=request_label,
+    customer_group_key=customer_group_key,
 )
 
 

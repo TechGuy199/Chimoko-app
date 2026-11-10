@@ -4,6 +4,33 @@
 <h1>Reports</h1>
 {% with action=url_for('reports') %}{% include "_report_filters.html" %}{% endwith %}
 
+{# How the period went, each figure against the stretch just before it; then where it came from (departments), then the charts #}
+{% macro delta(change, good_up) %}{% if compare and change %}{% set good = (change.dir == 'up') == good_up %}
+<span class="delta {{ 'flat' if change.dir == 'flat' else 'good' if good else 'bad' }}" title="Compared with {{ compare.against }}">{{ '▲' if change.dir == 'up' else '▼' if change.dir == 'down' else '–' }} {{ '%g'|format(change.pct) }}%</span> <span>vs {{ compare.against }}</span> <span>·</span>{% endif %}{% endmacro %}
+{% set net = totals.sales - totals.purchases %}
+<div class="kpis">
+    <a class="kpi lead" href="{{ url_for('history') }}" title="Every sale and its invoice">
+        <span class="kpi-label">Sales</span>
+        <span class="kpi-value"><small>{{ user.currency }}</small>{{ '{:,.2f}'.format(totals.sales) }}</span>
+        <span class="kpi-foot">{{ delta(compare.sales if compare, true) }}<span>Received {{ totals.received|money }}</span></span>
+    </a>
+    <a class="kpi" href="{{ url_for('procurements') }}" title="Every purchase">
+        <span class="kpi-label">Purchases</span>
+        <span class="kpi-value"><small>{{ user.currency }}</small>{{ '{:,.2f}'.format(totals.purchases) }}</span>
+        <span class="kpi-foot">{{ delta(compare.purchases if compare, false) }}<span>Paid {{ totals.paid|money }}</span></span>
+    </a>
+    <div class="kpi" title="Sales less purchases in this period">
+        <span class="kpi-label">Sales minus purchases</span>
+        <span class="kpi-value {{ 'ok' if net > 0.005 else 'warn' if net < -0.005 }}"><small>{{ user.currency }}</small>{{ '{:,.2f}'.format(net) }}</span>
+        <span class="kpi-foot"><span>Cash received minus paid {{ (totals.received - totals.paid)|money }}</span></span>
+    </div>
+    <a class="kpi" href="{{ url_for('inventory') }}" title="Stock by category">
+        <span class="kpi-label">Stock movement (units)</span>
+        <span class="kpi-value">{{ '{:,}'.format(totals.units_in) }} <small>in</small> {{ '{:,}'.format(totals.units_sold + totals.units_farm) }} <small>out</small></span>
+        <span class="kpi-foot"><span>{{ '{:,}'.format(totals.units_sold) }} sold, {{ '{:,}'.format(totals.units_farm) }} farm use</span></span>
+    </a>
+</div>
+
 <h2>Departments</h2>
 <div class="dept-tiles">
     {% for d in departments %}
@@ -15,12 +42,6 @@
     {% endfor %}
 </div>
 
-<div class="stats spaced">
-    <div class="stat"><span>Sales</span><strong>{{ totals.sales|money }}</strong><small>Received: {{ totals.received|money }}</small></div>
-    <div class="stat"><span>Purchases</span><strong>{{ totals.purchases|money }}</strong><small>Paid: {{ totals.paid|money }}</small></div>
-    <div class="stat"><span>Sales minus purchases</span><strong>{{ (totals.sales - totals.purchases)|money }}</strong><small>Cash received minus paid: {{ (totals.received - totals.paid)|money }}</small></div>
-    <div class="stat"><span>Stock movement</span><strong>{{ totals.units_in }} in &middot; {{ totals.units_sold + totals.units_farm }} out</strong><small>{{ totals.units_sold }} sold, {{ totals.units_farm }} farm use</small></div>
-</div>
 
 {% if view == 'visual' %}
 <div class="chart-grid">

@@ -1,12 +1,15 @@
-{# Theme, accent, text size and transparency form. Expects: look, themes, theme_swatches, accents, accent_colours, text_sizes, and optionally back
+{# Theme, accent, typeface, text size and spacing, and transparency form. Expects: look, themes, dark_themes, theme_swatches, accents, accent_colours,
+   fonts, font_files, text_sizes, text_spacings, and optionally back
    ('settings' returns there after a plain form post). #}
 <form method="post" action="{{ url_for('appearance') }}" class="appearance" id="appearance-form">
     {{ csrf_field() }}
     {% if back %}<input type="hidden" name="back" value="{{ back }}">{% endif %}
 
     <span class="muted">Theme</span>
-    <div class="theme-grid" role="radiogroup" aria-label="Theme">
-        {% for value, label in themes %}
+    {% for heading, dark in (('Dark', true), ('Light', false)) %}
+    <span class="theme-group">{{ heading }}</span>
+    <div class="theme-grid" role="radiogroup" aria-label="{{ heading }} themes">
+        {% for value, label in themes if (value in dark_themes) == dark %}
         <label class="theme-choice">
             <input type="radio" name="theme" value="{{ value }}" {{ 'checked' if look.theme == value }}>
             <span class="theme-swatch" style="--swatch-bg: {{ theme_swatches[value][0] }}; --swatch-accent: {{ theme_swatches[value][1] }}" aria-hidden="true"><i></i><i></i><i></i></span>
@@ -14,6 +17,7 @@
         </label>
         {% endfor %}
     </div>
+    {% endfor %}
 
     <span class="muted">Accent colour</span>
     <div class="accent-row" role="radiogroup" aria-label="Accent colour">
@@ -25,11 +29,30 @@
         {% endfor %}
     </div>
 
+    <span class="muted">Typeface</span>
+    <div class="font-grid" role="radiogroup" aria-label="Typeface">
+        {% for value, label in fonts %}
+        <label class="font-choice" data-font-file="{{ font_files.get(value, '') }}">
+            <input type="radio" name="font" value="{{ value }}" {{ 'checked' if look.font == value }}>
+            <b>Ag 123</b><span>{{ label }}</span>
+        </label>
+        {% endfor %}
+    </div>
+
     <span class="muted">Text size</span>
     <div>
         <span class="segmented" role="radiogroup" aria-label="Text size">
             {% for value, label in text_sizes %}
             <label><input type="radio" name="text_size" value="{{ value }}" {{ 'checked' if look.size == value }}> {{ label }}</label>
+            {% endfor %}
+        </span>
+    </div>
+
+    <span class="muted">Text spacing</span>
+    <div>
+        <span class="segmented" role="radiogroup" aria-label="Text spacing">
+            {% for value, label in text_spacings %}
+            <label><input type="radio" name="text_spacing" value="{{ value }}" {{ 'checked' if look.spacing == value }}> {{ label }}</label>
             {% endfor %}
         </span>
     </div>
@@ -65,7 +88,26 @@
         const themes = Array.from(form.querySelectorAll('input[name="theme"]'));
         const accents = Array.from(form.querySelectorAll('input[name="accent"]'));
         const sizes = Array.from(form.querySelectorAll('input[name="text_size"]'));
+        const fonts = Array.from(form.querySelectorAll('input[name="font"]'));
+        const spacings = Array.from(form.querySelectorAll('input[name="text_spacing"]'));
         let pending;
+
+        // A typeface is fetched the first time it is picked (and all of them once, quietly, so each choice shows in its own letters)
+        function loadFont(file) {
+            if (!file || document.querySelector('link[data-font-file="' + file + '"]')) return;
+            const link = document.createElement("link");
+            link.rel = "stylesheet";
+            link.dataset.fontFile = file;
+            link.href = "https://fonts.googleapis.com/css2?family=" + file + "&display=swap";
+            document.head.appendChild(link);
+        }
+        fonts.forEach(function (radio) {
+            const choice = radio.closest(".font-choice");
+            const names = { inter: "Inter", jakarta: "Plus Jakarta Sans", manrope: "Manrope", dm: "DM Sans", outfit: "Outfit", lexend: "Lexend", atkinson: "Atkinson Hyperlegible", plex: "IBM Plex Sans" };
+            if (names[radio.value]) choice.querySelector("b").style.fontFamily = '"' + names[radio.value] + '", var(--font-fallback)';
+            else choice.querySelector("b").style.fontFamily = "var(--font-fallback)";
+            loadFont(choice.dataset.fontFile);
+        });
 
         function picked(radios) {
             const radio = radios.find(function (r) { return r.checked; });
@@ -78,8 +120,10 @@
             if (picked(themes) !== null) root.dataset.theme = picked(themes);
             if (picked(accents) !== null) root.dataset.accent = picked(accents);
             if (picked(sizes) !== null) root.dataset.size = picked(sizes);
+            if (picked(fonts) !== null) root.dataset.font = picked(fonts);
+            if (picked(spacings) !== null) root.dataset.spacing = picked(spacings);
             // The offline screens read the look from here (they have no server to ask)
-            try { localStorage.setItem("ms-look", JSON.stringify({ theme: root.dataset.theme, accent: root.dataset.accent, size: root.dataset.size, glass: slider.value })); } catch (e) { /* not kept */ }
+            try { localStorage.setItem("ms-look", JSON.stringify({ theme: root.dataset.theme, accent: root.dataset.accent, size: root.dataset.size, font: root.dataset.font, spacing: root.dataset.spacing, glass: slider.value })); } catch (e) { /* not kept */ }
         }
 
         function save() {
@@ -105,12 +149,14 @@
 
         slider.addEventListener("input", show);       // follow the thumb while dragging
         slider.addEventListener("change", changed);   // save when it is let go
-        themes.concat(accents, sizes).forEach(function (radio) { radio.addEventListener("change", changed); });
+        themes.concat(accents, sizes, fonts, spacings).forEach(function (radio) { radio.addEventListener("change", changed); });
         document.getElementById("appearance-reset").addEventListener("click", function () {
             slider.value = 50;
             themes.forEach(function (radio) { radio.checked = radio.value === "dark"; });
             accents.forEach(function (radio) { radio.checked = radio.value === ""; });
             sizes.forEach(function (radio) { radio.checked = radio.value === "normal"; });
+            fonts.forEach(function (radio) { radio.checked = radio.value === "inter"; });
+            spacings.forEach(function (radio) { radio.checked = radio.value === "normal"; });
             changed();
         });
     })();

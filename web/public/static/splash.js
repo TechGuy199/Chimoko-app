@@ -44,7 +44,6 @@
             '<div class="splash-stage" aria-hidden="true">' +
             // The book opening, and the pen writing on the right-hand page
             '<svg class="splash-book" viewBox="0 0 220 150">' +
-            '<defs><linearGradient id="splash-page" x1="0" x2="1"><stop offset="0" style="stop-color: var(--surface-alt)"/><stop offset="1" style="stop-color: var(--surface)"/></linearGradient></defs>' +
             '<path class="book-cover" d="M14 34 Q110 22 206 34 L206 132 Q110 120 14 132 Z"/>' +
             '<g class="book-left"><path class="book-page" d="M22 36 Q66 26 110 40 L110 126 Q66 114 22 124 Z"/>' +
             '<path class="book-line" d="M36 56 H96 M36 70 H92 M36 84 H96 M36 98 H82"/></g>' +
@@ -60,7 +59,6 @@
             "</svg>" +
             // The infinity loop, with a light running round it
             '<svg class="splash-infinity" viewBox="0 0 200 100">' +
-            '<defs><linearGradient id="splash-run" x1="0" x2="1"><stop offset="0" style="stop-color: var(--primary)"/><stop offset="1" style="stop-color: var(--accent)"/></linearGradient></defs>' +
             '<path class="inf-track" d="' + LOOP + '"/>' +
             '<path class="inf-run" pathLength="1" d="' + LOOP + '"/>' +
             '<circle class="inf-dot" r="4.5"><animateMotion dur="1.6s" repeatCount="indefinite" path="' + LOOP + '"/></circle>' +

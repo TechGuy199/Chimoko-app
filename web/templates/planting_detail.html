@@ -23,10 +23,10 @@
         <small>{{ '%g'|format(p.mortality_pct) }}% expected mortality</small></div>
     <div class="stat"><span>Ready</span><strong class="{{ 'ok' if p.stage == 'ready' else 'gold' if p.stage == 'due' }}">{{ p.actual_ready_on or p.ready_on }}</strong>
         <small>{{ p.stage_label }}{% if p.stage == 'growing' %}, in {{ p.days }} day{{ 's' if p.days != 1 }}{% endif %}</small></div>
-    <div class="stat"><span>Pre-ordered</span><strong class="gold">{{ p.pending }}</strong><small>held, not yet collected</small></div>
+    <a class="stat" href="{{ url_for('up_next') }}#preorders"><span>Pre-ordered</span><strong class="gold">{{ p.pending }}</strong><small>held, not yet collected</small></a>
     <a class="stat stat-link" href="{{ sold_url(p.pos_code, p.label) }}" data-tray data-no-prefetch title="Who bought these seedlings">
         <span>Sold</span><strong class="ok">{{ p.sold }}</strong><small>{{ p.collected }} of them collected pre-orders &middot; <u>who bought them</u></small></a>
-    <div class="stat"><span>Available</span><strong>{{ p.available }}</strong><small>free to sell or pre-order</small></div>
+    <a class="stat" href="{{ url_for('up_next') }}#batch-{{ p.id }}"><span>Available</span><strong>{{ p.available }}</strong><small>free to sell or pre-order</small></a>
 </div>
 {% if not p.still_in_greenhouse %}
 <div class="flash notice">

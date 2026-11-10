@@ -1,0 +1,175 @@
+{% extends "base.html" %}
+{% block title %}Overview — {% endblock %}
+{% block content %}
+{# The dashboard. Top row: how things stand, each figure against the period before it. Middle: why (sales day by day, what sells).
+   Bottom: what needs doing and the latest sales. Every card and row opens the page behind it. #}
+{% macro delta(change, good_up, against) %}
+{% if change %}
+{% set good = (change.dir == 'up') == good_up %}
+<span class="delta {{ 'flat' if change.dir == 'flat' else 'good' if good else 'bad' }}" title="Compared with {{ against }}">
+    {{ '▲' if change.dir == 'up' else '▼' if change.dir == 'down' else '–' }} {{ '%g'|format(change.pct) }}%</span> <span>vs {{ against }}</span>
+{% else %}<span title="Nothing was sold in {{ against }}, so there is nothing to compare with">No sales in {{ against }} to compare</span>{% endif %}
+{% endmacro %}
+
+<div class="dash-head">
+    <div>
+        <h1>Overview</h1>
+        <p class="muted">How {{ user.business_name }} stands today. Click any card to see what is behind it.</p>
+    </div>
+    <span class="fresh" title="These figures are worked out each time the page opens">Updated {{ updated }} today</span>
+</div>
+
+<div class="kpis">
+    {% for k in kpis %}
+    <a class="kpi {{ 'lead' if k.lead }}" href="{{ k.href }}" title="{{ k.tip }}" {{ 'data-no-prefetch' if k.href.startswith('#') }}>
+        <span class="kpi-label">{{ k.label }}</span>
+        <span class="kpi-value {{ k.tone or '' }}">{% if k.money %}<small>{{ user.currency }}</small>{{ '{:,.2f}'.format(k.value) }}{% else %}{{ '{:,}'.format(k.value) }}{% endif %}</span>
+        <span class="kpi-foot">
+            {% if 'change' in k %}{{ delta(k.change, k.good_up, k.against) }}{% endif %}
+            {% if k.note %}<span>{{ '· ' if 'change' in k }}{{ k.note }}</span>{% endif %}
+        </span>
+        {% if k.spark %}
+        <svg class="kpi-spark" viewBox="0 0 100 30" preserveAspectRatio="none" role="img" aria-label="Sales a day, last 14 days"><polyline points="{{ k.spark }}"></polyline></svg>
+        {% endif %}
+    </a>
+    {% endfor %}
+</div>
+
+<div class="dash-grid">
+    <section class="card span-8">
+        <div class="card-head">
+            <h2>Sales a day, last 30 days</h2>
+            <a href="{{ url_for('reports') }}">Reports</a>
+        </div>
+        {% if chart.empty %}
+        <div class="empty"><strong>No sales in the last 60 days</strong>Sales made on the POS show here day by day. <a href="{{ url_for('pos') }}">Make a sale</a></div>
+        {% else %}
+        <p class="kpi-foot">
+            <strong class="kpi-value" style="font-size: 22px; margin: 0"><small>{{ user.currency }}</small>{{ '{:,.2f}'.format(last_30) }}</strong>
+            {{ delta(change_30, true, 'the 30 days before') }}
+        </p>
+        <div class="trend-key"><span><i></i>Last 30 days</span><span><i class="before"></i>The 30 days before</span></div>
+        <figure class="trend chart">
+            <svg viewBox="0 0 {{ chart.width }} {{ chart.height }}" role="img" aria-label="Sales a day for the last 30 days: {{ last_30|money }} in all, against {{ prior_30|money }} in the 30 days before">
+                {% for t in chart.ticks %}
+                <line class="grid" x1="{{ chart.left }}" x2="{{ chart.right }}" y1="{{ t.y }}" y2="{{ t.y }}"></line>
+                <text class="tick" x="{{ chart.left - 8 }}" y="{{ t.y + 4 }}" text-anchor="end">{{ t.label }}</text>
+                {% endfor %}
+                <polygon class="area" points="{{ chart.area }}"></polygon>
+                <polyline class="line before" points="{{ chart.before }}"></polyline>
+                <polyline class="line" points="{{ chart.line }}"></polyline>
+                <circle class="dot" cx="{{ chart.last.x }}" cy="{{ chart.last.y }}" r="3.5"></circle>
+                {% for x in chart.xlabels %}<text class="tick" x="{{ x.x }}" y="{{ chart.base + 18 }}" text-anchor="middle">{{ x.label }}</text>{% endfor %}
+                {% for h in chart.hits %}<rect class="hit" x="{{ h.x }}" y="12" width="{{ h.w }}" height="{{ chart.base - 12 }}" data-tip="{{ h.tip }}"></rect>{% endfor %}
+            </svg>
+        </figure>
+        {% endif %}
+    </section>
+
+    <section class="card span-4">
+        <div class="card-head">
+            <h2>Best sellers, last 30 days</h2>
+            <a href="{{ url_for('reports') }}">All</a>
+        </div>
+        {% if top %}
+        <div class="rank">
+            {% for p in top %}
+            <a class="rank-name sold-link" href="{{ p.href }}" data-tray data-no-prefetch title="Who bought {{ p.name }}">{{ p.name }}</a>
+            <span class="rank-track"><i style="width: {{ p.pct }}%" data-tip="{{ p.name }}&#10;Sales: {{ p.value|money }}&#10;Units sold: {{ '{:,}'.format(p.units) }}"></i></span>
+            <span class="rank-value">{{ p.value|money }}</span>
+            {% endfor %}
+        </div>
+        {% else %}
+        <div class="empty"><strong>Nothing sold yet</strong>What sells most will be ranked here.</div>
+        {% endif %}
+    </section>
+
+    <section class="card span-6" id="todo">
+        <div class="card-head">
+            <h2>Needs doing{% if todo_count %} ({{ todo_count }}){% endif %}</h2>
+            <a href="{{ url_for('notifications') }}">Alerts</a>
+        </div>
+        {% if todo %}
+        <ul class="rows">
+            {% for t in todo %}
+            <li><a href="{{ t.href }}">
+                <span class="chip {{ 'warn' if t.late else 'gold' }}">{{ t.kind }}</span>
+                <span class="row-main"><strong>{{ t.title }}</strong><small>{{ t.detail }}</small></span>
+                <span class="row-end"><strong class="{{ 'warn' if t.late }}">{{ 'Overdue' if t.late else t.when.split(',')[0]|capitalize }}</strong><small>{{ t.day }}</small></span>
+            </a></li>
+            {% endfor %}
+        </ul>
+        {% else %}
+        <div class="empty"><strong>All clear</strong>No delivery, collection, pre-order or customer request is due.</div>
+        {% endif %}
+    </section>
+
+    <section class="card span-6">
+        <div class="card-head">
+            <h2>Latest sales</h2>
+            <a href="{{ url_for('history') }}">All sales</a>
+        </div>
+        {% if recent %}
+        <ul class="rows">
+            {% for r in recent %}
+            {% set name = r.customer_name or 'Walk-in customer' %}
+            <li><a href="{{ url_for('invoice', invoice_id=r.id) }}">
+                <span class="avatar" aria-hidden="true">{{ name[:1] }}</span>
+                <span class="row-main"><strong>{{ name }}</strong><small>{{ r.invoice_no }} · {{ r.created_at[:16] }}</small></span>
+                <span class="row-end"><strong>{{ r.total|money }}</strong>
+                    <small><span class="chip {{ 'ok' if r.payment_status == 'Paid' else 'warn' if r.payment_status == 'Unpaid' else 'gold' }}">{{ r.payment_status }}</span></small></span>
+            </a></li>
+            {% endfor %}
+        </ul>
+        {% else %}
+        <div class="empty"><strong>No sales yet</strong>The latest invoices will be listed here.</div>
+        {% endif %}
+    </section>
+
+    {% if growing %}
+    <section class="card span-12">
+        <div class="card-head">
+            <h2>In the greenhouse</h2>
+            <a href="{{ url_for('up_next') }}">Up next</a>
+        </div>
+        <div class="cards">
+            {% for b in growing %}
+            <a class="card" href="{{ url_for('planting_detail', planting_id=b.id) }}">
+                <strong>{{ b.label }}</strong>
+                <p class="muted" style="margin: 6px 0 0">
+                    <span class="chip {{ 'ok' if b.stage == 'ready' else 'gold' if b.stage == 'due' else 'info' }}">{{ b.stage_label }}</span>
+                    {{ '{:,}'.format(b.available) }} free · {{ '{:,}'.format(b.pending) }} pre-ordered · ready {{ b.actual_ready_on or b.ready_on }}
+                </p>
+            </a>
+            {% endfor %}
+        </div>
+    </section>
+    {% endif %}
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+    // A tip for each chart mark that carries data-tip: under the pointer, or where a finger taps
+    (function () {
+        const tip = document.createElement("div");
+        tip.className = "chart-tip";
+        tip.hidden = true;
+        document.body.appendChild(tip);
+        function place(e) {
+            const pad = 14, box = tip.getBoundingClientRect();
+            let x = e.clientX + pad, y = e.clientY + pad;
+            if (x + box.width > window.innerWidth - 8) x = e.clientX - box.width - pad;
+            if (y + box.height > window.innerHeight - 8) y = e.clientY - box.height - pad;
+            tip.style.left = Math.max(8, x) + "px";
+            tip.style.top = Math.max(8, y) + "px";
+        }
+        document.querySelectorAll("#page-main [data-tip]").forEach(function (mark) {
+            function show(e) { tip.textContent = mark.dataset.tip; tip.hidden = false; place(e); }
+            mark.addEventListener("pointerenter", show);
+            mark.addEventListener("pointerdown", show);
+            mark.addEventListener("pointermove", place);
+            mark.addEventListener("pointerleave", function () { tip.hidden = true; });
+        });
+    })();
+</script>
+{% endblock %}
