@@ -18,13 +18,14 @@ import urllib.parse
 import zipfile
 from zoneinfo import ZoneInfo
 
-from flask import Flask, Response, abort, flash, g, jsonify, redirect, render_template, request, send_from_directory, session, url_for
+from flask import Flask, Response, abort, flash, g, has_request_context, jsonify, redirect, render_template, request, send_from_directory, session, url_for
 from markupsafe import Markup
 from werkzeug.security import check_password_hash, generate_password_hash
 import xlsxwriter
 
 from db import DB_ERRORS, IS_POSTGRES, Database, delete_business, init_schema, mark_startup_done, startup_done, startup_signature
 import assistant
+import gdrive
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ON_VERCEL = bool(os.environ.get("VERCEL"))
@@ -255,7 +256,8 @@ def user_row(db, uid):
                   b.name AS business_name, b.subtitle, b.contact, b.currency, b.low_stock_threshold,
                   b.alert_phone, b.alert_low_stock, b.alert_permission, b.alert_preorders, b.alert_collections, b.alert_deliveries, b.alert_requests, b.alert_payroll, b.preorder_remind_days,
                   b.backup_hour, b.last_backup_at, b.last_backup_by, b.demo_expires_at, b.assistant_enabled,
-                  b.wake_phrase, b.stop_phrase, b.stock_cover_days, b.evening_brief, b.brief_whatsapp
+                  b.wake_phrase, b.stop_phrase, b.stock_cover_days, b.evening_brief, b.brief_whatsapp,
+                  (SELECT COUNT(*) FROM drive_links d WHERE d.business_id = b.id AND d.refresh_token IS NOT NULL) AS drive_on
            FROM users u JOIN businesses b ON b.id = u.business_id WHERE u.id=?""",
         (uid,),
     )
@@ -10839,11 +10841,16 @@ def workbook_bytes(sheets, contents=None):
     return buffer.getvalue()
 
 
+def backup_by():
+    """Who made this backup: the admin signed in, or the nightly backup to Google Drive."""
+    return g.get("backup_by") or g.user["username"]
+
+
 def backup_facts():
     return [
         ("Business", g.user["business_name"]),
         ("Backed up", now().strftime("%d %b %Y %H:%M")),
-        ("By", g.user["username"]),
+        ("By", backup_by()),
     ]
 
 
@@ -10900,15 +10907,18 @@ def backup_files():
     )
 
 
+XLSX_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
 def xlsx_response(name, data):
     return Response(
-        data, mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        data, mimetype=XLSX_TYPE,
         headers={"Content-Disposition": f'attachment; filename="{name}"', "Cache-Control": "no-store"},
     )
 
 
 def note_backup(db, biz):
-    db.execute("UPDATE businesses SET last_backup_at=?, last_backup_by=? WHERE id=?", (now().strftime("%Y-%m-%d %H:%M:%S"), g.user["username"], biz))
+    db.execute("UPDATE businesses SET last_backup_at=?, last_backup_by=? WHERE id=?", (now().strftime("%Y-%m-%d %H:%M:%S"), backup_by(), biz))
     db.commit()
 
 
@@ -10916,9 +10926,13 @@ def note_backup(db, biz):
 @need("admin")
 def backup_page():
     hour = g.user["backup_hour"]
+    link = drive_link(get_db(), g.user["business_id"])
     return render_template(
         "backup.html", books=[(key, title) for key, title, _ in BACKUP_BOOKS], priority=PRIORITY_BOOKS, tables=backup_tables(),
         hours=BACKUP_HOURS, hour=BACKUP_HOUR_DEFAULT if hour is None else hour, file_count=len(backup_files()),
+        drive_ready=gdrive.configured(), drive=link if link and link["refresh_token"] else None,
+        drive_folder=gdrive.folder_link(link["folder_id"]) if link and link["folder_id"] else "", cron_ready=bool(os.environ.get("CRON_SECRET")),
+        drive_redirect=drive_redirect_uri(),
     )
 
 
@@ -10998,6 +11012,288 @@ def backup_settings():
         db.commit()
         flash("The end-of-day backup reminder is off." if hour < 0 else f"The backup reminder will appear from {hour:02d}:00 each day until that day's backup is made.", "ok")
     return redirect(url_for("backup_page"))
+
+
+# --- BACKUPS TO GOOGLE DRIVE ---
+# An admin connects the business's Google account once (gdrive.py has how). After that a backup saves the same files as the computer
+# backup into a folder the app made in that Drive, replacing last time's (Drive keeps the earlier versions in each file's history).
+# Back up now sends one file per request, so no request runs long; the nightly backup (vercel.json) does each business in one go.
+DRIVE_SUBFOLDERS = ("Books", "Data (CSV)")
+DRIVE_NIGHTLY_BY = "Nightly backup"
+DRIVE_CRON_SECONDS = 240   # the nightly run stops starting new businesses after this; the rest go first the next night
+
+
+def drive_link(db, biz):
+    return db.one("SELECT * FROM drive_links WHERE business_id=?", (biz,))
+
+
+def drive_redirect_uri():
+    """Where Google sends the admin back to. It must be listed, exactly, on the OAuth client in Google Cloud."""
+    if os.environ.get("GOOGLE_REDIRECT_URI"):
+        return os.environ["GOOGLE_REDIRECT_URI"]
+    if not has_request_context():
+        return ""
+    return url_for("drive_callback", _external=True, _scheme="https" if ON_VERCEL else request.scheme)
+
+
+def backup_file(db, biz, path):
+    """One file of a backup, by its path in the backup folder: its bytes and type."""
+    if path == "Master Backup.xlsx":
+        return master_workbook(db, biz), XLSX_TYPE
+    if path.startswith("Books/") and path.endswith(".xlsx"):
+        key = next((k for k, t, _ in BACKUP_BOOKS if f"Books/{t}.xlsx" == path), None)
+        if key:
+            return book_workbook(db, biz, key)[1], XLSX_TYPE
+    if path.startswith("Data (CSV)/") and path.endswith(".csv") and path[11:-4] in backup_tables():
+        return table_csv(db, biz, path[11:-4]), "text/csv"
+    if path == "Backup info.txt":
+        return ("\r\n".join(f"{label}: {value}" for label, value in backup_facts()) + "\r\n").encode("utf-8"), "text/plain"
+    abort(404)
+
+
+def drive_access(db, link):
+    """An access token for the business's Drive, refreshed when the one kept has run out. A connection Google no longer accepts
+    is forgotten, so the Backups page asks for it to be connected again."""
+    if link["access_token"] and (link["access_until"] or 0) > gdrive.now_seconds() + 60:
+        token = gdrive.unseal(app.config["SECRET_KEY"], link["access_token"])
+        if token:
+            return token
+    refresh_token = gdrive.unseal(app.config["SECRET_KEY"], link["refresh_token"] or "")
+    if not refresh_token:
+        drive_forget(db, link["business_id"], "The app can no longer read its Google Drive connection. Connect Google Drive again.")
+        raise gdrive.DriveError("Google Drive needs to be connected again.", gone=True)
+    try:
+        token, seconds = gdrive.refresh(refresh_token)
+    except gdrive.DriveError as e:
+        if e.gone:
+            drive_forget(db, link["business_id"], "Google no longer lets the app into this Drive (access was removed or ran out). Connect Google Drive again.")
+        raise
+    db.execute("UPDATE drive_links SET access_token=?, access_until=? WHERE id=?",
+               (gdrive.seal(app.config["SECRET_KEY"], token), gdrive.now_seconds() + seconds, link["id"]))
+    db.commit()
+    return token
+
+
+def drive_forget(db, biz, why=""):
+    """Drops the connection's tokens (the folder and the files saved stay in Drive), noting why for the Backups page."""
+    db.execute("UPDATE drive_links SET refresh_token=NULL, access_token=NULL, access_until=NULL, last_error=?, last_error_at=? WHERE business_id=?",
+               (why, now().strftime("%Y-%m-%d %H:%M:%S"), biz))
+    db.commit()
+
+
+def drive_known(db, biz, path):
+    row = db.one("SELECT file_id FROM drive_files WHERE business_id=? AND path=?", (biz, path))
+    return row["file_id"] if row else None
+
+
+def drive_remember(db, biz, path, file_id):
+    if db.execute("UPDATE drive_files SET file_id=? WHERE business_id=? AND path=?", (file_id, biz, path)).rowcount == 0:
+        db.execute("INSERT INTO drive_files (business_id, path, file_id) VALUES (?, ?, ?)", (biz, path, file_id))
+    db.commit()
+
+
+def drive_check_folders(db, biz, link, access):
+    """At the start of a backup: the backup folder and its subfolders are made again if they were deleted or binned in Drive."""
+    folder = link["folder_id"]
+    if not folder or not gdrive.usable(access, folder):
+        folder = gdrive.make_folder(access, f"{g.user['business_name']} backups")
+        db.execute("UPDATE drive_links SET folder_id=? WHERE id=?", (folder, link["id"]))
+        db.execute("DELETE FROM drive_files WHERE business_id=?", (biz,))
+        db.commit()
+    for name in DRIVE_SUBFOLDERS:
+        known = drive_known(db, biz, name + "/")
+        if not known or not gdrive.usable(access, known):
+            db.execute("DELETE FROM drive_files WHERE business_id=? AND path LIKE ?", (biz, name + "/%"))
+            drive_remember(db, biz, name + "/", gdrive.make_folder(access, name, folder))
+    return folder
+
+
+def drive_save(db, biz, folder, access, path):
+    data, mimetype = backup_file(db, biz, path)
+    parent, name = (drive_known(db, biz, path.split("/")[0] + "/"), path.split("/", 1)[1]) if "/" in path else (folder, path)
+    drive_remember(db, biz, path, gdrive.put_file(access, name, data, mimetype, parent or folder, drive_known(db, biz, path)))
+
+
+def drive_finished(db, biz, files):
+    note_backup(db, biz)
+    db.execute("UPDATE drive_links SET last_at=?, last_by=?, last_files=?, last_error='', last_error_at=NULL WHERE business_id=?",
+               (now().strftime("%Y-%m-%d %H:%M:%S"), backup_by(), files, biz))
+    db.commit()
+
+
+def drive_failed(db, biz, error):
+    db.rollback()
+    if getattr(error, "gone", False):
+        return   # drive_forget has already noted why
+    db.execute("UPDATE drive_links SET last_error=?, last_error_at=? WHERE business_id=?", (str(error)[:300], now().strftime("%Y-%m-%d %H:%M:%S"), biz))
+    db.commit()
+
+
+def drive_json(**data):
+    return Response(json.dumps(data), mimetype="application/json", headers={"Cache-Control": "no-store"})
+
+
+@app.post("/backup/drive/connect")
+@need("admin")
+def drive_connect():
+    if not gdrive.configured():
+        flash("Google Drive is not set up on this server yet (GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET are missing).", "error")
+        return redirect(url_for("backup_page"))
+    session["drive_state"] = secrets.token_urlsafe(24)
+    return redirect(gdrive.auth_url(drive_redirect_uri(), session["drive_state"]))
+
+
+@app.get("/backup/drive/callback")
+@need("admin")
+def drive_callback():
+    expected, supplied = session.pop("drive_state", ""), request.args.get("state", "")
+    if not expected or not hmac.compare_digest(expected.encode("utf-8"), supplied.encode("utf-8")):
+        flash("That Google sign-in did not start from this page. Click Connect Google Drive again.", "error")
+        return redirect(url_for("backup_page"))
+    if request.args.get("error") or not request.args.get("code"):
+        flash("Google Drive was not connected: permission was not given." if request.args.get("error") == "access_denied"
+              else "Google Drive was not connected. Try again.", "error")
+        return redirect(url_for("backup_page"))
+    db, biz = get_db(), g.user["business_id"]
+    try:
+        tokens, email = gdrive.exchange(request.args["code"], drive_redirect_uri())
+        access = tokens["access_token"]
+        old = drive_link(db, biz)
+        folder = old["folder_id"] if old and old["folder_id"] and (old["email"] or "") == email else None
+        if not folder or not gdrive.usable(access, folder):
+            folder = gdrive.make_folder(access, f"{g.user['business_name']} backups")
+            db.execute("DELETE FROM drive_files WHERE business_id=?", (biz,))
+    except gdrive.DriveError as e:
+        db.rollback()
+        flash(f"Google Drive was not connected. {e}", "error")
+        return redirect(url_for("backup_page"))
+    key, stamp = app.config["SECRET_KEY"], now().strftime("%Y-%m-%d %H:%M:%S")
+    values = (email, gdrive.seal(key, tokens["refresh_token"]), gdrive.seal(key, access), gdrive.now_seconds() + int(tokens.get("expires_in", 3600)),
+              folder, g.user["username"], stamp)
+    if old:
+        db.execute("""UPDATE drive_links SET email=?, refresh_token=?, access_token=?, access_until=?, folder_id=?, connected_by=?, connected_at=?,
+                      last_error='', last_error_at=NULL WHERE business_id=?""", values + (biz,))
+    else:
+        db.execute("""INSERT INTO drive_links (email, refresh_token, access_token, access_until, folder_id, connected_by, connected_at, business_id)
+                      VALUES (?, ?, ?, ?, ?, ?, ?, ?)""", values + (biz,))
+    db.commit()
+    flash(f"Google Drive is connected{' (' + email + ')' if email else ''}. Backups go to the folder “{g.user['business_name']} backups” there. "
+          "Click Back up to Google Drive now to make the first one.", "ok")
+    return redirect(url_for("backup_page"))
+
+
+@app.post("/backup/drive/disconnect")
+@need("admin")
+def drive_disconnect():
+    db, biz = get_db(), g.user["business_id"]
+    link = drive_link(db, biz)
+    if link and link["refresh_token"]:
+        token = gdrive.unseal(app.config["SECRET_KEY"], link["refresh_token"])
+        if token:
+            gdrive.revoke(token)
+    db.execute("DELETE FROM drive_links WHERE business_id=?", (biz,))
+    db.execute("DELETE FROM drive_files WHERE business_id=?", (biz,))
+    db.commit()
+    flash("Google Drive is disconnected. The backups already saved there stay in that Drive.", "ok")
+    return redirect(url_for("backup_page"))
+
+
+@app.post("/backup/drive/settings")
+@need("admin")
+def drive_settings():
+    db, biz = get_db(), g.user["business_id"]
+    on = 1 if request.form.get("auto") else 0
+    db.execute("UPDATE drive_links SET auto=? WHERE business_id=?", (on, biz))
+    db.commit()
+    flash("Each night, the day's backup is saved to Google Drive by itself." if on else "The nightly backup to Google Drive is off.", "ok")
+    return redirect(url_for("backup_page"))
+
+
+@app.post("/backup/drive/file")
+@need("admin")
+def drive_file():
+    """backup.js saves a backup one file at a time: first=1 on the first, which checks the folders; done=1 after the last."""
+    db, biz = get_db(), g.user["business_id"]
+    link = drive_link(db, biz)
+    if not link or not link["refresh_token"]:
+        return drive_json(ok=False, gone=True, error="Google Drive is not connected. Connect it on the Backups page.")
+    path = request.form.get("path", "")
+    if not request.form.get("done") and path not in {f["path"] for f in backup_files()}:
+        abort(404)
+    try:
+        access = drive_access(db, link)
+        folder = drive_check_folders(db, biz, link, access) if request.form.get("first") else link["folder_id"]
+        if request.form.get("done"):
+            drive_save(db, biz, folder, access, "Backup info.txt")
+            drive_finished(db, biz, request.form.get("files", type=int) or 0)
+            return drive_json(ok=True, at=db.one("SELECT last_backup_at FROM businesses WHERE id=?", (biz,))["last_backup_at"],
+                              folder=gdrive.folder_link(folder))
+        drive_save(db, biz, folder, access, path)
+    except gdrive.DriveError as e:
+        drive_failed(db, biz, e)
+        return drive_json(ok=False, gone=e.gone, error=str(e))
+    except Exception:
+        app.logger.exception("Saving %s to Google Drive failed", path)
+        drive_failed(db, biz, f"{path} could not be made.")
+        return drive_json(ok=False, gone=False, error=f"{path} could not be made. Try again; if it keeps failing, use Back up to this computer.")
+    return drive_json(ok=True)
+
+
+def drive_backup_all(db, biz):
+    """Every file of a backup into the business's Drive, in one go (the nightly backup). Returns how many files."""
+    link = drive_link(db, biz)
+    access = drive_access(db, link)
+    folder = drive_check_folders(db, biz, link, access)
+    paths = [f["path"] for f in backup_files()] + ["Backup info.txt"]
+    for path in paths:
+        drive_save(db, biz, folder, access, path)
+    drive_finished(db, biz, len(paths) - 1)
+    return len(paths)
+
+
+# Once a night (vercel.json) Vercel calls this with the CRON_SECRET it was given: each business with Google Drive connected and the
+# nightly backup on gets that day's backup saved there, once. A failure is noted on the Backups page and raised as an alert for admins.
+@app.get("/cron/drive-backups")
+def cron_drive_backups():
+    secret = os.environ.get("CRON_SECRET", "")
+    if not secret:
+        return jsonify({"error": "CRON_SECRET is not set on the server."}), 503
+    if not hmac.compare_digest(request.headers.get("Authorization", "").encode("utf-8"), f"Bearer {secret}".encode("utf-8")):
+        abort(401)
+    if not gdrive.configured():
+        return jsonify({"error": "GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET are not set on the server."}), 503
+    db, today, started, done, failed = get_db(), today_str(), time.monotonic(), 0, 0
+    rows = db.all(
+        """SELECT d.business_id FROM drive_links d JOIN businesses b ON b.id = d.business_id
+           WHERE d.auto=1 AND d.refresh_token IS NOT NULL AND b.demo_expires_at IS NULL ORDER BY COALESCE(d.auto_day, ''), d.business_id"""
+    )
+    for row in rows:
+        if time.monotonic() - started > DRIVE_CRON_SECONDS:
+            break
+        biz = row["business_id"]
+        # Taken first, so a second call the same night (Vercel can repeat one) does nothing twice
+        if db.execute("UPDATE drive_links SET auto_day=? WHERE business_id=? AND (auto_day IS NULL OR auto_day <> ?)", (today, biz, today)).rowcount != 1:
+            db.commit()
+            continue
+        db.commit()
+        admin = db.one("SELECT id FROM users WHERE business_id=? AND role='admin' ORDER BY id LIMIT 1", (biz,))
+        if not admin:
+            continue
+        g.user, g.backup_by = user_row(db, admin["id"]), DRIVE_NIGHTLY_BY
+        try:
+            drive_backup_all(db, biz)
+            done += 1
+        except Exception as e:   # one business's failure must not stop the others
+            app.logger.exception("The nightly Drive backup of business %s failed", biz)
+            failed += 1
+            drive_failed(db, biz, e if isinstance(e, gdrive.DriveError) else "The backup could not be made.")
+            notify(db, "backup", "The nightly backup to Google Drive failed",
+                   (str(e) if isinstance(e, gdrive.DriveError) else "The backup could not be made.") + " Open Backups to see what to do.", url_for("backup_page"))
+            db.commit()
+        finally:
+            g.pop("backup_by", None)
+            g.user = None
+    return jsonify({"backed_up": done, "failed": failed})
 
 
 # --- RESET THE APP (ADMIN) ---

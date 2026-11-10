@@ -5,11 +5,52 @@
     <div>
         <h1>Backups</h1>
         <p class="muted">
-            A copy of every record, kept on this computer: the books as Excel files, a master workbook with all of them, and every table as a CSV file.
-            Each backup replaces the files from the last one, so the folder always holds the latest copy.
+            A copy of every record, kept in Google Drive or on this computer: the books as Excel files, a master workbook with all of them, and every table
+            as a CSV file. Each backup replaces the files from the last one, so the folder always holds the latest copy.
         </p>
     </div>
 </div>
+
+<section class="card block drive-card" id="drive">
+    <h2>Google Drive</h2>
+    {% if drive %}
+    <p>Connected to <strong>{{ drive.email or 'a Google account' }}</strong>{% if drive.connected_by %} by {{ drive.connected_by }}{% endif %}.
+        Backups go to the folder <a href="{{ drive_folder }}" target="_blank" rel="noopener"><strong>{{ user.business_name }} backups</strong></a> in that Drive.</p>
+    <p class="muted" id="drive-last">
+        {% if drive.last_at %}Last saved there: <strong>{{ drive.last_at[:16] }}</strong> by {{ drive.last_by }} ({{ drive.last_files }} files).
+        {% else %}Nothing has been saved there yet.{% endif %}
+    </p>
+    {% if drive.last_error %}<p class="flash error">The last backup to Google Drive failed ({{ (drive.last_error_at or '')[:16] }}): {{ drive.last_error }}</p>{% endif %}
+    <div class="toolbar">
+        <button type="button" class="btn success" id="drive-now">Back up to Google Drive now</button>
+        <a class="btn" href="{{ drive_folder }}" target="_blank" rel="noopener">Open the folder in Drive</a>
+    </div>
+    <p id="drive-status" class="muted" role="status"></p>
+    <form method="post" action="{{ url_for('drive_settings') }}" class="spaced">
+        {{ csrf_field() }}
+        <label class="check"><input type="checkbox" name="auto" value="1" {{ 'checked' if drive.auto }} onchange="this.form.requestSubmit()">
+            Back up to Google Drive by itself every night (about 23:00), even with the app closed</label>
+        {% if not cron_ready %}<p class="muted hint">The nightly backup needs CRON_SECRET set on the server, like the evening brief.</p>{% endif %}
+        <noscript><button class="btn small">Save</button></noscript>
+    </form>
+    <p class="muted hint">
+        The app can only see and change the files it saved itself, nothing else in that Drive. Each backup replaces the files there, and Drive keeps
+        earlier versions of each file for 30 days (in Drive: right-click a file, then File information, then Manage versions).
+    </p>
+    <form method="post" action="{{ url_for('drive_disconnect') }}" data-confirm="Disconnect Google Drive? The backups already saved there stay in that Drive.">
+        {{ csrf_field() }}<button class="btn ghost small">Disconnect Google Drive</button>
+    </form>
+    {% elif drive_ready %}
+    <p>Save each backup straight into the business's Google Drive, from any browser or phone, and have it made by itself every night.</p>
+    <form method="post" action="{{ url_for('drive_connect') }}">
+        {{ csrf_field() }}<button class="btn success">Connect Google Drive</button>
+    </form>
+    <p class="muted hint">Google asks you to sign in and to let the app save its own files in your Drive. It cannot see anything else there.</p>
+    {% else %}
+    <p class="muted">Google Drive is not set up on this server yet. Whoever runs the app adds a Google sign-in client for it (GOOGLE_CLIENT_ID and
+        GOOGLE_CLIENT_SECRET); its redirect address is <code>{{ drive_redirect }}</code>.</p>
+    {% endif %}
+</section>
 
 <div class="split">
     <section class="card grow">
@@ -85,7 +126,24 @@
         const status = document.getElementById("backup-status");
         const now = document.getElementById("backup-now");
         const choose = document.getElementById("backup-choose");
+        const drive = document.getElementById("drive-now");
+        const driveStatus = document.getElementById("drive-status");
         if (!backup) return;
+        if (drive) {
+            drive.addEventListener("click", async function () {
+                drive.disabled = now.disabled = true;
+                try {
+                    const result = await backup.run(function (text) { driveStatus.textContent = text; }, "drive");
+                    driveStatus.textContent = backup.said(result);
+                    document.getElementById("drive-last").textContent = "Last saved there: " + backup.lastDone().slice(0, 16) + ", just now (" + (result.files) + " files).";
+                    document.getElementById("last-backup").textContent = "Last backup: " + backup.lastDone().slice(0, 16) + ", just now (Google Drive).";
+                } catch (error) {
+                    driveStatus.textContent = backup.failure(error);
+                } finally {
+                    drive.disabled = now.disabled = false;
+                }
+            });
+        }
         function showFolder() {
             if (!backup.supported) {
                 where.textContent = "This browser cannot save into a folder, so Back up now downloads one ZIP file. Use Chrome or Edge to have each backup replace the last one.";
@@ -110,8 +168,8 @@
         }
         now.addEventListener("click", function () {
             act(async function () {
-                const result = await backup.run(function (text) { status.textContent = text; });
-                status.textContent = result.zip ? "The ZIP file is downloading." : "Saved " + result.files + " files to “" + result.folder + "”.";
+                const result = await backup.run(function (text) { status.textContent = text; }, "computer");
+                status.textContent = backup.said(result);
                 document.getElementById("last-backup").textContent = "Last backup: " + backup.lastDone().slice(0, 16) + ", just now.";
             });
         });

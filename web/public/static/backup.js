@@ -2,6 +2,8 @@
 // File names never change, so each backup replaces the files from the last one. At the end of the day (the reminder time set on
 // the Backups page) the app asks whether to back up now; saying yes is what lets the browser write to the folder.
 // Saving into a folder needs Chrome or Edge on a computer; any other browser downloads everything as one ZIP instead.
+// With Google Drive connected (the Backups page), a backup goes to the business's Drive instead, from any browser or phone: the
+// server makes each file and saves it there, one request per file.
 // Loaded once for admins, like notify.js; the Backups page uses it through window.ChimokoBackup.
 (function () {
     const me = document.currentScript;
@@ -17,7 +19,7 @@
     function settings() {
         const tag = document.querySelector("script[data-backup-files]") || me;
         if ((tag.dataset.last || "") > lastDone) lastDone = tag.dataset.last;
-        return { hour: parseInt(tag.dataset.hour, 10), csrf: tag.dataset.csrf || me.dataset.csrf };
+        return { hour: parseInt(tag.dataset.hour, 10), csrf: tag.dataset.csrf || me.dataset.csrf, drive: tag.dataset.drive === undefined ? me.dataset.drive : tag.dataset.drive };
     }
 
     // The chosen folder is remembered in this browser (IndexedDB can keep a folder handle; localStorage cannot)
@@ -70,9 +72,33 @@
         return response;
     }
 
-    // One backup: every file into the folder, replacing last time's; then the server notes it, so the reminder knows today is done
-    async function run(report) {
+    // One backup to Google Drive: the server saves each file there, replacing last time's, and notes the backup after the last one
+    async function toDrive(report) {
+        const url = settings().drive;
+        const files = await (await fetchOk(me.dataset.backupFiles)).json();
+        async function send(fields) {
+            const response = await fetch(url, { method: "POST", credentials: "same-origin", body: new URLSearchParams(Object.assign({ csrf: settings().csrf }, fields)) });
+            if ((response.headers.get("Content-Type") || "").indexOf("application/json") !== 0) {
+                throw new Error("The backup could not be made. Refresh the page (you may need to sign in again) and try again.");
+            }
+            const answer = await response.json();
+            if (!answer.ok) throw new Error(answer.error || "The backup could not be saved to Google Drive.");
+            return answer;
+        }
+        for (let i = 0; i < files.length; i++) {
+            report("Saving " + files[i].path + " to Google Drive (" + (i + 1) + " of " + files.length + ")…");
+            await send({ path: files[i].path, first: i === 0 ? "1" : "" });
+        }
+        const done = await send({ done: "1", files: String(files.length) });
+        lastDone = done.at || stampNow();
+        return { drive: true, files: files.length + 1, link: done.folder, at: lastDone };
+    }
+
+    // One backup: every file into the folder, replacing last time's; then the server notes it, so the reminder knows today is done.
+    // where: "drive" or "computer"; left out, Google Drive when it is connected, otherwise this computer.
+    async function run(report, where) {
         report = report || function () {};
+        if (where === "drive" || (!where && settings().drive)) return toDrive(report);
         if (!supported) {
             report("Downloading the backup as one ZIP file…");
             window.location.href = me.dataset.zip;   // the server notes the backup as it makes the ZIP
@@ -117,6 +143,11 @@
         return Date.now() >= until;
     }
 
+    function said(result) {
+        if (result.drive) return "Saved " + result.files + " files to Google Drive.";
+        return result.zip ? "The ZIP file is downloading." : "Saved " + result.files + " files to “" + result.folder + "”.";
+    }
+
     function failure(error) {
         if (error && error.name === "AbortError") return "No folder was chosen, so nothing was saved.";
         return (error && error.message) || "The backup could not be saved.";
@@ -125,18 +156,21 @@
     // The end-of-day question. It is built here, on whatever page is open, and closes itself afterwards.
     async function remind() {
         if (busy || document.getElementById("backup-prompt") || document.querySelector("dialog[open]") || !due()) return;
-        const where = supported ? await savedFolder() : null;
+        const drive = !!settings().drive;
+        const where = supported && !drive ? await savedFolder() : null;
         const dialog = document.createElement("dialog");
         dialog.id = "backup-prompt";
         dialog.className = "modal no-print";
         dialog.innerHTML =
             '<div class="modal-body"><h2>End of day backup</h2>' +
-            "<p>Save today’s backup to this computer? The Sales, Purchase, Planting and Inventory books, a master workbook with every book, and all the records as CSV files.</p>" +
+            "<p>Save today’s backup to " + (drive ? "Google Drive" : "this computer") + "? The Sales, Purchase, Planting and Inventory books, a master workbook with every book, and all the records as CSV files.</p>" +
             '<p class="muted" data-where></p><p class="muted" data-status role="status"></p>' +
             '<button type="button" class="btn success wide" data-go>Back up now</button>' +
             '<div class="toolbar spaced"><button type="button" class="btn" data-later>Remind me in an hour</button>' +
             '<button type="button" class="btn ghost" data-skip>Not today</button></div></div>';
-        dialog.querySelector("[data-where]").textContent = !supported
+        dialog.querySelector("[data-where]").textContent = drive
+            ? "It replaces the last backup in the business’s backup folder in Google Drive."
+            : !supported
             ? "This browser downloads the backup as one ZIP file. To have each backup replace the last one in a folder, use Chrome or Edge."
             : where ? "It replaces the last backup in the folder “" + where.name + "”."
             : "The first time, choose the folder to keep backups in; later backups replace the files there.";
@@ -151,7 +185,7 @@
             buttons.forEach(function (b) { b.disabled = true; });
             try {
                 const result = await run(function (text) { status.textContent = text; });
-                status.textContent = result.zip ? "The ZIP file is downloading." : "Saved " + result.files + " files to “" + result.folder + "”.";
+                status.textContent = said(result);
                 setTimeout(function () { dialog.close(); }, 2500);
             } catch (error) {
                 status.textContent = failure(error);
@@ -178,6 +212,8 @@
         folderName: function () { return savedFolder().then(function (h) { return h ? h.name : ""; }); },
         lastDone: function () { return lastDone; },
         failure: failure,
+        said: said,
+        drive: function () { return !!settings().drive; },
     };
 
     setTimeout(remind, 9000);   // after the launch screen

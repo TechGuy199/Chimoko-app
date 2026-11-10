@@ -289,6 +289,17 @@ SCHEMA = [
     """CREATE TABLE IF NOT EXISTS customer_request_log (
         id {pk}, business_id INTEGER NOT NULL, request_id INTEGER NOT NULL, kind TEXT NOT NULL, detail TEXT DEFAULT '', created_by TEXT, created_at TEXT
     )""",
+    # A business's Google Drive for backups (one row per business): the Google account, the refresh token and the current access token
+    # (both encrypted), the backup folder the app made there, whether the nightly backup runs, and how the last one went. Never backed up itself.
+    """CREATE TABLE IF NOT EXISTS drive_links (
+        id {pk}, business_id INTEGER NOT NULL UNIQUE, email TEXT DEFAULT '', refresh_token TEXT, access_token TEXT, access_until INTEGER,
+        folder_id TEXT, auto INTEGER NOT NULL DEFAULT 1, connected_by TEXT, connected_at TEXT, last_at TEXT, last_by TEXT, last_files INTEGER,
+        last_error TEXT DEFAULT '', last_error_at TEXT, auto_day TEXT
+    )""",
+    # The id in Drive of each file and subfolder a backup saved, by its path in the backup folder, so the next backup replaces it
+    """CREATE TABLE IF NOT EXISTS drive_files (
+        id {pk}, business_id INTEGER NOT NULL, path TEXT NOT NULL, file_id TEXT NOT NULL
+    )""",
     # Which version of the start-up work (the schema above, its migrations and the app's one-off repairs) has been run
     "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRIMARY KEY, value TEXT)",
 ]
@@ -319,6 +330,7 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS assistant_actions_by_user ON assistant_actions (business_id, user_id, status)",
     "CREATE INDEX IF NOT EXISTS customer_requests_by_status ON customer_requests (business_id, status, follow_up_on)",
     "CREATE INDEX IF NOT EXISTS employee_absences_by_employee ON employee_absences (business_id, employee_id, day)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS drive_files_by_path ON drive_files (business_id, path)",
     "CREATE INDEX IF NOT EXISTS customer_request_log_by_request ON customer_request_log (business_id, request_id)",
     "CREATE INDEX IF NOT EXISTS planting_trays_by_planting ON planting_trays (business_id, planting_id)",
     "CREATE INDEX IF NOT EXISTS planting_trays_by_employee ON planting_trays (business_id, employee_id, paid_payslip_id)",

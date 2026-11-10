@@ -4,3 +4,4 @@ tzdata
 reportlab>=4.0
 XlsxWriter>=3.1
 google-genai>=2.25.0
+cryptography>=42

@@ -1,5 +1,6 @@
 {
   "crons": [
-    { "path": "/cron/evening-brief", "schedule": "0 16 * * *" }
+    { "path": "/cron/evening-brief", "schedule": "0 16 * * *" },
+    { "path": "/cron/drive-backups", "schedule": "0 21 * * *" }
   ]
 }

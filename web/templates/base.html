@@ -226,7 +226,7 @@
 {# Backups and the end-of-day reminder; read again from each page, so a newer backup or a changed reminder time is seen #}
 <script src="{{ asset('backup.js') }}" data-biz="{{ user.business_id }}" data-hour="{{ 17 if user.backup_hour is none else user.backup_hour }}"
         data-last="{{ user.last_backup_at or '' }}" data-csrf="{{ csrf_token() }}" data-backup-files="{{ url_for('backup_manifest') }}"
-        data-done="{{ url_for('backup_done') }}" data-zip="{{ url_for('backup_zip') }}"></script>
+        data-done="{{ url_for('backup_done') }}" data-zip="{{ url_for('backup_zip') }}" data-drive="{{ url_for('drive_file') if user.drive_on else '' }}"></script>
 {% endif %}
 {% endif %}
 {# In-place navigation (nav.js) swaps this page for the next one without a full reload; it re-runs only the
