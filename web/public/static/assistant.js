@@ -57,6 +57,7 @@
         stop: "M7 7h10v10H7z",
         send: "M4 12 20 4l-4 16-4-6-8-2Zm8 2 4-6",
         speaker: "M4 9v6h4l5 4V5L8 9H4Zm12 0a4 4 0 0 1 0 6m2.5-9a8 8 0 0 1 0 12",
+        muted: "M4 9v6h4l5 4V5L8 9H4Zm12.5.5 5 5m0-5-5 5",
         close: "M6 6l12 12M18 6 6 18",
         again: "M4 12a8 8 0 0 1 14-5.3M20 4v5h-5M20 12a8 8 0 0 1-14 5.3M4 20v-5h5",
         camera: "M4 8h3l2-3h6l2 3h3a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1Zm8 3a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Z",
@@ -259,8 +260,14 @@
         });
     }
 
-    // opts.heard: the question was spoken while listening, so the answer is spoken back (and a change it prepared can be confirmed by voice);
-    // opts.handsfree: in a hands-free conversation
+    // Talking back is the person's choice (the speaker button in the header), off until they switch it on. While it is off nothing is
+    // spoken and no voice is asked for: Gemini is sent the question as a typed one, and answers are only shown.
+    function speaks() {
+        return keep("assistant.speak") === "1";
+    }
+
+    // opts.heard: the question was spoken while listening, so the answer is spoken back when talking back is on (and a change it prepared
+    // can be confirmed by voice); opts.handsfree: in a hands-free conversation
     function ask(message, voice, opts) {
         const heard = !!(opts && opts.heard);
         if (busy || (!message.trim() && !attachment)) return;
@@ -284,8 +291,8 @@
         paintEar();
         const form = new FormData();
         form.append("message", message);
-        if (voice) form.append("voice", "1");
-        if (opts && opts.handsfree) form.append("handsfree", "1");
+        if (voice && speaks()) form.append("voice", "1");
+        if (opts && opts.handsfree && speaks()) form.append("handsfree", "1");
         if (sending) form.append("attachment", sending.blob, sending.name);
         send(cfg.chat, form).then(function (r) {
             status("");
@@ -301,7 +308,7 @@
                     return { card: card, node: ui.body.querySelector('.assistant-card[data-id="' + card.id + '"]') };
                 });
                 talkBack(r.reply + (waiting.length && !/\byes\b/i.test(r.reply) ? " Say yes to confirm, or no to cancel." : ""));
-            } else if (voice || keep("assistant.speak") === "1") say(r.reply);
+            } else if (speaks()) say(r.reply);
         });
     }
 
@@ -321,7 +328,7 @@
             addMessage("user", "Evening brief");
             addMessage("assistant", r.reply, { sources: r.sources, actions: r.actions, drafts: r.drafts, notes: r.notes });
             if (ear) talkBack(r.reply);
-            else if (keep("assistant.speak") === "1") say(r.reply);
+            else if (speaks()) say(r.reply);
         });
     }
 
@@ -660,8 +667,10 @@
     }
 
     // An answer to something heard is spoken back; then, listening for the wake phrase, a follow-up is waited for without it
+    // With talking back off nothing is said: it goes straight on to listening for the follow-up.
     function talkBack(text) {
-        say(text, function () { if (ear && !handsfree) wake(); paintEar(); });
+        function then() { if (ear && !handsfree) wake(); paintEar(); }
+        if (speaks()) say(text, then); else then();
     }
 
     // ---------- Speaking: Gemini's voice, the one the person chose ----------
@@ -910,6 +919,13 @@
         const head = el("header", "assistant-head");
         head.appendChild(el("strong", "assistant-title", "Assistant"));
         const tools = el("span", "assistant-head-tools");
+        ui.talk = button("assistant-talk", "Talk back", "muted", function () {
+            const on = !speaks();
+            keep("assistant.speak", on ? "1" : "0");
+            paintSpeak();
+            if (on) unlock(); else stopSpeaking();
+        });
+        tools.appendChild(ui.talk);
         if (Recognition) {
             ui.ear = button("assistant-ear", "Listen for the wake phrase", "ear", function () { if (ear) stopListening(false); else { unlock(); startListening(); } });
             ui.free = button("assistant-free", "Hands-free conversation", "free", function () { setHandsfree(!handsfree); });
@@ -924,7 +940,7 @@
         head.appendChild(tools);
         panel.appendChild(head);
 
-        // The menu: reading typed answers aloud, the voice, what it remembers, a new chat
+        // The menu: the voice, what it remembers, a new chat
         ui.menu = el("div", "assistant-menu");
         ui.menu.hidden = true;
         function item(text, handler) {
@@ -934,12 +950,6 @@
             ui.menu.appendChild(b);
             return b;
         }
-        ui.speakToggle = item("", function () {
-            const on = keep("assistant.speak") !== "1";
-            keep("assistant.speak", on ? "1" : "0");
-            paintSpeak();
-            if (on) unlock(); else stopSpeaking();
-        });
         item("My voice", showVoices);
         item("What I remember", showMemory);
         item("Start a new chat", function () {
@@ -1016,17 +1026,23 @@
         document.documentElement.appendChild(ui.mini);
     }
 
+    // The speaker button: lit with sound waves when the assistant talks back, crossed out when it does not
     function paintSpeak() {
-        const on = keep("assistant.speak") === "1";
-        ui.speakToggle.textContent = (on ? "✓ " : "") + "Read typed answers aloud";
-        ui.speakToggle.setAttribute("aria-pressed", on ? "true" : "false");
+        const on = speaks();
+        const label = on ? "Talking back is on: click to switch the voice off" : "Talking back is off: click to have answers spoken";
+        ui.talk.classList.toggle("on", on);
+        ui.talk.setAttribute("aria-pressed", on ? "true" : "false");
+        ui.talk.setAttribute("aria-label", label);
+        ui.talk.title = label;
+        ui.talk.querySelector("path").setAttribute("d", on ? ICONS.speaker : ICONS.muted);
     }
 
     function welcome() {
         addMessage("assistant", "Hello " + cfg.user + ". Ask me about sales, stock, customers, deliveries, what to restock or how to do something in the app. " +
             "I can prepare sales, pre-orders, purchases, plantings and more for you to confirm. Send a photo of a supplier's receipt or a tally of trays planted and I will fill it in for you. " +
             "Tell me how you like things and I will remember." +
-            (Recognition ? " Tap the ear and just say “" + cfg.wake + "” and your question, or the headset for a hands-free conversation. The menu (…) lets you pick my voice." : ""),
+            (Recognition ? " Tap the ear and just say “" + cfg.wake + "” and your question, or the headset for a hands-free conversation. The menu (…) lets you pick my voice." : "") +
+            " I answer in writing; tap the speaker at the top if you want me to talk back.",
             { plain: true });
     }
 
