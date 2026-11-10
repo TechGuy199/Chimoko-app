@@ -332,6 +332,21 @@
         });
     }
 
+    // ---------- The reminder report: told once, the next time the panel is open after the app raises it ----------
+    function giveReminders() {
+        if (busy || !cfg.reminders) return;
+        busy = true;
+        send(cfg.reminders, new FormData()).then(function (r) {
+            busy = false;
+            briefBadge(false);
+            if (r.error || !r.reply) return;
+            addMessage("user", "Reminders");
+            addMessage("assistant", r.reply, { sources: r.sources, actions: r.actions, drafts: r.drafts, notes: r.notes });
+            if (ear) talkBack(r.reply);
+            else if (speaks()) say(r.reply);
+        });
+    }
+
     function briefBadge(on) {
         fab.classList.toggle("has-brief", on);
         if (bubble) bubble.hidden = !on;
@@ -1062,8 +1077,9 @@
             s.actions.forEach(addCard);
             scrollDown();
             paintEar();
-            briefBadge(!!s.brief_due);
+            briefBadge(!!s.brief_due || !!s.reminders_due);
             if (s.brief_due) giveBrief();
+            else if (s.reminders_due) giveReminders();
         }).catch(function () { status(""); addError("Could not open the assistant. Check the connection and try again."); });
     }
 
@@ -1075,7 +1091,7 @@
         fab.setAttribute("aria-expanded", "true");
         if (bubble) bubble.hidden = true;
         if (!ready) load();
-        else if (fab.classList.contains("has-brief")) giveBrief();
+        else if (fab.classList.contains("has-brief")) { if (cfg.remindersWaiting === "1" && cfg.briefWaiting !== "1") giveReminders(); else giveBrief(); }
         if (Recognition && keep("assistant.listen") === "1") {
             startListening();
             if (keep("assistant.handsfree") === "1") setHandsfree(true);
@@ -1130,8 +1146,8 @@
 
     // The evening brief waiting: a dot on the button and a note beside it, until the panel is opened
     let bubble = null;
-    if (cfg.briefWaiting === "1") {
-        bubble = el("button", "assistant-bubble no-print", "Your evening brief is ready");
+    if (cfg.briefWaiting === "1" || cfg.remindersWaiting === "1") {
+        bubble = el("button", "assistant-bubble no-print", cfg.briefWaiting === "1" ? "Your evening brief is ready" : "You have new reminders");
         bubble.type = "button";
         bubble.addEventListener("click", openPanel);
         document.documentElement.appendChild(bubble);

@@ -300,6 +300,11 @@ SCHEMA = [
     """CREATE TABLE IF NOT EXISTS drive_files (
         id {pk}, business_id INTEGER NOT NULL, path TEXT NOT NULL, file_id TEXT NOT NULL
     )""",
+    # A phone or computer that asked for push notifications (Settings): where the browser's push service takes them, and its keys
+    """CREATE TABLE IF NOT EXISTS push_subscriptions (
+        id {pk}, business_id INTEGER NOT NULL, user_id INTEGER NOT NULL, endpoint TEXT NOT NULL, p256dh TEXT NOT NULL, auth TEXT NOT NULL,
+        device TEXT DEFAULT '', created_at TEXT, last_sent_at TEXT
+    )""",
     # Which version of the start-up work (the schema above, its migrations and the app's one-off repairs) has been run
     "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRIMARY KEY, value TEXT)",
 ]
@@ -331,6 +336,8 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS customer_requests_by_status ON customer_requests (business_id, status, follow_up_on)",
     "CREATE INDEX IF NOT EXISTS employee_absences_by_employee ON employee_absences (business_id, employee_id, day)",
     "CREATE UNIQUE INDEX IF NOT EXISTS drive_files_by_path ON drive_files (business_id, path)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS push_subscriptions_by_endpoint ON push_subscriptions (endpoint)",
+    "CREATE INDEX IF NOT EXISTS push_subscriptions_by_user ON push_subscriptions (business_id, user_id)",
     "CREATE INDEX IF NOT EXISTS customer_request_log_by_request ON customer_request_log (business_id, request_id)",
     "CREATE INDEX IF NOT EXISTS planting_trays_by_planting ON planting_trays (business_id, planting_id)",
     "CREATE INDEX IF NOT EXISTS planting_trays_by_employee ON planting_trays (business_id, employee_id, paid_payslip_id)",
@@ -575,6 +582,12 @@ def init_schema():
         add_column(db, "payroll", "pay_date", "TEXT")
         # The alert on an employee's pay date (NULL counts as on)
         add_column(db, "businesses", "alert_payroll", "INTEGER")
+        # The reminder report to admins: every how many days (NULL = 3, 0 = off), after how many days a ready batch counts as waiting too long
+        # (NULL = 30), and the day it was last raised. Each person's last report the assistant has told them about.
+        add_column(db, "businesses", "reminder_every", "INTEGER")
+        add_column(db, "businesses", "reminder_stale_days", "INTEGER")
+        add_column(db, "businesses", "reminder_sent_on", "TEXT")
+        add_column(db, "users", "reminders_seen", "TEXT")
         # Restock advice: the days of stock to keep (NULL = 30). The evening brief (NULL counts as on), its WhatsApp copy to the alert
         # number (NULL counts as on), and the day that copy last went, so it goes once a day
         add_column(db, "businesses", "stock_cover_days", "INTEGER")

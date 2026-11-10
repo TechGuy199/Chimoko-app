@@ -1,6 +1,10 @@
 // Alerts: asks the server every so often for unread alerts, lists them under "Alerts" in the top bar,
 // and pops up each new one once. If the browser has been allowed to, it also raises a desktop notification,
 // which shows even when this tab is in the background.
+// While anything is unread the Alerts button lights up, in the colour of the most pressing alert (red for something wrong, amber for
+// something due, the accent colour otherwise), and the installed app's icon carries the count. With notifications turned on for this
+// device (Settings > Alerts), alerts also arrive as push notifications while the app is closed (sw.js shows them); window.MsPush
+// turns them on and off.
 (function () {
     const script = document.currentScript;
     const pollUrl = script.dataset.poll;
@@ -12,6 +16,59 @@
     function toastsEl() { return document.getElementById("toasts"); }
     const POLL_EVERY = 30000;
     const TOAST_FOR = 15000;
+    // The colour an alert lights the button with: something wrong, something due, anything else
+    const URGENT = /^(low_stock|permission|backup|delete|error)/;
+    const DUE = /^(reminders|preorder|collection|delivery|request|payroll|brief)/;
+
+    // ---------- Push notifications for this device ----------
+    const pushKey = script.dataset.pushKey || "";
+    const pushable = !!pushKey && "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
+    function pushOn() { try { return localStorage.getItem("push.on") === "1"; } catch (e) { return false; } }
+    function setPushOn(on) { try { if (on) localStorage.setItem("push.on", "1"); else localStorage.removeItem("push.on"); } catch (e) { /* fine */ } }
+    function keyBytes(base64) {
+        const padded = (base64 + "===".slice((base64.length + 3) % 4)).replace(/-/g, "+").replace(/_/g, "/");
+        return Uint8Array.from(atob(padded), function (c) { return c.charCodeAt(0); });
+    }
+    function post(url, fields) {
+        return fetch(url, { method: "POST", credentials: "same-origin", body: new URLSearchParams(Object.assign({ csrf: script.dataset.csrf }, fields)) })
+            .then(function (r) { return r.json(); });
+    }
+    function tell(subscription) {
+        const json = subscription.toJSON();
+        return post(script.dataset.subscribe, { endpoint: json.endpoint, p256dh: json.keys.p256dh, auth: json.keys.auth, device: navigator.userAgent.slice(0, 120) });
+    }
+    // Must run from a click: the browser asks the person, then gives this device a push address, which the server keeps
+    async function subscribe() {
+        if (!pushable) throw new Error("This browser cannot receive push notifications. On an iPhone, add the app to the Home Screen first.");
+        if (await Notification.requestPermission() !== "granted") throw new Error("Notifications were not allowed. Allow them for this site in the browser's settings.");
+        const worker = await navigator.serviceWorker.ready;
+        let subscription = await worker.pushManager.getSubscription();
+        const key = keyBytes(pushKey);
+        if (subscription && subscription.options && subscription.options.applicationServerKey) {
+            const old = new Uint8Array(subscription.options.applicationServerKey);
+            if (old.length !== key.length || old.some(function (b, i) { return b !== key[i]; })) { await subscription.unsubscribe(); subscription = null; }
+        }
+        if (!subscription) subscription = await worker.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key });
+        const answer = await tell(subscription);
+        if (!answer.ok) throw new Error(answer.error || "Notifications could not be turned on.");
+        setPushOn(true);
+        return answer;
+    }
+    async function unsubscribe(url) {
+        setPushOn(false);
+        if (!("serviceWorker" in navigator)) return;
+        const worker = await navigator.serviceWorker.ready;
+        const subscription = await worker.pushManager.getSubscription();
+        if (!subscription) return;
+        await post(url, { endpoint: subscription.endpoint });
+        await subscription.unsubscribe();
+    }
+    window.MsPush = { supported: pushable, on: pushOn, subscribe: subscribe, unsubscribe: unsubscribe, post: post };
+    // Turned on before: tell the server again quietly (whoever is signed in now gets this device's notifications; a renewed address is kept)
+    if (pushable && pushOn() && Notification.permission === "granted") {
+        navigator.serviceWorker.ready.then(function (w) { return w.pushManager.getSubscription(); })
+            .then(function (s) { if (s) return tell(s); setPushOn(false); }).catch(function () { /* next time */ });
+    }
 
     // Alerts already popped up in this browser session, so moving between pages does not repeat them
     let shown;
@@ -74,7 +131,8 @@
         setTimeout(dismiss, TOAST_FOR);
         toasts.appendChild(box);
 
-        if ("Notification" in window && Notification.permission === "granted") {
+        // With push on, the device shows the alert itself (sw.js), so it is not shown twice
+        if ("Notification" in window && Notification.permission === "granted" && !pushOn()) {
             try {
                 const desktop = new Notification(item.title, { body: item.body, tag: "alert-" + item.id });
                 desktop.onclick = function () { window.focus(); window.location.href = item.open; };
@@ -91,7 +149,17 @@
         if (count) {
             count.textContent = data.unread;
             count.hidden = data.unread === 0;
+            const button = count.closest("summary") || count.parentElement;
+            const kinds = data.items.map(function (i) { return i.kind || ""; });
+            const tone = kinds.some(function (k) { return URGENT.test(k); }) ? "urgent" : kinds.some(function (k) { return DUE.test(k); }) ? "due" : "news";
+            button.classList.toggle("alerts-lit", data.unread > 0);
+            if (data.unread > 0) button.dataset.tone = tone; else delete button.dataset.tone;
+            button.title = data.unread ? data.unread + " unread alert" + (data.unread === 1 ? "" : "s") : "No unread alerts";
         }
+        // The installed app's icon (taskbar, dock, home screen) shows the count where the device supports it
+        try {
+            if (navigator.setAppBadge) { if (data.unread) navigator.setAppBadge(data.unread); else navigator.clearAppBadge(); }
+        } catch (e) { /* not supported here */ }
         renderList(data.items);
     }
     document.addEventListener("nav:swapped", function () {

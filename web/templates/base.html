@@ -55,6 +55,7 @@
         ('Import', 'import_data', ['import_data'], true, 'M12 16V4m0 0-4 4m4-4 4 4M4 16v4h16v-4'),
     ]),
     ('Insights', [
+        ('Reminders', 'reminders', ['reminders'], true, 'M6 9a6 6 0 1 1 12 0c0 6 2 7 2 7H4s2-1 2-7Zm4 11a2 2 0 0 0 4 0'),
         ('Accounts', 'accounts', ['accounts'], true, 'M3 7h16a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Zm0 0 12-3v3m2 6.5h.01'),
         ('Reports', 'reports', ['reports', 'report_department'], false, 'M4 20h16M7 16v-5m5 5V7m5 9v-3'),
         ('Deletion Records', 'deleted_invoices', ['deleted_invoices'], true, 'M5 7h14M10 7V4h4v3M7 7l1 13h8l1-13M10 11v6m4-6v6'),
@@ -221,7 +222,8 @@
 </script>
 {% if user %}
 <div id="toasts" class="toasts no-print" aria-live="polite"></div>
-<script src="{{ asset('notify.js') }}" data-poll="{{ url_for('notifications_poll') }}"></script>
+<script src="{{ asset('notify.js') }}" data-poll="{{ url_for('notifications_poll') }}" data-push-key="{{ push_key }}" data-subscribe="{{ url_for('push_subscribe') }}"
+        data-csrf="{{ csrf_token() }}"></script>
 {% if user.role == 'admin' and not user.demo_expires_at %}
 {# Backups and the end-of-day reminder; read again from each page, so a newer backup or a changed reminder time is seen #}
 <script src="{{ asset('backup.js') }}" data-biz="{{ user.business_id }}" data-hour="{{ 17 if user.backup_hour is none else user.backup_hour }}"
@@ -240,7 +242,8 @@
         data-listen="{{ url_for('assistant_listen') }}" data-speak="{{ url_for('assistant_speak') }}" data-clear="{{ url_for('assistant_clear') }}"
         data-actions="/assistant/actions/" data-user="{{ user.username }}" data-wake="{{ assistant_phrases[0] }}" data-stop="{{ assistant_phrases[1] }}"
         data-voice-url="{{ url_for('assistant_voice') }}" data-brief="{{ url_for('assistant_brief') }}"
-        data-brief-waiting="{{ '1' if brief_waiting else '' }}" data-memory="/assistant/memory" data-my-brief="{{ url_for('assistant_my_brief') }}"
+        data-brief-waiting="{{ '1' if brief_waiting else '' }}" data-reminders="{{ url_for('assistant_reminders') }}"
+        data-reminders-waiting="{{ '1' if reminders_waiting else '' }}" data-memory="/assistant/memory" data-my-brief="{{ url_for('assistant_my_brief') }}"
         data-stock-prefs="/assistant/stock-preferences/"></script>
 {% endif %}
 {# Offline: keeps this device's snapshot fresh, uploads sales made offline, and says what is waiting. Loaded once, here. #}

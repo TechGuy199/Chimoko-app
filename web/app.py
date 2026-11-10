@@ -1,3 +1,4 @@
+import base64
 import calendar
 import collections
 import csv
@@ -257,6 +258,7 @@ def user_row(db, uid):
                   b.alert_phone, b.alert_low_stock, b.alert_permission, b.alert_preorders, b.alert_collections, b.alert_deliveries, b.alert_requests, b.alert_payroll, b.preorder_remind_days,
                   b.backup_hour, b.last_backup_at, b.last_backup_by, b.demo_expires_at, b.assistant_enabled,
                   b.wake_phrase, b.stop_phrase, b.stock_cover_days, b.evening_brief, b.brief_whatsapp,
+                  b.reminder_every, b.reminder_stale_days, b.reminder_sent_on, u.reminders_seen,
                   (SELECT COUNT(*) FROM drive_links d WHERE d.business_id = b.id AND d.refresh_token IS NOT NULL) AS drive_on
            FROM users u JOIN businesses b ON b.id = u.business_id WHERE u.id=?""",
         (uid,),
@@ -296,6 +298,8 @@ def template_globals():
         "asset": asset, "csrf_token": csrf_token, "inv_link": inv_link, "assistant_on": assistant.enabled_for(g.get("user")),
         "assistant_phrases": assistant.phrases_of(g.user) if g.get("user") else (assistant.DEFAULT_WAKE, assistant.DEFAULT_STOP),
         "brief_waiting": bool(g.get("user")) and assistant.brief_due(g.user),
+        "reminders_waiting": bool(g.get("user")) and assistant.reminders_due(g.user),
+        "push_key": os.environ.get("VAPID_PUBLIC_KEY", "").strip() if g.get("user") else "",
     }
 
 
@@ -4301,26 +4305,195 @@ def notify(db, kind, title, body, link, for_user_id=None, whatsapp=False):
     if whatsapp:
         outbox = g.setdefault("whatsapp_outbox", [])
         outbox.append((notification_id, f"{g.user['business_name']}: {title}. {body}"))
+    g.setdefault("push_outbox", []).append((notification_id, g.user["business_id"], for_user_id, title, body))
     return notification_id
+
+
+def flush_whatsapp(db):
+    """Sends the WhatsApp copies this request queued, for the alerts that were really saved."""
+    outbox = g.pop("whatsapp_outbox", None)
+    if not outbox or not g.get("user"):
+        return
+    for notification_id, message in outbox:
+        # Skip anything whose alert was rolled back together with the action that raised it
+        if not db.one("SELECT id FROM notifications WHERE id=?", (notification_id,)):
+            continue
+        status, detail = send_whatsapp(g.user["alert_phone"], message)
+        db.execute("UPDATE notifications SET wa_status=?, wa_error=? WHERE id=?", (status, detail, notification_id))
+    db.commit()
 
 
 @app.after_request
 def deliver_whatsapp(response):
-    outbox = g.pop("whatsapp_outbox", None)
-    if not outbox or not g.get("user"):
+    if not g.get("whatsapp_outbox"):
         return response
     db = get_db()
     try:
-        for notification_id, message in outbox:
-            # Skip anything whose alert was rolled back together with the action that raised it
-            if not db.one("SELECT id FROM notifications WHERE id=?", (notification_id,)):
-                continue
-            status, detail = send_whatsapp(g.user["alert_phone"], message)
-            db.execute("UPDATE notifications SET wa_status=?, wa_error=? WHERE id=?", (status, detail, notification_id))
-        db.commit()
+        flush_whatsapp(db)
     except DB_ERRORS:
         db.rollback()
     return response
+
+
+# --- PUSH NOTIFICATIONS ---
+# A phone or computer can ask (Settings > Alerts) to be told about alerts even while the app is closed. The browser gives the app an
+# address at its push service (Google's for Chrome and Android, Mozilla's, Apple's, Microsoft's) and keys; every alert made for that person
+# is then sent there, encrypted, and the device shows it (sw.js), with the unread count on the installed app's icon. Set up once on the
+# server with VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY (made by "flask --app app push-keys") and VAPID_SUBJECT (mailto: an address).
+PUSH_TIMEOUT = 5
+PUSH_TTL = 24 * 3600     # an alert the device could not get within a day is dropped
+
+
+def push_ready():
+    return bool(os.environ.get("VAPID_PUBLIC_KEY") and os.environ.get("VAPID_PRIVATE_KEY"))
+
+
+def unread_count(db, biz, user_id, admin):
+    where = "business_id=? AND (for_user_id=? OR for_user_id IS NULL)" if admin else "business_id=? AND for_user_id=?"
+    return db.one(f"SELECT COUNT(*) AS n FROM notifications WHERE {where} AND read_at IS NULL", (biz, user_id))["n"]
+
+
+def send_pushes(db):
+    """Sends the alerts this request made to the devices of the people they are for. Called after the response is ready (and by the crons),
+    only for alerts that were really saved."""
+    outbox = g.pop("push_outbox", None)
+    if not outbox or not push_ready():
+        return
+    from pywebpush import WebPushException, webpush
+
+    claims = {"sub": os.environ.get("VAPID_SUBJECT", "").strip() or "mailto:admin@example.com"}
+    for notification_id, biz, for_user_id, title, body in outbox:
+        if not db.one("SELECT id FROM notifications WHERE id=?", (notification_id,)):
+            continue
+        if for_user_id is None:
+            people = db.all("SELECT id, role FROM users WHERE business_id=? AND role='admin'", (biz,))
+        else:
+            people = db.all("SELECT id, role FROM users WHERE business_id=? AND id=?", (biz, for_user_id))
+        for person in people:
+            devices = db.all("SELECT * FROM push_subscriptions WHERE business_id=? AND user_id=?", (biz, person["id"]))
+            if not devices:
+                continue
+            payload = json.dumps({"title": title, "body": body[:300], "tag": f"alert-{notification_id}",
+                                  "url": url_for("open_notification", notification_id=notification_id),
+                                  "unread": unread_count(db, biz, person["id"], person["role"] == "admin")})
+            for d in devices:
+                try:
+                    webpush({"endpoint": d["endpoint"], "keys": {"p256dh": d["p256dh"], "auth": d["auth"]}}, payload,
+                            vapid_private_key=os.environ["VAPID_PRIVATE_KEY"].strip(), vapid_claims=dict(claims), timeout=PUSH_TIMEOUT, ttl=PUSH_TTL)
+                    db.execute("UPDATE push_subscriptions SET last_sent_at=? WHERE id=?", (now().strftime("%Y-%m-%d %H:%M:%S"), d["id"]))
+                except WebPushException as e:
+                    status = getattr(getattr(e, "response", None), "status_code", None)
+                    if status in (404, 410):   # the device withdrew it, or the app was uninstalled
+                        db.execute("DELETE FROM push_subscriptions WHERE id=?", (d["id"],))
+                    else:
+                        app.logger.warning("A push notification could not be sent: %s", e)
+                except Exception as e:   # the push service unreachable: the alert is still in the app
+                    app.logger.warning("A push notification could not be sent: %s", e)
+    db.commit()
+
+
+@app.after_request
+def deliver_pushes(response):
+    if g.get("push_outbox"):
+        try:
+            send_pushes(get_db())
+        except DB_ERRORS:
+            get_db().rollback()
+    return response
+
+
+@app.cli.command("push-keys")
+def push_keys():
+    """Prints a new pair of VAPID keys for push notifications, to put in the server's environment variables."""
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    raw = key.private_numbers().private_value.to_bytes(32, "big")
+    public = key.public_key().public_bytes(serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint)
+
+    def b64(data):
+        return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
+
+    print("VAPID_PUBLIC_KEY=" + b64(public))
+    print("VAPID_PRIVATE_KEY=" + b64(raw))
+
+
+def push_answer(**data):
+    return Response(json.dumps(data), mimetype="application/json", headers={"Cache-Control": "no-store"})
+
+
+@app.post("/push/subscribe")
+@need(None)
+def push_subscribe():
+    """This device asks for push notifications for the person signed in. The same device signing in as someone else moves to them."""
+    endpoint, p256dh, auth = (request.form.get(k, "").strip() for k in ("endpoint", "p256dh", "auth"))
+    if not push_ready():
+        return push_answer(ok=False, error="Push notifications are not set up on this server yet.")
+    if not endpoint.startswith("https://") or len(endpoint) > 1000 or not p256dh or not auth or len(p256dh) > 200 or len(auth) > 100:
+        return push_answer(ok=False, error="The browser did not give a usable push address.")
+    db, biz, stamp = get_db(), g.user["business_id"], now().strftime("%Y-%m-%d %H:%M:%S")
+    device = (request.form.get("device", "") or request.headers.get("User-Agent", ""))[:120]
+    db.execute("DELETE FROM push_subscriptions WHERE endpoint=?", (endpoint,))
+    db.execute("INSERT INTO push_subscriptions (business_id, user_id, endpoint, p256dh, auth, device, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+               (biz, g.user["id"], endpoint, p256dh, auth, device, stamp))
+    db.commit()
+    return push_answer(ok=True, devices=db.one("SELECT COUNT(*) AS n FROM push_subscriptions WHERE business_id=? AND user_id=?", (biz, g.user["id"]))["n"])
+
+
+@app.post("/push/unsubscribe")
+@need(None)
+def push_unsubscribe():
+    db = get_db()
+    db.execute("DELETE FROM push_subscriptions WHERE endpoint=? AND business_id=? AND user_id=?",
+               (request.form.get("endpoint", ""), g.user["business_id"], g.user["id"]))
+    db.commit()
+    return push_answer(ok=True)
+
+
+@app.post("/push/test")
+@need(None)
+def push_test():
+    db = get_db()
+    if not db.one("SELECT id FROM push_subscriptions WHERE business_id=? AND user_id=?", (g.user["business_id"], g.user["id"])):
+        return push_answer(ok=False, error="This account has no device with notifications turned on.")
+    notify(db, "test", "Test notification", "If this shows on your phone or computer, notifications reach you even with the app closed.",
+           url_for("notifications"), for_user_id=g.user["id"])
+    db.commit()
+    return push_answer(ok=True)
+
+
+# Each morning (vercel.json) Vercel calls this with the CRON_SECRET it was given: the alerts that are due by the day (pre-orders, collections,
+# deliveries, customer requests, pay dates and the reminder report) are raised for every business even if nobody has the app open, so they
+# reach phones as push notifications and WhatsApp. Each is claimed as it is raised, so the alerts poll never raises one twice.
+@app.get("/cron/reminders")
+def cron_reminders():
+    secret = os.environ.get("CRON_SECRET", "")
+    if not secret:
+        return jsonify({"error": "CRON_SECRET is not set on the server."}), 503
+    if not hmac.compare_digest(request.headers.get("Authorization", "").encode("utf-8"), f"Bearer {secret}".encode("utf-8")):
+        abort(401)
+    db, done, failed = get_db(), 0, 0
+    for b in db.all("SELECT id FROM businesses WHERE demo_expires_at IS NULL ORDER BY id"):
+        admin = db.one("SELECT id FROM users WHERE business_id=? AND role='admin' ORDER BY id LIMIT 1", (b["id"],))
+        if not admin:
+            continue
+        g.user = user_row(db, admin["id"])
+        try:
+            for remind in (remind_preorders_due, remind_collections_due, remind_deliveries_due, remind_requests_due, remind_pay_due, remind_report_due):
+                remind(db, b["id"])
+            flush_whatsapp(db)
+            send_pushes(db)
+            done += 1
+        except Exception:   # one business's failure must not stop the others
+            app.logger.exception("The morning reminders of business %s failed", b["id"])
+            db.rollback()
+            failed += 1
+        finally:
+            g.pop("whatsapp_outbox", None)
+            g.pop("push_outbox", None)
+            g.user = None
+    return jsonify({"businesses": done, "failed": failed})
 
 
 def low_stock_alert(db, name, code, before, after, where):
@@ -4349,6 +4522,7 @@ def notifications_poll():
     remind_deliveries_due(get_db(), g.user["business_id"])
     remind_requests_due(get_db(), g.user["business_id"])
     remind_pay_due(get_db(), g.user["business_id"])
+    remind_report_due(get_db(), g.user["business_id"])
     where, params = my_notifications_clause()
     rows = get_db().all(
         f"SELECT id, kind, title, body, created_at FROM notifications WHERE {where} AND read_at IS NULL ORDER BY id DESC LIMIT 20", params
@@ -4403,6 +4577,11 @@ def save_alerts():
          1 if request.form.get("alert_preorders") else 0, 1 if request.form.get("alert_collections") else 0,
          1 if request.form.get("alert_deliveries") else 0, 1 if request.form.get("alert_requests") else 0, 1 if request.form.get("alert_payroll") else 0, g.user["business_id"]),
     )
+    every, stale = request.form.get("reminder_every", type=int), request.form.get("reminder_stale_days", type=int)
+    if every in dict(REMINDER_EVERY):
+        db.execute("UPDATE businesses SET reminder_every=? WHERE id=?", (every, g.user["business_id"]))
+    if stale is not None and 1 <= stale <= 365:
+        db.execute("UPDATE businesses SET reminder_stale_days=? WHERE id=?", (stale, g.user["business_id"]))
     db.commit()
     flash("Alert settings saved.", "ok")
     return redirect(url_for("settings"))
@@ -8768,6 +8947,139 @@ def remind_pay_due(db, biz):
     db.commit()
 
 
+# --- THE REMINDER REPORT ---
+# Every few days (Settings > Alerts; every 3 days unless changed) the admins get one alert gathering what is easy to forget: customers who
+# still owe, seedling batches that are ready with seedlings left to sell, stock in the store with none on the POS, batches ready for longer
+# than they should be, and pre-orders due soon (so the customers can be reminded). It opens the Reminders page, and the assistant tells each
+# admin about it the next time they open it. Raised from the alerts poll, and each morning by the reminders cron (with the app closed).
+REMINDER_EVERY = ((0, "Off"), (1, "Every day"), (2, "Every 2 days"), (3, "Every 3 days"), (7, "Once a week"))
+REMINDER_EVERY_DEFAULT = 3
+REMINDER_STALE_DEFAULT = 30
+REMINDER_ORDER_DAYS = 7     # pre-orders due within this many days (and any overdue) are listed
+REMINDER_SHOW = 12          # rows shown in each part of the Reminders page; the counts cover everything
+
+
+def reminder_every(user):
+    every = user.get("reminder_every")
+    return REMINDER_EVERY_DEFAULT if every is None else every
+
+
+def reminder_stale_days(user):
+    return user.get("reminder_stale_days") or REMINDER_STALE_DEFAULT
+
+
+def reminder_report(db, biz, stale_days=REMINDER_STALE_DEFAULT, admin=True):
+    """What the reminder report holds, worked out now. Each part is a list (largest or soonest first); who owes only for admins."""
+    today = today_str()
+    out = {"today": today, "stale_days": stale_days}
+    if admin:
+        rows = db.all(
+            """SELECT MAX(customer_id) AS customer_id, customer_name, MAX(customer_phone) AS customer_phone, COUNT(*) AS invoices,
+                      SUM(balance_due) AS owed, MIN(created_at) AS since
+               FROM invoices WHERE business_id=? AND kind='SALE' AND payment_status <> 'Cancelled' AND balance_due > 0.005
+               GROUP BY customer_name ORDER BY owed DESC""",
+            (biz,),
+        )
+        out["owing"] = [dict(r, since=(r["since"] or today)[:10], days=(datetime.date.fromisoformat(today) - datetime.date.fromisoformat((r["since"] or today)[:10])).days)
+                        for r in rows]
+        out["owing_total"] = sum(r["owed"] for r in rows)
+    batches = with_figures(db, biz, db.all("SELECT * FROM plantings WHERE business_id=? AND still_in_greenhouse=1", (biz,)))
+    ready, stale = [], []
+    for f in batches:
+        if f["stage"] not in ("ready", "due") or f["available"] <= 0:
+            continue
+        since = f["actual_ready_on"] or f["ready_on"] or today
+        f = dict(f, ready_since=since, ready_days=(datetime.date.fromisoformat(today) - datetime.date.fromisoformat(since)).days)
+        (stale if f["ready_days"] > stale_days else ready).append(f)
+    out["ready"] = sorted(ready, key=lambda f: -f["available"])
+    out["stale"] = sorted(stale, key=lambda f: -f["ready_days"])
+    store = db.all(
+        """SELECT p.id, p.item_code, p.name, p.category, p.quantity, p.price, COALESCE(s.quantity, 0) AS on_pos
+           FROM products p LEFT JOIN pos_products s ON s.business_id = p.business_id AND s.item_code = p.item_code
+           WHERE p.business_id=? AND p.quantity > 0 AND p.price > 0 AND COALESCE(s.quantity, 0) <= 0 ORDER BY p.quantity DESC, p.name""",
+        (biz,),
+    )
+    out["not_on_pos"] = [r for r in store if not is_seed_category(r["category"])]
+    orders = db.all(
+        """SELECT po.id, po.customer_name, po.customer_phone, po.qty, po.collect_on, p.name, p.batch_no, p.planted_on, p.id AS planting_id,
+                  COALESCE(po.collect_on, p.actual_ready_on, p.ready_on) AS due
+           FROM preorders po JOIN plantings p ON p.id = po.planting_id
+           WHERE po.business_id=? AND po.status='pending' AND COALESCE(po.collect_on, p.actual_ready_on, p.ready_on) <= ?
+           ORDER BY COALESCE(po.collect_on, p.actual_ready_on, p.ready_on), po.id""",
+        (biz, add_days(today, REMINDER_ORDER_DAYS)),
+    )
+    out["orders"] = [dict(o, label=planting_label(o), overdue=(o["due"] or today) < today, by_collection=bool(o["collect_on"])) for o in orders]
+    return out
+
+
+REMINDER_PARTS = ("owing", "ready", "not_on_pos", "stale", "orders")
+REMINDER_WORDS = {
+    "owing": ("customer still owes", "customers still owe"), "ready": ("batch ready to sell", "batches ready to sell"),
+    "not_on_pos": ("item in the store, none on the POS", "items in the store, none on the POS"),
+    "stale": ("batch ready too long", "batches ready too long"), "orders": ("pre-order due soon", "pre-orders due soon"),
+}
+
+
+def reminder_counts(report):
+    return [(key, len(report[key])) for key in REMINDER_PARTS if report.get(key)]
+
+
+def reminder_lines(report, limit=3):
+    """The report in short lines (the alert's text, the WhatsApp copy, the assistant's mention)."""
+    lines = []
+    if report.get("owing"):
+        n = len(report["owing"])
+        lines.append(f"{n} {REMINDER_WORDS['owing'][n != 1]}, {money(report['owing_total'])} in all: "
+                     + ", ".join(f"{r['customer_name']} {money(r['owed'])}" for r in report["owing"][:limit]) + (" and more" if n > limit else ""))
+    if report.get("ready"):
+        lines.append("Ready to sell: " + ", ".join(f"{f['label']} ({f['available']:,} left)" for f in report["ready"][:limit]))
+    if report.get("not_on_pos"):
+        lines.append("In the store but not on the POS: " + ", ".join(f"{r['name']} ({r['quantity']:,})" for r in report["not_on_pos"][:limit]))
+    if report.get("stale"):
+        lines.append(f"Ready over {report['stale_days']} days: " + ", ".join(f"{f['label']} ({f['ready_days']} days, {f['available']:,} left)" for f in report["stale"][:limit]))
+    if report.get("orders"):
+        lines.append("Pre-orders to remind: " + ", ".join(
+            f"{o['customer_name']} {o['qty']:,} x {o['name']} ({'overdue since ' + o['due'] if o['overdue'] else 'due ' + o['due']})" for o in report["orders"][:limit]))
+    return lines
+
+
+def remind_report_due(db, biz):
+    """Raises the reminder report for the admins when it is due (every so many days), once. The day is claimed first, so two pages polling
+    at once cannot both raise it; a report with nothing in it raises no alert but still counts as given."""
+    every = reminder_every(g.user)
+    if every <= 0 or g.user["demo_expires_at"]:
+        return
+    today = today_str()
+    if (g.user.get("reminder_sent_on") or "") > add_days(today, -every):
+        return
+    if db.execute("UPDATE businesses SET reminder_sent_on=? WHERE id=? AND (reminder_sent_on IS NULL OR reminder_sent_on <= ?)",
+                  (today, biz, add_days(today, -every))).rowcount != 1:
+        db.commit()
+        return
+    db.commit()
+    g.user = dict(g.user, reminder_sent_on=today)
+    report = reminder_report(db, biz, reminder_stale_days(g.user))
+    counts = reminder_counts(report)
+    if not counts:
+        return
+    title = "Reminders: " + ", ".join(f"{n} {REMINDER_WORDS[key][n != 1]}" for key, n in counts)
+    notify(db, "reminders", title, ". ".join(reminder_lines(report)) + ".", url_for("reminders"), whatsapp=True)
+    db.commit()
+
+
+@app.get("/reminders")
+@need("admin")
+def reminders():
+    db, biz = get_db(), g.user["business_id"]
+    report = reminder_report(db, biz, reminder_stale_days(g.user))
+    every = reminder_every(g.user)
+    return render_template(
+        "reminders.html", r=report, show=REMINDER_SHOW, every=every, every_words=dict(REMINDER_EVERY).get(every, f"Every {every} days"),
+        next_on=add_days(g.user["reminder_sent_on"], every) if every and g.user.get("reminder_sent_on") else None, order_days=REMINDER_ORDER_DAYS,
+        counts=dict(reminder_counts(report)),
+    )
+
+
 def requests_arrived(db, biz, name, code, how):
     """Something was bought or planted: the admins are told which customers with an open request asked for it, and each request's log says so.
     The caller commits, so the alert goes only if what arrived is saved."""
@@ -11499,6 +11811,7 @@ def settings():
         assistant_info={"configured": assistant.configured(), "usage": assistant.usage_today(db, g.user), "limits": assistant.limits(g.user), "model": assistant.MODEL,
                         "costs": assistant.cost_report(db, g.user)},
         assistant_memory=assistant.memory_of(db, g.user), brief_hour=assistant.BRIEF_HOUR, cron_ready=bool(os.environ.get("CRON_SECRET")),
+        reminder_options=REMINDER_EVERY, reminder_every=reminder_every(g.user), reminder_stale=reminder_stale_days(g.user),
     )
 
 
@@ -11827,6 +12140,12 @@ def assistant_brief():
     return assistant_json(lambda: assistant.give_brief(get_db(), g.user))
 
 
+@app.post("/assistant/reminders")
+@need(None)
+def assistant_reminders():
+    return assistant_json(lambda: assistant.give_reminders(get_db(), g.user))
+
+
 @app.get("/assistant/memory")
 @need(None)
 def assistant_memory():
@@ -11938,6 +12257,8 @@ def cron_evening_brief():
                 (b["id"], u["id"], "Your evening brief", "What is due tomorrow, and what to restock or watch out for. Open it to read it.",
                  url_for("pos", assistant="brief"), stamp),
             )
+            g.setdefault("push_outbox", []).append((sent[u["id"]], b["id"], u["id"], "Your evening brief",
+                                                    "What is due tomorrow, and what to restock or watch out for. Open it to read it."))
         db.commit()
         done += 1
         admin = next((u for u in users if u["role"] == "admin"), None)
@@ -11978,6 +12299,8 @@ assistant.bind(
     # customer requests: what was asked for, matched to what we have
     request_fits=request_fits, requests_with_stock=requests_with_stock, known_item=known_item, most_requested=most_requested, request_label=request_label,
     customer_group_key=customer_group_key,
+    # the reminder report
+    reminder_report=reminder_report, reminder_lines=reminder_lines, reminder_stale_days=reminder_stale_days, REMINDER_ORDER_DAYS=REMINDER_ORDER_DAYS,
     # pay: each employee's rate for a tray and what their next payslip would pay
     rate_for=rate_for, pay_preview=pay_preview, schedule_words=schedule_words, EMPLOYEE_COLUMNS=EMPLOYEE_COLUMNS,
 )

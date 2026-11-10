@@ -1,0 +1,128 @@
+{% extends "base.html" %}
+{% block title %}Reminders — {% endblock %}
+{% block content %}
+{# The reminder report, worked out fresh: the five things that are easy to forget, each a card of rows that open the record behind it.
+   Top row: how many of each (each opens its card). The alert that raises it comes every few days (Settings > Alerts). #}
+<div class="dash-head">
+    <div>
+        <h1>Reminders</h1>
+        <p class="muted">Who owes, what is ready to sell, what is not on the POS, what has waited too long, and the customers to remind about their pre-orders.</p>
+    </div>
+    <span class="fresh" title="Worked out each time the page opens">
+        {% if every %}Sent as an alert {{ every_words|lower }}{% if next_on %}, next on {{ next_on }}{% endif %}{% else %}The reminder alert is off{% endif %} ·
+        <a href="{{ url_for('settings') }}#alerts">Change</a>
+    </span>
+</div>
+
+<div class="kpis five">
+    <a class="kpi" href="#owing" data-no-prefetch title="Customers with unpaid invoices">
+        <span class="kpi-label">Customers owing</span>
+        <span class="kpi-value {{ 'warn' if r.owing }}"><small>{{ user.currency }}</small>{{ '{:,.2f}'.format(r.owing_total) }}</span>
+        <span class="kpi-foot">{{ r.owing|length }} customer{{ '' if r.owing|length == 1 else 's' }}</span>
+    </a>
+    <a class="kpi" href="#ready" data-no-prefetch title="Ready batches with seedlings left to sell">
+        <span class="kpi-label">Ready to sell</span>
+        <span class="kpi-value">{{ r.ready|length }}</span>
+        <span class="kpi-foot">{{ '{:,}'.format(r.ready|sum(attribute='available')) }} seedlings left</span>
+    </a>
+    <a class="kpi" href="#store" data-no-prefetch title="Items with stock in the store but none on the POS">
+        <span class="kpi-label">Not on the POS</span>
+        <span class="kpi-value {{ 'warn' if r.not_on_pos }}">{{ r.not_on_pos|length }}</span>
+        <span class="kpi-foot">in the store, none to sell</span>
+    </a>
+    <a class="kpi" href="#stale" data-no-prefetch title="Batches ready for more than {{ r.stale_days }} days with seedlings left">
+        <span class="kpi-label">Ready over {{ r.stale_days }} days</span>
+        <span class="kpi-value {{ 'warn' if r.stale }}">{{ r.stale|length }}</span>
+        <span class="kpi-foot">{{ '{:,}'.format(r.stale|sum(attribute='available')) }} seedlings waiting</span>
+    </a>
+    <a class="kpi" href="#orders" data-no-prefetch title="Pending pre-orders due within {{ order_days }} days, and any overdue">
+        <span class="kpi-label">Pre-orders due soon</span>
+        <span class="kpi-value">{{ r.orders|length }}</span>
+        <span class="kpi-foot">{{ r.orders|selectattr('overdue')|list|length }} overdue</span>
+    </a>
+</div>
+
+<div class="dash-grid">
+    <section class="card span-6" id="owing">
+        <div class="card-head"><h2>Customers still owing</h2><a href="{{ url_for('customers') }}">Customers</a></div>
+        {% if r.owing %}
+        <ul class="rows">
+            {% for o in r.owing[:show] %}
+            <li><a href="{{ url_for('customer_statement', customer_id=o.customer_id) if o.customer_id else url_for('history', q=o.customer_name) }}">
+                <span class="avatar" aria-hidden="true">{{ (o.customer_name or '?')[:1] }}</span>
+                <span class="row-main"><strong>{{ o.customer_name or 'No name' }}</strong>
+                    <small>{{ o.invoices }} invoice{{ '' if o.invoices == 1 else 's' }} · owing since {{ o.since }}{% if o.customer_phone %} · {{ o.customer_phone }}{% endif %}</small></span>
+                <span class="row-end"><strong class="warn">{{ o.owed|money }}</strong><small><span class="chip {{ 'warn' if o.days > 30 else 'gold' }}">{{ o.days }} days</span></small></span>
+            </a></li>
+            {% endfor %}
+        </ul>
+        {% if r.owing|length > show %}<p class="muted">And {{ r.owing|length - show }} more on <a href="{{ url_for('customers') }}">Customers</a>.</p>{% endif %}
+        {% else %}<div class="empty"><strong>Nobody owes anything</strong>Every sale has been paid in full.</div>{% endif %}
+    </section>
+
+    <section class="card span-6" id="orders">
+        <div class="card-head"><h2>Pre-orders due within {{ order_days }} days</h2><a href="{{ url_for('up_next') }}#preorders">Up next</a></div>
+        {% if r.orders %}
+        <ul class="rows">
+            {% for o in r.orders[:show] %}
+            <li><a href="{{ url_for('planting_detail', planting_id=o.planting_id) }}">
+                <span class="avatar" aria-hidden="true">{{ (o.customer_name or '?')[:1] }}</span>
+                <span class="row-main"><strong>{{ o.customer_name }}</strong>
+                    <small>{{ '{:,}'.format(o.qty) }} x {{ o.label }}{% if o.customer_phone %} · {{ o.customer_phone }}{% endif %}</small></span>
+                <span class="row-end"><strong class="{{ 'warn' if o.overdue }}">{{ 'Overdue' if o.overdue else o.due }}</strong>
+                    <small>{{ 'collection day' if o.by_collection else 'batch ready' }}</small></span>
+            </a></li>
+            {% endfor %}
+        </ul>
+        <p class="muted hint">Remind these customers. The assistant can draft the message for each.</p>
+        {% else %}<div class="empty"><strong>No pre-orders due this week</strong>Pre-orders due within {{ order_days }} days show here.</div>{% endif %}
+    </section>
+
+    <section class="card span-6" id="ready">
+        <div class="card-head"><h2>Ready to sell</h2><a href="{{ url_for('planting_list') }}">Planting Records</a></div>
+        {% if r.ready %}
+        <ul class="rows">
+            {% for f in r.ready[:show] %}
+            <li><a href="{{ url_for('planting_detail', planting_id=f.id) }}">
+                <span class="chip ok">Ready</span>
+                <span class="row-main"><strong>{{ f.label }}</strong><small>ready since {{ f.ready_since }} · {{ 'on the POS' if f.on_pos else 'not on the POS yet' }}</small></span>
+                <span class="row-end"><strong>{{ '{:,}'.format(f.available) }}</strong><small>left</small></span>
+            </a></li>
+            {% endfor %}
+        </ul>
+        {% else %}<div class="empty"><strong>Nothing waiting</strong>Batches that are ready with seedlings left show here.</div>{% endif %}
+    </section>
+
+    <section class="card span-6" id="stale">
+        <div class="card-head"><h2>Ready for over {{ r.stale_days }} days</h2><a href="{{ url_for('planting_list') }}">Planting Records</a></div>
+        {% if r.stale %}
+        <ul class="rows">
+            {% for f in r.stale[:show] %}
+            <li><a href="{{ url_for('planting_detail', planting_id=f.id) }}">
+                <span class="chip warn">{{ f.ready_days }} days</span>
+                <span class="row-main"><strong>{{ f.label }}</strong><small>ready since {{ f.ready_since }} · sell, discount, or mark it as done</small></span>
+                <span class="row-end"><strong class="warn">{{ '{:,}'.format(f.available) }}</strong><small>left</small></span>
+            </a></li>
+            {% endfor %}
+        </ul>
+        {% else %}<div class="empty"><strong>Nothing has waited too long</strong>Batches still unsold {{ r.stale_days }} days after they were ready show here.</div>{% endif %}
+    </section>
+
+    <section class="card span-12" id="store">
+        <div class="card-head"><h2>In the store, none on the POS</h2><a href="{{ url_for('inventory') }}">Inventory</a></div>
+        {% if r.not_on_pos %}
+        <ul class="rows">
+            {% for x in r.not_on_pos[:show] %}
+            <li><a href="{{ url_for('item', item_id=x.id) }}">
+                <span class="chip gold">Move</span>
+                <span class="row-main"><strong>{{ x.name }}</strong><small>{{ x.item_code }}{% if x.category %} · {{ x.category }}{% endif %} · sells at {{ x.price|money }}</small></span>
+                <span class="row-end"><strong>{{ '{:,}'.format(x.quantity) }}</strong><small>in the store</small></span>
+            </a></li>
+            {% endfor %}
+        </ul>
+        {% if r.not_on_pos|length > show %}<p class="muted">And {{ r.not_on_pos|length - show }} more on <a href="{{ url_for('inventory') }}">Inventory</a>.</p>{% endif %}
+        <p class="muted hint">Transfer some to the POS from each item's page so they can be sold. Seeds and items with no selling price are left out.</p>
+        {% else %}<div class="empty"><strong>Everything for sale is on the POS</strong>Items with stock in the store and none on the POS show here.</div>{% endif %}
+    </section>
+</div>
+{% endblock %}

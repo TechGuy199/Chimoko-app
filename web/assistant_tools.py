@@ -398,11 +398,18 @@ def plantings(ctx, args):
     }
 
 
-@tool("Customers' seedling pre-orders: who, what, how many, collection day, status.", {"status": E("pending", "collected", "cancelled", "all"), "customer": S(), "limit": LIMIT})
+@tool("Customers' seedling pre-orders: who, what, how many, collection day, status. due_within_days: only pending ones due by then (collection "
+      "day, or the batch's ready day) and any overdue, soonest first, to remind those customers.",
+      {"status": E("pending", "collected", "cancelled", "all"), "customer": S(), "due_within_days": N("e.g. 7"), "limit": LIMIT})
 def preorders(ctx, args):
     db, biz = ctx.db, ctx.biz
     status, who = choice(args, "status", ("pending", "collected", "cancelled", "all"), "pending"), text_of(args, "customer")
+    within = number_of(args.get("due_within_days"))
     sql, params = "", []
+    if within is not None:
+        status = "pending"
+        sql += " AND COALESCE(po.collect_on, (SELECT COALESCE(p2.actual_ready_on, p2.ready_on) FROM plantings p2 WHERE p2.id = po.planting_id)) <= ?"
+        params.append(H.add_days(ctx.today, max(0, min(int(within), 90))))
     if status != "all":
         sql += " AND po.status = ?"
         params.append(status)
@@ -423,7 +430,30 @@ def preorders(ctx, args):
              "price_each": r2(r["unit_price"]), "status": r["status"], "collect_on": r["collect_on"], "ordered": (r["created_at"] or "")[:10], "note": clip(r["note"], 80)}
             for r in rows
         ],
+        **({"say": "These customers' orders are due soon: tell the person who to remind, and offer to draft a reminder message to each."} if within is not None else {}),
     }
+
+
+@tool("The reminder report: customers who still owe (admins), seedling batches ready with seedlings left to sell, store stock with none on the POS, "
+      "batches ready longer than they should be, and pre-orders due soon with the customers to remind.", {"limit": LIMIT})
+def reminders(ctx, args):
+    db, biz, user, limit = ctx.db, ctx.biz, ctx.user, whole(args, "limit", 8)
+    r = H.reminder_report(db, biz, H.reminder_stale_days(user), admin=user["role"] == "admin")
+    ctx.source("Reminders", H.url_for("reminders")) if user["role"] == "admin" else ctx.source("Up next", H.url_for("up_next"))
+    out = {
+        "ready_to_sell": [{"batch": f["label"], "left": f["available"], "ready_since": f["ready_since"]} for f in r["ready"][:limit]],
+        "in_store_not_on_pos": [{"item": clip(x["name"], 60), "in_store": x["quantity"]} for x in r["not_on_pos"][:limit]],
+        f"ready_over_{r['stale_days']}_days": [{"batch": f["label"], "days_ready": f["ready_days"], "left": f["available"]} for f in r["stale"][:limit]],
+        f"preorders_due_within_{H.REMINDER_ORDER_DAYS}_days": [
+            {"customer": clip(o["customer_name"], 60), "phone": o["customer_phone"] or "", "qty": o["qty"], "plant": o["label"], "due": o["due"], "overdue": o["overdue"]}
+            for o in r["orders"][:limit]],
+    }
+    if "owing" in r:
+        out["customers_owing"] = {"customers": len(r["owing"]), "total": r2(r["owing_total"]), "most": [
+            {"customer": clip(o["customer_name"], 60), "phone": o["customer_phone"] or "", "owes": r2(o["owed"]), "invoices": o["invoices"], "since": o["since"]}
+            for o in r["owing"][:limit]]}
+    out = {k: v for k, v in out.items() if v not in ([], None) and not (isinstance(v, dict) and not v.get("customers"))}
+    return out or {"say": "Nothing to remind about right now."}
 
 
 @tool("Deliveries and collections still waiting, by day, with customers and items. Overdue first.", {"kind": E("deliveries", "collections", "both"), "day": S("YYYY-MM-DD"), "limit": LIMIT})
@@ -555,6 +585,10 @@ GUIDE = {
     "who_bought": "Click any product name anywhere in the app to see who bought it: customers, phones, dates, quantities, prices and discounts, with a CSV. A planting record's Sold tile does the same.",
     "accounts": "Accounts (admins): every movement of money in and out, balances for cash, bank and mobile money (counted by hand, then kept up to date), who owes us and whom we owe, profit and the financial standing.",
     "reports": "Reports: sales, purchases and profit by department and period.",
+    "reminders": "Reminders (admins): every 3 days (Settings > Alerts: off, daily, every 2 or 3 days, weekly) an alert gathers who still owes, batches ready "
+                 "with seedlings left to sell, store stock with none on the POS, batches ready longer than 30 days (changeable), and pre-orders due within a "
+                 "week. It opens the Reminders page, and the assistant mentions it the next time it is opened. Phones and computers can get every alert as a "
+                 "notification even with the app closed: Settings > Alerts > Turn on notifications on this device.",
     "staff": "Staff (admins): employees, payroll, payslips with NAPSA and NHIMA, and statements. Daily Activities records the work done in each plot. "
              "A casual worker is paid for the trays they planted at their own rate (set when they are registered, or with Edit). Each employee has a pay "
              "schedule (monthly on a day, every two weeks, weekly, or a date set each time) and a next pay date. HR & Payroll's Pay due card shows what each "
@@ -1976,9 +2010,9 @@ GROUPS = {
     "money+": ("prepare_money_entry", "prepare_supplier_payment"),
     "staff": ("staff", "daily_activities"),
     "staff+": ("prepare_tray_payslip",),
-    "records": ("audit_log", "my_alerts"),
+    "records": ("audit_log", "my_alerts", "reminders"),
     "memory": ("remember_this", "forget_this", "stock_preference"),
-    "today": ("attention_today", "deliveries_and_collections", "preorders", "customer_requests"),
+    "today": ("attention_today", "deliveries_and_collections", "preorders", "customer_requests", "reminders"),
     "requests": ("customer_requests", "stock_watch"),
     "requests+": ("prepare_customer_request", "prepare_request_update"),
 }
@@ -1997,7 +2031,7 @@ AREA_WORDS = {area: re.compile(r"\b(" + words + r")\b") for area, words in {
     "staff": r"staff|employees?|payroll|payslips?|salar\w*|napsa|nhima|wages?|workers?|casuals?",
     "records": r"delet\w*|adjust\w*|removed|requests?|permissions?|alerts?|notifications?|audit|who changed",
     "memory": r"remember\w*|forget|forgot|prefer\w*|always|never|from now on|keep (about |around )?\d+",
-    "today": r"today|tomorrow|tonight|attention|due|urgent|to do|brief|this morning|this week",
+    "today": r"today|tomorrow|tonight|attention|due|urgent|to do|brief|this morning|this week|remind\w*|owing|owe[sd]?|ready|orders?|pre-?orders?",
     "requests": r"requests?|requested|wants?|wanted|needs?|asked for|asking for|looking for|enquir\w*|inquir\w*|follow(ing)?[- ]?ups?|out of stock|"
                 r"do not have|don't have|dont have|fulfill?(ed)?|dropped",
 }.items()}

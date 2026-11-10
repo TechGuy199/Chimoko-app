@@ -1662,3 +1662,13 @@ a.card strong { display: block; color: var(--text-bright); font-weight: 600; }
 .legal h2 { margin-top: 1.6em; }
 .legal li { margin: .4em 0; }
 .small-print { font-size: 13px; }
+
+/* The Alerts button lit while anything is unread: red for something wrong, amber for something due, the accent colour otherwise */
+summary.alerts-lit { color: #fff !important; border-color: transparent !important; background: var(--primary) !important; animation: alerts-pulse 2.4s ease-in-out infinite; }
+summary.alerts-lit[data-tone="urgent"] { background: var(--danger) !important; --pulse: rgba(229, 72, 77, 0.45); }
+summary.alerts-lit[data-tone="due"] { background: #d97706 !important; --pulse: rgba(217, 119, 6, 0.45); }
+summary.alerts-lit .badge { background: #fff; color: #111; }
+@keyframes alerts-pulse { 0%, 100% { box-shadow: 0 0 0 0 var(--pulse, rgba(59, 130, 246, 0.45)); } 50% { box-shadow: 0 0 0 6px transparent; } }
+@media (prefers-reduced-motion: reduce) { summary.alerts-lit { animation: none; } }
+@media (max-width: 640px) { .fresh { white-space: normal; } }
+.kpis.five > .kpi { flex-basis: 150px; }

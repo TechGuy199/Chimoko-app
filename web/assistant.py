@@ -700,6 +700,7 @@ def state(db, user):
     return {
         "configured": configured(), "messages": list(reversed(rows)), "actions": [action_card(a) for a in waiting],
         "usage": usage_today(db, user), "limits": limits(user), "name": user["username"], "brief_due": brief_due(user),
+        "reminders_due": reminders_due(user),
         "wake": phrases_of(user)[0], "stop": phrases_of(user)[1], "voice": voice_of(user),
         "voices": [{"name": n, "style": s} for n, s in VOICES.items()],
     }
@@ -778,6 +779,42 @@ def give_brief(db, user):
     log_call(db, user, "brief")
     db.commit()
     return {"reply": text, "sources": [], "actions": [], "drafts": [], "notes": [], "brief": True}
+
+
+# ---------- The reminder report ----------
+# When the app raises the reminder report (every few days, for admins: who owes, what is ready to sell, what is not on the POS, what has
+# waited too long, pre-orders due soon), the panel tells each admin about it once, the next time it is open, without being asked.
+def reminders_due(user):
+    return (enabled_for(user) and user["role"] == "admin" and not user["demo_expires_at"] and bool(user.get("reminder_sent_on"))
+            and (user.get("reminders_seen") or "") < user["reminder_sent_on"])
+
+
+def reminders_text(db, user):
+    report = H.reminder_report(db, user["business_id"], H.reminder_stale_days(user), admin=user["role"] == "admin")
+    lines = H.reminder_lines(report, limit=4)
+    if not lines:
+        return ""
+    return ("Reminders:\n" + "\n".join("- " + line for line in lines)
+            + "\nThe full list is on the Reminders page. Ask me to draft a reminder message to any of these customers.")
+
+
+def give_reminders(db, user):
+    if not reminders_due(user):
+        raise Refused("There are no new reminders.", 409)
+    # Taken first, so two tabs (or a double tap) tell it once
+    if db.execute("UPDATE users SET reminders_seen=? WHERE id=? AND COALESCE(reminders_seen, '') < ?",
+                  (user["reminder_sent_on"], user["id"], user["reminder_sent_on"])).rowcount != 1:
+        db.commit()
+        raise Refused("There are no new reminders.", 409)
+    db.commit()
+    text = reminders_text(db, user)
+    if not text:
+        return {"reply": "", "sources": [], "actions": [], "drafts": [], "notes": []}
+    remember(db, user, "user", "Reminders")
+    remember(db, user, "assistant", text)
+    log_call(db, user, "reminders")
+    db.commit()
+    return {"reply": text, "sources": [{"label": "Reminders", "url": H.url_for("reminders")}], "actions": [], "drafts": [], "notes": [], "brief": True}
 
 
 def short_day(day):
