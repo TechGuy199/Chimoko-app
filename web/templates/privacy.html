@@ -1,0 +1,115 @@
+{% extends "base.html" %}
+{% block title %}Privacy Policy — {% endblock %}
+{% block content %}
+<article class="card legal">
+    <h1>Privacy Policy</h1>
+    <p class="muted">Effective {{ legal.effective }}. Applies to {{ legal.app }} at {{ legal.site }}.</p>
+
+    <p>
+        {{ legal.app }} is a point-of-sale and business records app run by {{ legal.operator }} ("we", "us"). A business registers an account and
+        records its sales, purchases, stock, plantings, customers, suppliers, staff and pay in it. This policy says what information the app holds,
+        why, who it is shared with, and the choices you have.
+    </p>
+
+    <h2>Who is responsible for what</h2>
+    <p>
+        Each business that registers decides what it records about its own customers, suppliers and employees, and is responsible for having the right
+        to record it. We hold and process that information on the business's behalf, only to run the app for it. Information about the people who sign
+        in (their usernames and settings) is held by us to provide the service.
+    </p>
+
+    <h2>What we hold</h2>
+    <ul>
+        <li><strong>Accounts:</strong> the business's name and details, usernames, a one-way hash of each password (never the password itself),
+            roles and permissions, and each person's display preferences (theme, typeface, text size).</li>
+        <li><strong>Business records:</strong> everything a business enters, such as invoices, payments, customers' names and phone numbers, suppliers,
+            inventory, plantings, customer requests, employees (including names, NRC numbers, pay and absences), payslips and activity logs.</li>
+        <li><strong>Alerts and logs:</strong> in-app alerts, a record of who did what and when, and the phone number set for WhatsApp alerts.</li>
+        <li><strong>Assistant (when a business switches it on):</strong> the questions asked, short notes the assistant has been asked to remember
+            (shown and deletable in Settings), and a usage log (counts, not content).</li>
+        <li><strong>Google Drive connection (when an admin connects one):</strong> the Google account's email address, an access token and refresh token
+            (kept encrypted), the id of the backup folder the app created, and the ids of the backup files it saved.</li>
+    </ul>
+
+    <h2>Cookies and storage on your device</h2>
+    <p>
+        The app uses a sign-in cookie to keep you signed in and protect forms, and a cookie that remembers your display preferences. It also keeps
+        some data in your browser so pages open quickly and parts of the app work offline, and remembers small choices such as whether the assistant
+        speaks. We use no advertising or tracking cookies, and no analytics services.
+    </p>
+
+    <h2>Google user data</h2>
+    <p>
+        When an admin chooses <em>Connect Google Drive</em> on the Backups page, Google asks them to allow the app two things: to know the email address
+        of the Google account, and the <code>drive.file</code> permission. That permission lets the app create, see and change only the files and folders
+        it made itself. It cannot see, read or delete anything else in the Drive.
+    </p>
+    <ul>
+        <li>We use this access only to save the business's own backup files (Excel workbooks and CSV files of its records) into a folder named after the
+            business, to replace them with newer backups, and, if the admin turns it on, to do so automatically each night.</li>
+        <li>The email address is shown on the Backups page so the admin knows which Drive is connected.</li>
+        <li>We do not read other files, do not use Google user data for advertising, do not sell it, do not use it to train any AI or machine-learning
+            model, and do not share it with anyone except as needed to provide this backup feature, to comply with the law, or with the admin's consent.
+            People at {{ legal.operator }} do not read it, except when the admin asks us to help with a problem, for security reasons, or where the law requires.</li>
+        <li>The tokens are stored encrypted. An admin can disconnect at any time on the Backups page, which withdraws the app's access at Google and deletes
+            the tokens from our database; access can also be removed from the Google account's security settings. Backups already saved stay in the
+            Drive, belong to the Drive's owner, and can be deleted there.</li>
+    </ul>
+    <p>
+        {{ legal.app }}'s use and transfer to any other app of information received from Google APIs will adhere to the
+        <a href="https://developers.google.com/terms/api-services-user-data-policy" target="_blank" rel="noopener">Google API Services User Data Policy</a>,
+        including the Limited Use requirements.
+    </p>
+
+    <h2>Who we share information with</h2>
+    <p>We do not sell personal information. To run the app we use these service providers, who process information only to provide their service:</p>
+    <ul>
+        <li><strong>Vercel</strong> hosts the app, and its database service stores the records.</li>
+        <li><strong>Google (Gemini API)</strong>, only when a business switches the assistant on: questions, spoken questions (audio), and the records the
+            assistant looks up to answer them are sent to Google to produce the answer and, if talking back is switched on, the spoken reply.
+            The app asks Google not to store these requests.</li>
+        <li><strong>Google Drive</strong>, only when an admin connects it, as described above.</li>
+        <li><strong>WhatsApp messaging providers</strong> (Meta's WhatsApp Business service or CallMeBot), only when alerts by WhatsApp are set up:
+            the alert text is sent to the phone number the business chose.</li>
+        <li><strong>Google Fonts</strong> supplies the typefaces, so your browser contacts Google to load them.</li>
+        <li>Some browsers send speech to their maker to turn it into text when you use the assistant's microphone.</li>
+    </ul>
+    <p>We may also disclose information when the law requires it, or to protect the app, its users or others from fraud or harm.</p>
+
+    <h2>How long we keep it</h2>
+    <p>
+        Records are kept for as long as the business's account exists, so the business can rely on its books. A 24-hour demo business, its sample data and
+        its login are deleted automatically when the demo ends. When a business's account is deleted, its records and logins are deleted from the live
+        database; copies in our hosting provider's backups expire in the normal course. Backups a business saved to its own computer or Google Drive are
+        under its control.
+    </p>
+
+    <h2>Security</h2>
+    <p>
+        The app is served only over HTTPS, passwords are stored as hashes, Google tokens are encrypted, every business's records are kept apart from every
+        other business's, and staff accounts see only what their permissions allow. No system is perfectly secure, so please use a strong password and
+        keep it to yourself.
+    </p>
+
+    <h2>Your choices and rights</h2>
+    <p>
+        You can see and correct most information in the app itself, and an admin can export all of the business's records from the Backups page.
+        Depending on where you live (for example under Zambia's Data Protection Act, 2021), you may have the right to access, correct or delete personal
+        information, or to object to how it is used. If you are a customer, supplier or employee of a business that uses {{ legal.app }}, please contact
+        that business first, as it controls those records; we will help it respond.
+    </p>
+
+    <h2>Children</h2>
+    <p>The app is for businesses and is not meant for children under 18.</p>
+
+    <h2>Changes</h2>
+    <p>If we change this policy we will update the date above, and tell admins in the app of any important change before it takes effect.</p>
+
+    <h2>Contact</h2>
+    <p>
+        {% if legal.contact %}Questions or requests about privacy: <a href="mailto:{{ legal.contact }}">{{ legal.contact }}</a>.
+        {% else %}Questions or requests about privacy: contact {{ legal.operator }} through the person who set up your business's account.{% endif %}
+    </p>
+    <p class="muted"><a href="{{ url_for('terms') }}">Terms and Conditions</a></p>
+</article>
+{% endblock %}

@@ -19,6 +19,8 @@
         <label>Admin username <input name="username" required autocomplete="username"></label>
         <label>Password (8 characters or more) <input name="password" type="password" minlength="8" required autocomplete="new-password"></label>
         <label>Repeat password <input name="confirm" type="password" minlength="8" required autocomplete="new-password"></label>
+        <p class="muted small">By continuing you agree to the <a href="{{ url_for('terms') }}" target="_blank">Terms and Conditions</a> and the
+            <a href="{{ url_for('privacy') }}" target="_blank">Privacy Policy</a>.</p>
         {% if not demo_only %}
         <button class="btn success wide" name="mode" value="real">Create Account</button>
         {% endif %}

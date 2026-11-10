@@ -867,6 +867,28 @@ def setup():
     return render_template("setup.html", demo_only=demo_only, signup_open=open_, demo_hours=DEMO_HOURS)
 
 
+# --- PRIVACY POLICY AND TERMS ---
+# Open to everyone (Google's sign-in screen links to them). Who runs the app and how to reach them come from APP_OPERATOR and APP_CONTACT_EMAIL.
+LEGAL_EFFECTIVE = "10 November 2026"
+
+
+def legal_facts():
+    return {
+        "app": "MS-POS", "effective": LEGAL_EFFECTIVE, "site": request.host_url.rstrip("/").replace("http://", "https://") if ON_VERCEL else request.host_url.rstrip("/"),
+        "operator": os.environ.get("APP_OPERATOR", "").strip() or "TechGuy", "contact": os.environ.get("APP_CONTACT_EMAIL", "").strip(),
+    }
+
+
+@app.get("/privacy")
+def privacy():
+    return render_template("privacy.html", legal=legal_facts())
+
+
+@app.get("/terms")
+def terms():
+    return render_template("terms.html", legal=legal_facts())
+
+
 @app.route("/login", methods=["GET", "POST"])
 def login():
     db = get_db()

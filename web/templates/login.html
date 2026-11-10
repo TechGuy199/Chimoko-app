@@ -14,5 +14,6 @@
         {% if signup_open %}<a href="{{ url_for('setup') }}">Register a new business</a><span class="sep"> · </span>{% endif %}
         <a href="{{ url_for('setup', demo=1) }}">Try a free 24-hour demo</a>
     </p>
+    <p class="muted center small-print"><a href="{{ url_for('privacy') }}">Privacy Policy</a><span class="sep"> · </span><a href="{{ url_for('terms') }}">Terms and Conditions</a></p>
 </div>
 {% endblock %}

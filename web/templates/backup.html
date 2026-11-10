@@ -45,7 +45,8 @@
     <form method="post" action="{{ url_for('drive_connect') }}">
         {{ csrf_field() }}<button class="btn success">Connect Google Drive</button>
     </form>
-    <p class="muted hint">Google asks you to sign in and to let the app save its own files in your Drive. It cannot see anything else there.</p>
+    <p class="muted hint">Google asks you to sign in and to let the app save its own files in your Drive. It cannot see anything else there.
+        See the <a href="{{ url_for('privacy') }}">Privacy Policy</a>.</p>
     {% else %}
     <p class="muted">Google Drive is not set up on this server yet. Whoever runs the app adds a Google sign-in client for it (GOOGLE_CLIENT_ID and
         GOOGLE_CLIENT_SECRET); its redirect address is <code>{{ drive_redirect }}</code>.</p>

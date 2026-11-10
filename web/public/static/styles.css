@@ -1656,3 +1656,9 @@ a.card strong { display: block; color: var(--text-bright); font-weight: 600; }
 :root[data-accent="gold"] { --primary: #ca8a04; --primary-hover: #a16207; }
 :root:not([data-accent=""])[data-accent] { --accent: color-mix(in srgb, var(--primary) 70%, var(--text-bright)); }
 .card:has(> .appearance) { max-width: 860px; }
+
+/* Privacy Policy and Terms: a readable column */
+.legal { max-width: 760px; margin-inline: auto; line-height: 1.65; }
+.legal h2 { margin-top: 1.6em; }
+.legal li { margin: .4em 0; }
+.small-print { font-size: 13px; }
