@@ -1672,3 +1672,9 @@ summary.alerts-lit .badge { background: #fff; color: #111; }
 @media (prefers-reduced-motion: reduce) { summary.alerts-lit { animation: none; } }
 @media (max-width: 640px) { .fresh { white-space: normal; } }
 .kpis.five > .kpi { flex-basis: 150px; }
+
+/* Log a purchase: what the stock is for (farm use, for sale, or both, split by quantity) */
+.purpose-box { margin: 12px 0; padding: 12px 14px; border: 1px solid var(--line-strong); border-radius: var(--radius-small); }
+.purpose-box legend { padding: 0 6px; font-weight: 650; }
+.purpose-choices { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 6px 14px; margin-bottom: 8px; }
+.purpose-choices input:disabled + span { opacity: 0.55; }

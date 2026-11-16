@@ -21,6 +21,19 @@
     const inventoryOnly = Array.from(form.querySelectorAll("[data-inventory-only]"));
     const categories = Array.from(form.querySelectorAll('input[name="category"]'));
     const departments = Array.from(form.querySelectorAll('input[name="department"]'));
+    // What it is for: farm use (inventory only), for sale (straight on the POS), or both, split by quantity
+    const purposeBox = document.getElementById("purpose-box");
+    const purposes = Array.from(form.querySelectorAll('input[name="purpose"]'));
+    const quantity = document.getElementById("purchase-quantity");
+    const saleRow = document.getElementById("sale-qty-row");
+    const saleQty = document.getElementById("purchase-sale-qty");
+    const purposeNote = document.getElementById("purpose-note");
+    const price = document.getElementById("purchase-price");
+    const priceLabel = document.getElementById("price-label");
+    const canList = purposeBox && purposeBox.dataset.canList === "1";
+    let purposeTouched = false;   // the choice was made by hand, so a recognised item no longer sets it
+    let saleTouched = false;      // the number for sale was typed, so the usual share no longer fills it in
+    let purposeFor = null;        // the item code the choice was last filled in from
 
     let known = {};
     try {
@@ -92,6 +105,8 @@
         }
         quantityUnit.textContent = unit.value.trim() ? "(" + unit.value.trim() + ")" : "";
 
+        paintPurpose(inventory, item, isSeed);
+
         if (item && item.seeds) {
             // Already counted in packs of this size, so the size is fixed
             seeds.value = item.seeds;
@@ -103,6 +118,61 @@
             note.textContent = "Quantity bought below is counted in packs.";
         }
     }
+
+    function paintPurpose(inventory, item, isSeed) {
+        if (!purposeBox) return;
+        // A recognised item starts from what it is usually bought for, until the choice is made by hand
+        if (item && item.purpose && !purposeTouched && purposeFor !== code.value.trim() && (canList || item.purpose === "farm")) {
+            choose(purposes, item.purpose);
+            purposeFor = code.value.trim();
+        }
+        // Seed packs are planted, never sold as they are
+        purposes.forEach(function (radio) { if (radio.value !== "farm") radio.disabled = isSeed || !canList; });
+        if (isSeed) choose(purposes, "farm");
+
+        const purpose = chosen(purposes) || "farm";
+        const bought = parseInt(quantity.value, 10) || 0;
+        const split = inventory && purpose === "both";
+        saleRow.hidden = !split;
+        saleQty.required = split;
+        saleQty.max = bought || "";
+        if (split && !saleTouched && bought > 0 && item && item.share !== null && item.share !== undefined) {
+            saleQty.value = Math.min(bought, Math.max(0, Math.round(bought * item.share)));
+        }
+        const selling = inventory && (purpose === "sale" || purpose === "both");
+        const hasPrice = !!item;   // an item already in stock has a selling price to keep
+        price.required = selling && !hasPrice;
+        priceLabel.textContent = selling
+            ? (hasPrice ? "Selling price on the POS (blank = keep the current price)" : "Selling price on the POS")
+            : "Selling price (blank = keep current, or unit cost if new)";
+
+        let words = "";
+        const unitWord = unit.value.trim() ? " " + unit.value.trim() : "";
+        if (isSeed) {
+            words = "Seeds are planted, so they are kept in inventory for the farm. The seedlings are what goes on the POS.";
+        } else if (bought > 0 && purpose === "farm") {
+            words = "All " + bought.toLocaleString() + unitWord + " are kept in inventory for the farm. Nothing goes on the POS.";
+        } else if (bought > 0 && purpose === "sale") {
+            words = "All " + bought.toLocaleString() + unitWord + " go on the POS, ready to sell. None is kept for the farm.";
+        } else if (bought > 0 && split) {
+            const forSale = parseInt(saleQty.value, 10);
+            if (isNaN(forSale)) {
+                words = "Enter how many of the " + bought.toLocaleString() + " are for sale; the rest is kept for the farm.";
+            } else if (forSale < 0 || forSale > bought) {
+                words = "The number for sale must be between 0 and the " + bought.toLocaleString() + " bought.";
+            } else {
+                words = forSale.toLocaleString() + " for sale \u2192 the POS \u00b7 " + (bought - forSale).toLocaleString() + " for farm use \u2192 inventory only." +
+                    (!saleTouched && item && item.share !== null && item.share !== undefined ? " Split the same way as the last purchase of this item; change it if this one is different." : "");
+            }
+        }
+        purposeNote.textContent = words;
+    }
+
+    purposes.forEach(function (radio) {
+        radio.addEventListener("change", function () { purposeTouched = true; refresh(); });
+    });
+    if (quantity) quantity.addEventListener("input", refresh);
+    if (saleQty) saleQty.addEventListener("input", function () { saleTouched = saleQty.value !== ""; refresh(); });
 
     // Whatever is paid goes to Accounts with how it was paid, so the method shows whenever something is paid. Paid to a named
     // supplier it is also kept on their statement, and then the reference number is needed too. A known supplier fills in their phone.

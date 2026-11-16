@@ -21,18 +21,29 @@
 
 {% include "_inventory_filters.html" %}
 
+<h2 class="spaced">What it is for</h2>
+<div class="chips">
+    <a class="chip {{ 'active' if not use }}" href="{{ inv_link('inventory', use='') }}">Everything <small>{{ all_uses }}</small></a>
+    {% for u in uses %}{% if u['items'] or u.key != 'unset' %}
+    <a class="chip {{ 'active' if use == u.key }}" href="{{ inv_link('inventory', use=u.key) }}">{{ u.name }} <small>{{ u['items'] }}</small></a>
+    {% endif %}{% endfor %}
+</div>
+<p class="muted hint">The quantity here is what is kept in inventory for the farm. Stock that is for sale is on the POS, shown under it.</p>
+
 {# One item row; the grouped view leaves out the Category column because the group heading says it #}
 {% macro item_row(i, show_category) %}
 <tr>
     <td>{{ i.item_code }}</td>
     <td>
         {{ sold_link(i.item_code, i.name) }}
+        {% if i.purpose %}<span class="chip {{ {'farm': 'info', 'sale': 'ok', 'both': 'gold'}[i.purpose] }}">{{ {'farm': 'Farm use', 'sale': 'For sale', 'both': 'Sale + farm'}[i.purpose] }}</span>{% endif %}
         {% if i.seeds_per_pack %}<small class="seed-note">{{ '{:,}'.format(i.seeds_per_pack) }} seeds per pack &middot; {{ '{:,}'.format(i.seeds_per_pack * i.quantity) }} seeds in stock</small>{% endif %}
     </td>
     {% if show_category %}<td>{{ i.category or '—' }}</td>{% endif %}
     <td>{{ i.department }}</td>
     <td>{{ i.supplier_name or '—' }}</td>
-    <td class="num {{ 'warn' if i.quantity < user.low_stock_threshold }}">{{ i.quantity }}{% if i.unit %} <small class="unit">{{ i.unit }}</small>{% endif %}</td>
+    <td class="num {{ 'warn' if i.low }}">{{ i.quantity }}{% if i.unit %} <small class="unit">{{ i.unit }}</small>{% endif %}
+        {% if i.pos_qty or i.purpose in ('sale', 'both') %}<br><small class="muted">+ {{ i.pos_qty }} on the POS</small>{% endif %}</td>
     <td class="num">{{ i.unit_cost|money }}</td>
     <td class="num">{{ i.price|money }}</td>
     <td>{{ i.expiry_date or '—' }}</td>

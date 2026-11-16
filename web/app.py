@@ -1946,7 +1946,7 @@ def delivery_list_pdf_bytes(d, day, layout):
     return buffer.getvalue()
 
 # --- INVENTORY ---
-ITEM_COLUMNS = "id, item_code, name, category, department, batch_no, date_planted, quantity, unit_cost, price, supplier_name, invoice_no, purchase_date, expiry_date, seeds_per_pack, unit"
+ITEM_COLUMNS = "id, item_code, name, category, department, batch_no, date_planted, quantity, unit_cost, price, supplier_name, invoice_no, purchase_date, expiry_date, seeds_per_pack, unit, purpose"
 
 # --- Packaging unit: what a quantity of an item is counted in (bag, box, kg, litre...). Seed items are always packs. ---
 DEFAULT_UNITS = ("bag", "bottle", "box", "bundle", "carton", "kg", "litre", "pack", "piece", "roll", "sachet", "tin", "tray")
@@ -2061,7 +2061,7 @@ def chosen_department(db, biz):
     return dept if dept in department_names(db, biz) else "General"
 
 
-INV_PARAMS = ("category", "department", "view", "q", "period", "from", "to")
+INV_PARAMS = ("category", "department", "view", "q", "period", "from", "to", "use")
 
 
 def inv_link(endpoint, **changes):
@@ -2121,8 +2121,21 @@ def cost_measure(subset):
 def inventory():
     db, biz = get_db(), g.user["business_id"]
     everything = db.all(f"SELECT {ITEM_COLUMNS} FROM products WHERE business_id=? ORDER BY name", (biz,))
+    # What each item has on the POS, so an item bought for sale does not look out of stock here. An item's level is low
+    # by what it is for: one that is only for sale is judged by its POS stock, everything else by what is in inventory.
+    on_pos = {r["item_code"]: r["quantity"] for r in db.all("SELECT item_code, quantity FROM pos_products WHERE business_id=?", (biz,))}
+    for i in everything:
+        i["pos_qty"] = on_pos.get(i["item_code"], 0)
+        i["low"] = (i["pos_qty"] if i["purpose"] == "sale" else i["quantity"]) < g.user["low_stock_threshold"]
     search = request.args.get("q", "").strip()
     found = [i for i in everything if not search or norm(search) in norm(i["name"]) or norm(search) in norm(i["item_code"])]
+    # The "what it is for" chips: each counts the items on screen before this filter. Items never marked count as not set.
+    use = request.args.get("use", "") if request.args.get("use", "") in tuple(ITEM_PURPOSES) + ("unset",) else ""
+    uses = [{"key": key, "name": label, "items": sum(1 for i in found if (i["purpose"] or "unset") == key)}
+            for key, label in list(ITEM_PURPOSES.items()) + [("unset", "Not set")]]
+    all_uses = len(found)
+    if use:
+        found = [i for i in found if (i["purpose"] or "unset") == use]
 
     # Tiles and chips narrow the list; each item is in exactly one category and one department
     facet = facets(db, biz, found, stock_measure)
@@ -2138,12 +2151,12 @@ def inventory():
         group["entries"].append(item)
         group["units"] += item["quantity"]
         group["value"] += item["quantity"] * item["unit_cost"]
-        group["low"] += 1 if item["quantity"] < g.user["low_stock_threshold"] else 0
+        group["low"] += 1 if item["low"] else 0
     categories = [group for _, group in sorted(by_category.items())]
 
     return render_template(
         "inventory.html", items=items, categories=categories, view="list" if request.args.get("view") == "list" else "category",
-        facet=facet, search=search, has_items=bool(everything), mode="stock",
+        facet=facet, search=search, has_items=bool(everything), mode="stock", use=use, uses=uses, all_uses=all_uses, purposes=ITEM_PURPOSES,
     )
 
 
@@ -2164,7 +2177,11 @@ def procurement_new():
 def purchase_form(origin):
     """The guided purchase form: is it an inventory item, which category, which department, then the details."""
     db, biz = get_db(), g.user["business_id"]
-    items = db.all("SELECT item_code, name, category, department, seeds_per_pack, unit FROM products WHERE business_id=? ORDER BY name LIMIT 5000", (biz,))
+    items = db.all("SELECT item_code, name, category, department, seeds_per_pack, unit, purpose FROM products WHERE business_id=? ORDER BY name LIMIT 5000", (biz,))
+    # How the latest purchase of each item was split, so a restock of an item bought for both starts from the same share for sale
+    shares = {}
+    for r in db.all("SELECT item_code, quantity, sale_qty FROM procurements WHERE business_id=? AND sale_qty IS NOT NULL AND quantity > 0 ORDER BY id", (biz,)):
+        shares[r["item_code"]] = round(r["sale_qty"] / r["quantity"], 4)
     per_category, per_department = {}, {}
     for i in items:
         per_category[norm(i["category"] or "General")] = per_category.get(norm(i["category"] or "General"), 0) + 1
@@ -2174,7 +2191,7 @@ def purchase_form(origin):
     known = {
         i["item_code"]: {
             "name": i["name"], "category": i["category"] or "General", "department": i["department"] or "General",
-            "seeds": i["seeds_per_pack"] or 0, "unit": i["unit"] or "",
+            "seeds": i["seeds_per_pack"] or 0, "unit": i["unit"] or "", "purpose": i["purpose"] or "", "share": shares.get(i["item_code"]),
         }
         for i in items
     }
@@ -2189,7 +2206,7 @@ def purchase_form(origin):
     asked = request.args.get("inventory")
     as_inventory = bool(start) or (asked == "1" if asked in ("0", "1") else origin == "inventory")
     return render_template(
-        "inventory_new.html", origin=origin, as_inventory=as_inventory, categories=categories, methods=PAYMENT_METHODS,
+        "inventory_new.html", origin=origin, as_inventory=as_inventory, can_list=can("transfer"), categories=categories, methods=PAYMENT_METHODS,
         known_suppliers=db.all("SELECT name, phone FROM suppliers WHERE business_id=? ORDER BY name LIMIT 1000", (biz,)), departments=departments, known=known, today=now().strftime("%Y-%m-%d"), units=unit_choices(db, biz),
         pre_category=next((c["name"] for c in categories if norm(c["name"]) == want_cat), ""),
         pre_department=next((d["name"] for d in departments if norm(d["name"]) == want_dept), ""),
@@ -2452,6 +2469,31 @@ def inventory_analysis_csv():
     )
 
 
+# What an inventory item is bought for. Farm use stays in inventory only; what is for sale is listed on the POS.
+ITEM_PURPOSES = {"farm": "Farm use", "sale": "For sale", "both": "For sale and farm use"}
+
+
+def read_purchase_purpose(qty):
+    """What the purchase form says the stock is for: (purpose, how many go on the POS for sale, None), or (None, 0, what is wrong).
+    A form that does not say (an older page) is (None, 0, None): everything goes into inventory, as before."""
+    purpose = text("purpose")
+    if purpose not in ITEM_PURPOSES:
+        return None, 0, None
+    if purpose == "farm":
+        return "farm", 0, None
+    if not can("transfer"):
+        return None, 0, "Your account cannot put stock on the POS. Choose farm use, or ask an admin to log what is for sale."
+    if purpose == "sale":
+        return "sale", qty, None
+    try:
+        sale_qty = number("sale_qty", int)
+    except ValueError:
+        return None, 0, "Say how many of them are for sale (a whole number); the rest are kept for farm use."
+    if not 0 <= sale_qty <= qty:
+        return None, 0, f"The number for sale must be between 0 and the {qty:,} bought."
+    return "both", sale_qty, None
+
+
 @app.post("/inventory/purchase")
 @need("procure")
 def purchase():
@@ -2479,6 +2521,11 @@ def purchase():
             ("Item code and name are required" if inventory else "A name is required") + ", quantity must be above zero and prices cannot be negative.", "error"
         )
         return redirect(again)
+    # What an inventory item was bought for: farm use (inventory only), for sale (straight on the POS), or both, split by quantity
+    purpose, sale_qty, problem = read_purchase_purpose(qty) if inventory else (None, 0, None)
+    if problem:
+        flash(problem, "error")
+        return redirect(again)
     if not inventory and code and db.one("SELECT 1 AS x FROM products WHERE business_id=? AND item_code=?", (biz, code)):
         flash(f"'{code}' is an item in inventory. Tick 'This is also an inventory item' to add this purchase to its stock, or use a different code.", "error")
         return redirect(again)
@@ -2496,7 +2543,7 @@ def purchase():
             flash(problem, "error")
             return redirect(again)
 
-    known = db.one("SELECT category, department, seeds_per_pack FROM products WHERE business_id=? AND item_code=?", (biz, code)) if inventory else None
+    known = db.one("SELECT category, department, seeds_per_pack, price FROM products WHERE business_id=? AND item_code=?", (biz, code)) if inventory else None
     try:
         # An item already in stock keeps its own category and department; a new one is filed where the form says.
         # A category that is new is added to the list, but only once the whole purchase is saved.
@@ -2510,9 +2557,17 @@ def purchase():
             if problem:
                 flash(problem[0].upper() + problem[1:] + ".", "error")
                 return redirect(again)
+            if is_seed_category(category) and sale_qty:
+                flash("Seed packs are not sold as they are: they are planted, and the seedlings are what goes on the POS. Choose farm use for seeds.", "error")
+                return redirect(again)
+            if is_seed_category(category):
+                purpose = "farm"
+            if sale_qty and price is None and not (known and known["price"]):
+                flash("Enter the selling price: what is for sale goes on the POS at that price.", "error")
+                return redirect(again)
 
         existing_name = record_purchase(db, biz, {
-            "in_inventory": inventory, "amount_paid": amount_paid, "seeds_per_pack": seeds_per_pack,
+            "in_inventory": inventory, "amount_paid": amount_paid, "seeds_per_pack": seeds_per_pack, "purpose": purpose, "sale_qty": sale_qty,
             "unit": (SEED_UNIT if seeds_per_pack else resolve_unit(db, biz, text("unit"))) if inventory else "",
             "item_code": code, "name": name, "category": category, "department": department,
             "quantity": qty, "unit_cost": unit_cost, "price": price, "supplier_name": text("supplier_name"), "supplier_phone": text("supplier_phone"),
@@ -2529,6 +2584,10 @@ def purchase():
     seed_note = f" That is {qty * seeds_per_pack:,} seeds in {qty:,} pack(s) of {seeds_per_pack:,}." if seeds_per_pack else ""
     if not inventory:
         flash(f"Purchase logged for '{name}' in Procurements. It was not added to inventory.", "ok")
+    elif sale_qty:
+        kept = qty - sale_qty
+        flash(f"Purchase logged for '{existing_name or name}' (code {code}): {sale_qty:,} for sale, now on the POS"
+              + (f", and {kept:,} for farm use, in inventory only." if kept else ". None was kept for farm use.") + " It is recorded in Procurements too.", "ok")
     elif existing_name:
         flash(f"Added {qty} unit(s) to the existing stock of '{existing_name}' (code {code}). It is logged in Procurements too.{seed_note}", "ok")
     else:
@@ -2545,7 +2604,14 @@ def record_purchase(db, biz, p):
     Returns the existing item's name when the code was already in stock, otherwise None. The caller commits.
     """
     inventory = p.get("in_inventory", True)
-    existing = db.one("SELECT id, name, price, category, department, unit FROM products WHERE business_id=? AND item_code=?", (biz, p["item_code"])) if inventory else None
+    existing = db.one("SELECT id, name, price, category, department, unit, purpose, batch_no, date_planted FROM products WHERE business_id=? AND item_code=?", (biz, p["item_code"])) if inventory else None
+    # What is for sale goes straight on the POS; only the rest is kept in inventory (farm use). The item remembers what it is bought
+    # for; one bought both ways over time is 'both'. A purchase that does not say (an import, the assistant) changes neither.
+    sale_qty = min(max(int(p.get("sale_qty") or 0), 0), p["quantity"]) if inventory else 0
+    kept_qty = p["quantity"] - sale_qty
+    purpose = p.get("purpose") if inventory and p.get("purpose") in ITEM_PURPOSES else None
+    if existing and purpose and existing["purpose"] and existing["purpose"] != purpose:
+        purpose = "both"
     if existing:
         # A restock is filed where the item already lives, so analysis by category and department stays consistent.
         # It is counted in the item's own unit too; only an item with no unit yet takes the one given.
@@ -2554,19 +2620,19 @@ def record_purchase(db, biz, p):
         price = existing["price"] if p["price"] is None else p["price"]
         db.execute(
             """UPDATE products SET quantity = quantity + ?, unit_cost=?, price=?, batch_no=?, supplier_name=?, invoice_no=?, purchase_date=?, expiry_date=?,
-                                  seeds_per_pack = COALESCE(?, seeds_per_pack), unit=?
+                                  seeds_per_pack = COALESCE(?, seeds_per_pack), unit=?, purpose = COALESCE(?, purpose)
                WHERE id=? AND business_id=?""",
-            (p["quantity"], p["unit_cost"], price, p["batch_no"], p["supplier_name"], p["invoice_no"], p["purchase_date"], p["expiry_date"],
-             p.get("seeds_per_pack"), unit, existing["id"], biz),
+            (kept_qty, p["unit_cost"], price, p["batch_no"], p["supplier_name"], p["invoice_no"], p["purchase_date"], p["expiry_date"],
+             p.get("seeds_per_pack"), unit, purpose, existing["id"], biz),
         )
     elif inventory:
         price = p["unit_cost"] if p["price"] is None else p["price"]
         db.execute(
-            """INSERT INTO products (business_id, item_code, name, category, department, batch_no, date_planted, quantity, unit_cost, price, supplier_name, invoice_no, purchase_date, expiry_date, seeds_per_pack, unit)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            """INSERT INTO products (business_id, item_code, name, category, department, batch_no, date_planted, quantity, unit_cost, price, supplier_name, invoice_no, purchase_date, expiry_date, seeds_per_pack, unit, purpose)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
-                biz, p["item_code"], p["name"], p["category"], p["department"], p["batch_no"], p["date_planted"], p["quantity"],
-                p["unit_cost"], price, p["supplier_name"], p["invoice_no"], p["purchase_date"], p["expiry_date"], p.get("seeds_per_pack"), p.get("unit") or "",
+                biz, p["item_code"], p["name"], p["category"], p["department"], p["batch_no"], p["date_planted"], kept_qty,
+                p["unit_cost"], price, p["supplier_name"], p["invoice_no"], p["purchase_date"], p["expiry_date"], p.get("seeds_per_pack"), p.get("unit") or "", purpose,
             ),
         )
     total_cost = round(p["quantity"] * p["unit_cost"], 2)
@@ -2574,12 +2640,12 @@ def record_purchase(db, biz, p):
     # The supplier named on the purchase gets an account (or the existing one is used), so the purchase lands on their statement
     supplier_id = supplier_for(db, biz, p["supplier_name"], p.get("supplier_phone"), p["purchase_date"] or now().strftime("%Y-%m-%d"))
     procurement_id = db.insert(
-        """INSERT INTO procurements (business_id, item_code, name, category, department, supplier_name, invoice_no, purchase_date, quantity, unit_cost, total_cost, expiry_date, amount_paid, in_inventory, supplier_id)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        """INSERT INTO procurements (business_id, item_code, name, category, department, supplier_name, invoice_no, purchase_date, quantity, unit_cost, total_cost, expiry_date, amount_paid, in_inventory, supplier_id, sale_qty)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             biz, p["item_code"], existing["name"] if existing else p["name"], p["category"], p["department"], p["supplier_name"],
             p["invoice_no"], p["purchase_date"], p["quantity"], p["unit_cost"], total_cost, p["expiry_date"],
-            paid_now, 1 if inventory else 0, supplier_id,
+            paid_now, 1 if inventory else 0, supplier_id, sale_qty if inventory and (sale_qty or purpose) else None,
         ),
     )
     if supplier_id and paid_now > 0.005:
@@ -2596,6 +2662,16 @@ def record_purchase(db, biz, p):
         )
     if inventory:
         db.execute("UPDATE pos_products SET price=? WHERE business_id=? AND item_code=?", (price, biz, p["item_code"]))
+    if sale_qty:
+        # The part for sale is listed on the POS under the item's own code, as a transfer from inventory would list it
+        listed = db.execute("UPDATE pos_products SET quantity = quantity + ? WHERE business_id=? AND item_code=?", (sale_qty, biz, p["item_code"])).rowcount
+        if not listed:
+            db.execute(
+                """INSERT INTO pos_products (business_id, item_code, name, category, department, batch_no, date_planted, quantity, price)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (biz, p["item_code"], existing["name"] if existing else p["name"], p["category"], p["department"], p["batch_no"],
+                 (existing["date_planted"] if existing else p["date_planted"]) or "", sale_qty, price),
+            )
     requests_arrived(db, biz, existing["name"] if existing else p["name"], p["item_code"] if inventory else "", f"{p['quantity']:,} bought on {p['purchase_date']}")
     return existing["name"] if existing else None
 
@@ -2632,7 +2708,7 @@ def item(item_id):
         category_choices.append(current["category"] or "General")
 
     return render_template(
-        "item.html", item=current, departments=department_names(db, biz), category_choices=category_choices, units=unit_choices(db, biz),
+        "item.html", item=current, purposes=ITEM_PURPOSES, departments=department_names(db, biz), category_choices=category_choices, units=unit_choices(db, biz),
         access={action: item_access_state(db, item_id, action) for action, _ in ITEM_ACTIONS}, actions=ITEM_ACTIONS,
         seed=seed, listing=listing, batches=batches, per_seed=per_seed, loose=loose, plantings=plantings, seedling_name=(listing or {}).get("name") or seedling_name_for(current["name"]),
     )
@@ -2680,17 +2756,24 @@ def update_item(item_id):
     else:
         unit = current["unit"] or ""
 
+    # What the item is for; left as it is when the form does not send it. Seeds are always for the farm (they are planted)
+    purpose = current["purpose"]
+    if is_seed_category(category):
+        purpose = "farm"
+    elif "purpose" in request.form:
+        purpose = text("purpose") if text("purpose") in ITEM_PURPOSES else None
+
     re_filed = norm(category) != norm(current["category"]) or norm(dept) != norm(current["department"])
 
     # Item code and quantity are not editable: stock only moves through purchases, transfers and sales
     try:
         db.execute(
             """UPDATE products SET name=?, category=?, department=?, batch_no=?, date_planted=?, unit_cost=?, price=?, supplier_name=?, invoice_no=?, purchase_date=?, expiry_date=?,
-                                  seeds_per_pack = COALESCE(?, seeds_per_pack), unit=?
+                                  seeds_per_pack = COALESCE(?, seeds_per_pack), unit=?, purpose=?
                WHERE id=? AND business_id=?""",
             (
                 name, category, dept, text("batch_no"), text("date_planted"), unit_cost, price, text("supplier_name"),
-                text("invoice_no"), text("purchase_date"), text("expiry_date"), seeds_per_pack, unit, item_id, biz,
+                text("invoice_no"), text("purchase_date"), text("expiry_date"), seeds_per_pack, unit, purpose, item_id, biz,
             ),
         )
         db.execute(
@@ -3462,7 +3545,7 @@ def invoice_payment(invoice_id):
 
 
 # --- PROCUREMENTS ---
-PROCUREMENT_COLUMNS = "id, purchase_date, supplier_name, invoice_no, item_code, name, category, department, quantity, unit_cost, total_cost, expiry_date, amount_paid, COALESCE(in_inventory, 1) AS in_inventory, supplier_id"
+PROCUREMENT_COLUMNS = "id, purchase_date, supplier_name, invoice_no, item_code, name, category, department, quantity, unit_cost, total_cost, expiry_date, amount_paid, COALESCE(in_inventory, 1) AS in_inventory, supplier_id, sale_qty"
 PROCUREMENT_KINDS = (("", "All purchases"), ("inventory", "Inventory items"), ("expense", "Not in inventory"))
 
 

@@ -223,6 +223,13 @@
                             {% for d in departments %}<option {{ 'selected' if d == item.department }}>{{ d }}</option>{% endfor %}
                         </select>
                     </label>
+                    <label>What it is for
+                        <select name="purpose" {{ 'disabled' if seed }}>
+                            <option value="" {{ 'selected' if not item.purpose }}>Not set</option>
+                            {% for key, label in purposes.items() %}<option value="{{ key }}" {{ 'selected' if item.purpose == key or (seed and key == 'farm') }}>{{ label }}</option>{% endfor %}
+                        </select>
+                        <small class="muted">{{ 'Seeds are planted, so they are always for the farm.' if seed else 'Farm use stays in inventory only; what is for sale is on the POS.' }}</small>
+                    </label>
                     <label>Packaging unit
                         <input name="unit" id="detail-unit" list="unit-choices" maxlength="30" autocomplete="off" placeholder="e.g. bag, box, kg, litre"
                                value="{{ item.unit or '' }}" {{ 'readonly' if seed }}>

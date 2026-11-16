@@ -32,7 +32,7 @@
                         <td>{{ sold_link(r.item_code, r.name) }}</td>
                         <td>{{ r.category }}</td>
                         <td>{{ r.department }}</td>
-                        <td>{% if r.in_inventory %}<span class="ok">Yes</span>{% else %}<span class="muted">No</span>{% endif %}</td>
+                        <td>{% if r.in_inventory %}<span class="ok">Yes</span>{% if r.sale_qty is not none %}<br><small class="muted">{% if r.sale_qty %}{{ r.sale_qty }} for sale{% endif %}{% if r.sale_qty and r.quantity - r.sale_qty %} &middot; {% endif %}{% if r.quantity - r.sale_qty %}{{ r.quantity - r.sale_qty }} farm use{% endif %}</small>{% endif %}{% else %}<span class="muted">No</span>{% endif %}</td>
                         <td class="num">{{ r.quantity }}</td>
                         <td class="num">{{ r.unit_cost|money }}</td>
                         <td class="num">{{ r.total_cost|money }}</td>

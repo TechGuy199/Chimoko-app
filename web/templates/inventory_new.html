@@ -88,9 +88,24 @@
         <datalist id="unit-choices">
             {% for u in units %}<option value="{{ u }}">{% endfor %}
         </datalist>
-        <label>Quantity bought <span id="quantity-unit" class="muted"></span> <input name="quantity" type="number" min="1" step="1" required></label>
+        <label>Quantity bought <span id="quantity-unit" class="muted"></span> <input name="quantity" id="purchase-quantity" type="number" min="1" step="1" required></label>
         <label>Unit cost <input name="unit_cost" type="number" min="0" step="0.01" required></label>
-        <label data-inventory-only>Selling price (blank = keep current, or unit cost if new) <input name="price" type="number" min="0" step="0.01"></label>
+
+        <fieldset class="purpose-box" data-inventory-only id="purpose-box" data-can-list="{{ '1' if can_list else '0' }}">
+            <legend>What is it for?</legend>
+            <div class="purpose-choices">
+                <label class="check"><input type="radio" name="purpose" value="farm" checked> <span><strong>Farm use</strong><br><small class="muted">Kept in inventory only. It never shows on the POS.</small></span></label>
+                <label class="check"><input type="radio" name="purpose" value="sale" {{ 'disabled' if not can_list }}> <span><strong>For sale</strong><br><small class="muted">All of it goes on the POS, ready to sell.</small></span></label>
+                <label class="check"><input type="radio" name="purpose" value="both" {{ 'disabled' if not can_list }}> <span><strong>Both</strong><br><small class="muted">Some for sale on the POS, the rest kept in inventory for the farm.</small></span></label>
+            </div>
+            {% if not can_list %}<p class="muted hint">Your account cannot put stock on the POS, so purchases you log are for farm use. An admin can log what is for sale.</p>{% endif %}
+            <label id="sale-qty-row" hidden>How many are for sale?
+                <input name="sale_qty" id="purchase-sale-qty" type="number" min="0" step="1" inputmode="numeric" placeholder="the rest is kept for farm use">
+            </label>
+            <p class="seedling-summary" id="purpose-note" aria-live="polite"></p>
+        </fieldset>
+
+        <label data-inventory-only><span id="price-label">Selling price (blank = keep current, or unit cost if new)</span> <input name="price" id="purchase-price" type="number" min="0" step="0.01"></label>
         <label>Supplier name <input name="supplier_name" id="purchase-supplier" list="known-suppliers" autocomplete="off" maxlength="100"></label>
         <datalist id="known-suppliers">
             {% for s in known_suppliers %}<option value="{{ s.name }}" data-phone="{{ s.phone }}">{{ s.phone }}</option>{% endfor %}

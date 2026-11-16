@@ -8,6 +8,9 @@
         <dl class="facts">
             {% if supplier %}<dt>Supplier account</dt><dd><a href="{{ url_for('supplier_statement', supplier_id=supplier.id) }}">{{ supplier.name }}</a></dd>{% endif %}
             <dt>In inventory</dt><dd>{{ 'Yes, added to stock' if p.in_inventory else 'No, an expense only' }}</dd>
+            {% if p.in_inventory and p.sale_qty is not none %}
+            <dt>What it was for</dt><dd>{% if p.sale_qty %}{{ p.sale_qty }} for sale (put on the POS){% endif %}{% if p.sale_qty and p.quantity - p.sale_qty %}, {% endif %}{% if p.quantity - p.sale_qty %}{{ p.quantity - p.sale_qty }} for farm use (inventory only){% endif %}</dd>
+            {% endif %}
             <dt>Category / department</dt><dd>{{ p.category or '—' }} / {{ p.department or '—' }}</dd>
             <dt>Purchase date</dt><dd>{{ p.purchase_date or '—' }}</dd>
             <dt>Supplier</dt><dd>{{ p.supplier_name or '—' }}</dd>
