@@ -65,7 +65,7 @@
         }
         if (chosen && trays > 0 && holes > 0) {
             const seeds = Math.floor(trays * holes + 0.5 + 1e-9);
-            parts.push(trays.toLocaleString() + " trays × " + holes.toLocaleString() + " holes = " + seeds.toLocaleString() + " seeds.");
+            parts.push(trays.toLocaleString() + (trays === 1 ? " tray × " : " trays × ") + holes.toLocaleString() + " holes = " + seeds.toLocaleString() + " seeds.");
             const inStock = chosen.packs * chosen.size + chosen.loose;
             if (chosen.size && seeds > inStock) {
                 parts.push("Only " + inStock.toLocaleString() + " seeds are in stock.");
