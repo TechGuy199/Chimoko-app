@@ -13,6 +13,12 @@
         </select>
     </label>
 
+    {# The 0 is sent first, so an unticked box still says "no"; a tick sends 1 after it and wins #}
+    {% set plants = (e.plants if e and e.plants is not none else casual) if e else false %}
+    <input type="hidden" name="plants" value="0">
+    <label class="check"><input type="checkbox" name="plants" value="1" {{ 'checked' if plants }} {{ 'data-plants-auto' if not e }}> Plants trays (a tile on Planting Records)</label>
+    <small class="muted">Ticked people each get a tile on Planting Records, where the trays they plant each day are entered.</small>
+
     <div data-show-for="Permanent" {{ 'hidden' if casual }}>
         <label>Salary for each pay ({{ user.currency|trim }})
             <input name="basic_salary" type="number" min="0" step="0.01" inputmode="decimal" value="{{ '%g'|format(e.basic_salary) if e and not casual else '' }}" placeholder="0.00">
@@ -77,6 +83,12 @@
                 const next = form.querySelector('input[name="next_pay_date"]');
                 next.required = schedule.value === "weekly" || schedule.value === "biweekly";
                 hint.textContent = words[schedule.value] || "";
+            }
+            // On a new employee, the planter box follows the status (casual workers plant) until it is ticked or unticked by hand
+            const plants = form.querySelector("[data-plants-auto]");
+            if (plants) {
+                plants.addEventListener("change", function () { delete plants.dataset.plantsAuto; plants.removeAttribute("data-plants-auto"); plants.dataset.touched = "1"; });
+                type.addEventListener("change", function () { if (!plants.dataset.touched) plants.checked = type.value === "Casual Worker"; });
             }
             type.addEventListener("change", paint);
             schedule.addEventListener("change", paint);

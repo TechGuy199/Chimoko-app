@@ -3710,11 +3710,12 @@ def read_employee_form(hr_set, current=None):
         "start_date": day_or_none(text("start_date")) or "", "expected_days_week": days_week,
         "pay_basis": "trays" if kind == "Casual Worker" else None, "tray_rate": round(rate, 2) if rate is not None else None,
         "pay_schedule": schedule, "pay_day": pay_day if schedule == "monthly" else None, "next_pay_date": next_day,
+        "plants": 1 if checked("plants", default=kind == "Casual Worker") else 0,
     }, None
 
 
 EMPLOYEE_FIELDS = ("full_name", "nrc_number", "employment_type", "basic_salary", "address", "age", "start_date", "expected_days_week",
-                   "pay_basis", "tray_rate", "pay_schedule", "pay_day", "next_pay_date")
+                   "pay_basis", "tray_rate", "pay_schedule", "pay_day", "next_pay_date", "plants")
 
 
 @app.post("/hr/employees")
@@ -3901,7 +3902,7 @@ def unpaid_trays(db, biz, employee_id, until):
 PAY_SCHEDULES = (("monthly", "Monthly, on a day of the month"), ("biweekly", "Every two weeks"), ("weekly", "Every week"), ("manual", "On a date set each time"))
 PAY_BASES = (("trays", "Per tray planted"),)
 EMPLOYEE_COLUMNS = ("id, full_name, nrc_number, employment_type, basic_salary, address, age, start_date, expected_days_week, pay_basis, tray_rate, "
-                    "pay_schedule, pay_day, next_pay_date, paid_through, pay_reminded_for")
+                    "pay_schedule, pay_day, next_pay_date, paid_through, pay_reminded_for, plants")
 
 
 def rate_for(employee, hr_set):
@@ -3912,6 +3913,17 @@ def rate_for(employee, hr_set):
 
 def is_casual(employee):
     return employee.get("employment_type") == "Casual Worker"
+
+
+# Who plants trays and so gets a tile on Planting Records: those ticked in HR. Someone never set either way (registered before the
+# choice existed, or by an import) counts as a planter when they are a casual worker.
+PLANTER_SQL = "COALESCE(plants, CASE WHEN employment_type='Casual Worker' THEN 1 ELSE 0 END) = 1"
+
+
+@app.template_global()
+def is_planter(employee):
+    plants = employee.get("plants")
+    return bool(plants) if plants is not None else is_casual(employee)
 
 
 def month_day(year, month, day):
@@ -7893,6 +7905,34 @@ def save_tray_rows(db, biz, planting_id, rows):
         )
 
 
+class NotEnoughSeeds(Exception):
+    """A planting needs more seeds than the item has in stock; the message says what there is."""
+
+
+def take_seeds(db, biz, item, size, seeds):
+    """Takes the seeds for a planting out of a seed item: loose seeds left from an earlier opened pack first, then whole packs (the
+    rest of an opened pack is kept as loose seeds). Returns (packs taken, change in loose seeds, loose seeds left).
+    Raises NotEnoughSeeds when the stock is short, StockError when it changed underneath. The caller commits or rolls back."""
+    loose = item["loose_seeds"] or 0
+    from_loose = min(loose, seeds)
+    need_seeds = seeds - from_loose
+    packs = -(-need_seeds // size)
+    if packs > item["quantity"]:
+        available = item["quantity"] * size + loose
+        raise NotEnoughSeeds(f"Only {available:,} seeds of {item['name']} are in stock ({item['quantity']} pack(s) of {size:,}"
+                             + (f" and {loose:,} loose seeds" if loose else "") + ").")
+    loose_left = loose - from_loose + (packs * size - need_seeds)
+    moved = db.execute(
+        "UPDATE products SET quantity = quantity - ?, loose_seeds=?, seeds_per_pack = COALESCE(seeds_per_pack, ?) WHERE id=? AND business_id=? AND quantity >= ?",
+        (packs, loose_left, size, item["id"], biz, packs),
+    )
+    if moved.rowcount != 1:
+        raise StockError(item["name"])
+    if packs:
+        low_stock_alert(db, item["name"], item["item_code"], item["quantity"], item["quantity"] - packs, "in inventory")
+    return packs, loose_left - loose, loose_left
+
+
 @app.get("/planting")
 @need(None)
 def planting_list():
@@ -7931,8 +7971,11 @@ def planting_list():
     else:
         show = "all"
     keep = {key: value for key, value in f.items() if value and key != "filtered"}
+    today = today_str()
+    planted_today = trays_by_planter(db, biz, today)
     return render_template(
         "plantings.html", rows=rows, show=show, counts=counts, editable=can_plant(), f=f, keep=keep, departments=department_names(db, biz),
+        planters=planters(db, biz), planted_today=planted_today, today=today,
         tab=lambda name: url_for("planting_list", **({"show": name} if name != "all" else {}), **keep),
     )
 
@@ -7948,6 +7991,238 @@ def planting_filters(db, biz):
     f["department"] = request.args.get("department", "") if request.args.get("department", "") in department_names(db, biz) else ""
     f["filtered"] = any(f[key] for key in ("q", "planted_from", "planted_to", "ready_from", "ready_to", "department"))
     return f
+
+
+# --- Planting by planter ---
+# Planting Records shows a tile for each person who plants trays (ticked in HR). A tile opens that person's day: every entry is a seed
+# item from inventory and the trays they planted of it. An entry joins the batch already planted that day from the same item in trays
+# with the same holes (still growing, not marked ready), so several people planting tomatoes on one day make one batch, with each
+# person's trays recorded against it; otherwise it starts a new batch. The seeds come out of inventory as on the full planting form.
+def planters(db, biz):
+    return db.all(f"SELECT id, full_name, employment_type, plants FROM employees WHERE business_id=? AND {PLANTER_SQL} ORDER BY full_name", (biz,))
+
+
+def trays_by_planter(db, biz, day):
+    """{employee_id: {trays, batches}} for the plantings dated on a day."""
+    rows = db.all(
+        """SELECT t.employee_id, SUM(t.trays) AS trays, COUNT(DISTINCT t.planting_id) AS batches
+           FROM planting_trays t JOIN plantings p ON p.id = t.planting_id AND p.business_id = t.business_id
+           WHERE t.business_id=? AND p.planted_on=? AND t.employee_id IS NOT NULL GROUP BY t.employee_id""",
+        (biz, day),
+    )
+    return {r["employee_id"]: r for r in rows}
+
+
+def day_batch(db, biz, item_id, day, holes):
+    """The batch an entry joins: planted on that day from the item, in trays with these holes, still growing and not counted yet."""
+    return db.one(
+        """SELECT * FROM plantings WHERE business_id=? AND seed_item_id=? AND planted_on=? AND COALESCE(holes_per_tray, 0)=?
+           AND still_in_greenhouse=1 AND actual_ready_on IS NULL ORDER BY id DESC LIMIT 1""",
+        (biz, item_id, day, holes),
+    )
+
+
+def grow_days(p):
+    try:
+        return (datetime.date.fromisoformat(p["ready_on"]) - datetime.date.fromisoformat(p["planted_on"])).days
+    except (TypeError, ValueError):
+        return None
+
+
+def planter_seed_items(db, biz, day):
+    """The seed items an entry can be planted from, and what the form fills in for each: the stock, the mortality and growing time of
+    the item's latest planting, and the batches already planted from it on the day (by holes per tray), which an entry would join."""
+    latest = {}
+    for p in db.all("SELECT seed_item_id, mortality_pct, planted_on, ready_on, price FROM plantings WHERE business_id=? AND seed_item_id IS NOT NULL ORDER BY id", (biz,)):
+        latest[p["seed_item_id"]] = p
+    joins = {}
+    for p in db.all(
+        """SELECT * FROM plantings WHERE business_id=? AND seed_item_id IS NOT NULL AND planted_on=? AND still_in_greenhouse=1 AND actual_ready_on IS NULL
+           ORDER BY id""",
+        (biz, day),
+    ):
+        joins.setdefault(p["seed_item_id"], {})[str(p["holes_per_tray"] or 0)] = {
+            "label": planting_label(p), "mortality": p["mortality_pct"], "ready": p["ready_on"],
+        }
+    items, info = [], {}
+    for i in db.all("SELECT id, item_code, name, category, quantity, seeds_per_pack, loose_seeds FROM products WHERE business_id=? ORDER BY name", (biz,)):
+        if not is_seed_category(i["category"]):
+            continue
+        i["allowed"] = item_grant(db, i["id"], "transfer") is not None
+        i["usable"] = i["allowed"] and bool(i["seeds_per_pack"]) and (i["quantity"] > 0 or (i["loose_seeds"] or 0) > 0)
+        items.append(i)
+        last = latest.get(i["id"])
+        info[str(i["id"])] = {
+            "name": i["name"], "packs": i["quantity"], "loose": i["loose_seeds"] or 0, "size": i["seeds_per_pack"] or 0,
+            "mortality": last["mortality_pct"] if last else None, "grow": grow_days(last) if last else None, "batches": joins.get(i["id"], {}),
+        }
+    return items, info
+
+
+@app.get("/planting/planter/<int:employee_id>")
+@need(None)
+def planter_day(employee_id):
+    db, biz = get_db(), g.user["business_id"]
+    e = get_employee(db, employee_id)
+    day = activity_day()
+    shown = datetime.date.fromisoformat(day)
+    items, info = planter_seed_items(db, biz, day)
+    done = db.all(
+        """SELECT t.id, t.trays, t.paid_payslip_id, p.id AS planting_id, p.name, p.batch_no, p.planted_on, p.holes_per_tray, p.seeds_planted,
+                  p.trays AS batch_trays, p.ready_on, p.actual_ready_on
+           FROM planting_trays t JOIN plantings p ON p.id = t.planting_id AND p.business_id = t.business_id
+           WHERE t.business_id=? AND t.employee_id=? AND p.planted_on=? ORDER BY t.id""",
+        (biz, employee_id, day),
+    )
+    for r in done:
+        r["label"] = planting_label(r)
+    hr_set = hr_settings_for(db, biz)
+    return render_template(
+        "planter_day.html", e=e, day=day, today=today_str(), shown=shown, items=items, info=info, done=done,
+        total=round(sum(r["trays"] for r in done), 2), usual_holes=hr_set["holes_per_tray"] or "", max_holes=MAX_TRAY_HOLES,
+        rate=rate_for(e, hr_set) if is_casual(e) else None, planter=is_planter(e),
+        prev_day=(shown - datetime.timedelta(days=1)).isoformat(), next_day=(shown + datetime.timedelta(days=1)).isoformat(),
+    )
+
+
+def read_planter_entries(db, biz, day):
+    """The entries on a planter's day form: ([{item, grant, size, trays, holes, mortality, ready_on}], problems). A row left empty is skipped."""
+    form = {key: request.form.getlist(key) for key in ("item_id", "trays", "holes", "mortality_pct", "ready_on")}
+    usual = hr_settings_for(db, biz)["holes_per_tray"] or None
+    entries, problems, earlier = [], [], set()
+    for i in range(len(form["item_id"])):
+        value = lambda key: (form[key][i] if i < len(form[key]) else "").strip()  # noqa: E731
+        if not value("item_id") and not value("trays"):
+            continue
+        where = f"Entry {i + 1}"
+        item = None
+        if value("item_id").isascii() and value("item_id").isdigit():
+            item = db.one("SELECT " + ITEM_COLUMNS + ", loose_seeds FROM products WHERE id=? AND business_id=?", (int(value("item_id")), biz))
+        if item is None or not is_seed_category(item["category"]):
+            problems.append(f"{where}: choose the seed item from inventory.")
+            continue
+        grant = item_grant(db, item["id"], "transfer")
+        if grant is None:
+            problems.append(f"{where}: your account cannot take {item['name']} out of inventory. Ask an admin, or request it on the item's page.")
+            continue
+        if not item["seeds_per_pack"]:
+            problems.append(f"{where}: {item['name']} has no pack size recorded. Record its seeds per pack on the full planting form first.")
+            continue
+        try:
+            trays = tray_count(value("trays"))
+        except ValueError:
+            problems.append(f"{where}: enter the trays planted of {item['name']} (a number above zero).")
+            continue
+        try:
+            holes = int(value("holes")) if value("holes") else usual
+            if holes is None or not 1 <= holes <= MAX_TRAY_HOLES:
+                raise ValueError
+        except ValueError:
+            problems.append(f"{where}: enter the holes in each tray (a whole number from 1 to {MAX_TRAY_HOLES:,}).")
+            continue
+        # Joining a batch already planted that day (or earlier in this form) keeps that batch's mortality and ready date
+        joins = (item["id"], holes) in earlier or day_batch(db, biz, item["id"], day, holes) is not None
+        mortality, ready_on = None, None
+        if not joins:
+            try:
+                mortality = float(value("mortality_pct").replace(",", ""))
+                if not 0 <= mortality < 100:
+                    raise ValueError
+            except ValueError:
+                problems.append(f"{where}: enter the expected mortality for {item['name']} as a percentage from 0 up to (not including) 100.")
+                continue
+            ready_on = day_or_none(value("ready_on")) if value("ready_on") else None
+            if ready_on is None or ready_on < day:
+                problems.append(f"{where}: enter the date the {item['name']} seedlings are expected to be ready (not before the day planted).")
+                continue
+            if seedlings_from(int(math.floor(trays * holes + 0.5 + 1e-9)), mortality) < 1:
+                problems.append(f"{where}: at that mortality these seeds would give less than one seedling.")
+                continue
+        earlier.add((item["id"], holes))
+        entries.append({"item_id": item["id"], "grant": grant, "trays": trays, "holes": holes, "mortality": mortality, "ready_on": ready_on})
+    return entries, problems
+
+
+@app.post("/planting/planter/<int:employee_id>")
+@need(None)
+def planter_save(employee_id):
+    """Saves every entry on a planter's day form at once, or none of them if anything is wrong."""
+    db, biz = get_db(), g.user["business_id"]
+    e = get_employee(db, employee_id)
+    day = day_or_none(text("date")) if text("date") else None
+    back = redirect(url_for("planter_day", employee_id=employee_id, date=day or today_str()))
+    if day is None or day > today_str():
+        flash("Choose the day the trays were planted (today or earlier).", "error")
+        return back
+    if not is_planter(e):
+        flash(f"{e['full_name']} is not set to plant trays. An admin can tick \"Plants trays\" for them in HR.", "error")
+        return back
+    entries, problems = read_planter_entries(db, biz, day)
+    if problems:
+        flash(" ".join(problems) + " Nothing was saved.", "error")
+        return back
+    if not entries:
+        flash("Add at least one entry: the seed item and the trays planted.", "error")
+        return back
+
+    done, joined, grants = [], set(), []
+    try:
+        for entry in entries:
+            item = db.one("SELECT " + ITEM_COLUMNS + ", loose_seeds FROM products WHERE id=? AND business_id=?", (entry["item_id"], biz))
+            size, trays, holes = item["seeds_per_pack"], entry["trays"], entry["holes"]
+            seeds = int(math.floor(trays * holes + 0.5 + 1e-9))   # trays x holes in each tray; a part-planted tray rounds to whole seeds
+            seed_cost = item["unit_cost"] / size
+            packs, loose_delta, _ = take_seeds(db, biz, item, size, seeds)
+            batch = day_batch(db, biz, item["id"], day, holes)
+            if batch:
+                total = batch["seeds_planted"] + seeds
+                unit_cost = (batch["seed_unit_cost"] * batch["seeds_planted"] + seed_cost * seeds) / total
+                db.execute(
+                    """UPDATE plantings SET seeds_planted=?, packs_used = packs_used + ?, loose_delta = loose_delta + ?, seedlings=?, seed_unit_cost=?,
+                              cost_per_seedling=?, trays = COALESCE(trays, 0) + ?, holes_per_tray=? WHERE id=? AND business_id=?""",
+                    (total, packs, loose_delta, seedlings_from(total, batch["mortality_pct"]), unit_cost, unit_cost / (1 - batch["mortality_pct"] / 100),
+                     trays, holes, batch["id"], biz),
+                )
+                planting_id = batch["id"]
+                joined.add(planting_id)
+            else:
+                mortality = entry["mortality"]
+                cost_per_seedling = seed_cost / (1 - mortality / 100)
+                last = db.one("SELECT price FROM plantings WHERE business_id=? AND seed_item_id=? ORDER BY id DESC LIMIT 1", (biz, item["id"]))
+                price = last["price"] if last and last["price"] else round_up_to_cent(cost_per_seedling)
+                planting_id = insert_planting(db, biz, {
+                    "seed_item_id": item["id"], "seed_code": item["item_code"], "seed_name": item["name"], "name": seedling_name_for(item["name"]),
+                    "department": item["department"], "batch_no": "", "source": "inventory", "seeds": seeds, "packs": packs, "loose_delta": loose_delta,
+                    "seeds_per_pack": size, "mortality": mortality, "seedlings": seedlings_from(seeds, mortality), "seed_cost": seed_cost,
+                    "cost_per_seedling": cost_per_seedling, "price": round(price, 2), "planted_on": day, "ready_on": entry["ready_on"],
+                    "trays": trays, "holes_per_tray": holes,
+                })
+            save_tray_rows(db, biz, planting_id, [(e, trays)])
+            grants.append(entry["grant"])
+            done.append(f"{tray_figure(trays)} tray{'s' if trays != 1 else ''} of {item['name']} ({seeds:,} seeds" + (f", {packs} pack{'s' if packs != 1 else ''}" if packs else "")
+                        + (", added to that day's batch" if batch else "") + ")")
+        for grant in grants:
+            use_grant(db, grant)
+        db.commit()
+    except NotEnoughSeeds as short:
+        db.rollback()
+        flash(f"{short} Nothing was saved.", "error")
+        return back
+    except StockError:
+        db.rollback()
+        flash("The stock changed while you were working. Nothing was saved; please try again.", "error")
+        return back
+    except DB_ERRORS:
+        db.rollback()
+        flash("The entries could not be saved. Please try again.", "error")
+        return back
+
+    release_plantings(db, biz)
+    for planting_id in joined:
+        sync_planting(db, biz, planting_id)   # a batch already on the POS lists the extra seedlings
+    db.commit()
+    flash(f"Saved for {e['full_name']} on {day}: " + "; ".join(done) + ".", "ok")
+    return back
 
 
 @app.get("/planting/new")
@@ -8076,26 +8351,7 @@ def planting_create():
     packs, loose_delta, loose_left = 0, 0, 0
     try:
         if item:
-            # Loose seeds left from an earlier opened pack are used first; only whole packs leave inventory
-            loose = item["loose_seeds"] or 0
-            from_loose = min(loose, seeds)
-            need_seeds = seeds - from_loose
-            packs = -(-need_seeds // size)
-            if packs > item["quantity"]:
-                db.rollback()
-                available = item["quantity"] * size + loose
-                flash(f"Only {available:,} seeds are in stock ({item['quantity']} pack(s) of {size:,}" + (f" and {loose:,} loose seeds" if loose else "") + "). Nothing was planted.", "error")
-                return back
-            loose_left = loose - from_loose + (packs * size - need_seeds)
-            loose_delta = loose_left - loose
-            moved = db.execute(
-                "UPDATE products SET quantity = quantity - ?, loose_seeds=?, seeds_per_pack = COALESCE(seeds_per_pack, ?) WHERE id=? AND business_id=? AND quantity >= ?",
-                (packs, loose_left, size, item["id"], biz, packs),
-            )
-            if moved.rowcount != 1:
-                raise StockError(item["name"])
-            if packs:
-                low_stock_alert(db, item["name"], item["item_code"], item["quantity"], item["quantity"] - packs, "in inventory")
+            packs, loose_delta, loose_left = take_seeds(db, biz, item, size, seeds)
 
         planting_id = insert_planting(db, biz, {
             "seed_item_id": item["id"] if item else None, "seed_code": seed_code, "seed_name": seed_name, "name": name, "department": dept,
@@ -8107,6 +8363,10 @@ def planting_create():
         save_tray_rows(db, biz, planting_id, trays_form["rows"])
         use_grant(db, grant)
         db.commit()
+    except NotEnoughSeeds as short:
+        db.rollback()
+        flash(f"{short} Nothing was planted.", "error")
+        return back
     except StockError:
         db.rollback()
         flash("The stock changed while you were working. Nothing was planted; please try again.", "error")

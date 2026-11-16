@@ -67,7 +67,7 @@
                     <tr>
                         <td>{{ e.full_name }}</td>
                         <td>{{ e.nrc_number }}</td>
-                        <td><span class="chip {{ 'gold' if e.employment_type == 'Casual Worker' else 'info' }}">{{ 'Casual (wages)' if e.employment_type == 'Casual Worker' else 'Permanent' }}</span></td>
+                        <td><span class="chip {{ 'gold' if e.employment_type == 'Casual Worker' else 'info' }}">{{ 'Casual (wages)' if e.employment_type == 'Casual Worker' else 'Permanent' }}</span>{% if is_planter(e) %} <span class="chip ok">Plants trays</span>{% endif %}</td>
                         <td class="num">{% if e.employment_type == 'Casual Worker' %}{{ e.rate|money }} a tray{% else %}{{ e.basic_salary|money }} each pay{% endif %}</td>
                         <td>{{ e.schedule_words }}{% if e.next_pay_date %}<br><small class="muted">next {{ e.next_pay_date }}</small>{% endif %}</td>
                         <td>{{ e.start_date or '—' }}</td>

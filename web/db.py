@@ -607,6 +607,8 @@ def init_schema():
         add_column(db, "hr_settings", "tray_rate", "DOUBLE PRECISION")
         add_column(db, "plantings", "trays", "DOUBLE PRECISION")
         add_column(db, "plantings", "holes_per_tray", "INTEGER")
+        # Whether an employee plants trays, so they get a tile on Planting Records (set in HR). NULL = not chosen yet: casual workers do.
+        add_column(db, "employees", "plants", "INTEGER")
         # A payslip paid by trays keeps how many and at what rate, as it was worked out
         add_column(db, "payroll", "trays", "DOUBLE PRECISION")
         add_column(db, "payroll", "tray_rate", "DOUBLE PRECISION")

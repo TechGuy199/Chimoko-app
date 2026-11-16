@@ -7,11 +7,31 @@
         <p class="muted">Every batch of seeds planted in the greenhouse. A batch goes on the POS a week before it is expected to be ready.</p>
     </div>
     <div class="head-actions">
-        <a class="btn primary" href="{{ url_for('planting_new') }}">Record a planting</a>
+        <a class="btn" href="{{ url_for('planting_new') }}">Full planting form</a>
         <a class="btn" href="{{ url_for('up_next') }}">Up next &amp; pre-orders</a>
         {% if user.role == 'admin' %}<a class="btn" href="{{ url_for('import_data') }}#planting">Import</a>{% endif %}
     </div>
 </div>
+
+<section class="card block no-print planter-section">
+    <h2>Planters</h2>
+    {% if planters %}
+    <p class="muted">Tap a person to enter the trays they planted on a day. Each entry takes its seeds from inventory.</p>
+    <div class="dept-tiles plot-tiles planter-tiles">
+        {% for e in planters %}
+        {% set got = planted_today.get(e.id) %}
+        <a class="dept-tile plot-tile planter-tile" href="{{ url_for('planter_day', employee_id=e.id) }}">
+            <span class="tile-name">{{ e.full_name }}</span>
+            <small>{{ 'Casual worker' if e.employment_type == 'Casual Worker' else 'Permanent staff' }}</small>
+            <small class="tile-badge {{ 'done' if got }}">{% if got %}{{ '%g'|format(got.trays) }} tray{{ 's' if got.trays != 1 }} today{% else %}Nothing entered today{% endif %}</small>
+        </a>
+        {% endfor %}
+    </div>
+    {% else %}
+    <p class="flash notice">No one is set to plant trays yet.
+        {% if user.role == 'admin' %}In <a href="{{ url_for('hr') }}">HR</a>, edit each person who plants and tick "Plants trays" (casual workers are ticked already).{% else %}Ask an admin to tick "Plants trays" for them in HR.{% endif %}</p>
+    {% endif %}
+</section>
 
 <form method="get" class="toolbar planting-filters no-print" id="planting-filters">
     {% if show != 'all' %}<input type="hidden" name="show" value="{{ show }}">{% endif %}
