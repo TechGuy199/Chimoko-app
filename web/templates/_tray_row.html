@@ -11,6 +11,12 @@
             {% for e in salaried %}<option value="{{ e.id }}" {{ 'selected' if r and r.employee_id == e.id }}>{{ e.full_name }}</option>{% endfor %}
         </optgroup>{% endif %}
     </select>
+    {% if kinds|default([]) %}
+    <select name="planter_type" aria-label="Kind of tray">
+        <option value="">Kind of tray</option>
+        {% for k in kinds %}<option value="{{ k.id }}" {{ 'selected' if r and r.tray_type_id == k.id }}>{{ k.name }} · {{ k.rate|money }}</option>{% endfor %}
+    </select>
+    {% endif %}
     <input name="planter_trays" type="number" min="0.01" max="100000" step="any" inputmode="decimal" placeholder="Trays" aria-label="Trays planted" value="{{ r.trays|trays|replace(',', '') if r else '' }}">
     <button type="button" class="btn small ghost" data-tray-remove aria-label="Remove this person">&times;</button>
 </div>

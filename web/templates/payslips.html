@@ -17,7 +17,11 @@
         <dt>Employee</dt><dd>{{ slip.employee_name }}</dd>
         {% if slip.trays is not none %}
         <dt>Trays planted</dt><dd>{{ slip.trays|trays }}</dd>
+        {% if slip.kinds %}
+        {% for k in slip.kinds %}<dt>{{ k.name or 'Trays' }}{{ ' trays' if k.name }}</dt><dd>{{ k.trays|trays }} &times; {{ k.rate|money }} = {{ (k.trays * k.rate)|money }}</dd>{% endfor %}
+        {% else %}
         <dt>Pay for each tray</dt><dd>{{ (slip.tray_rate or 0)|money }}</dd>
+        {% endif %}
         <dt>Basic pay for the trays</dt><dd>{{ slip.calculated_basic|money }}</dd>
         {% else %}
         <dt>Full basic salary</dt><dd>{{ slip.basic_salary|money }}</dd>

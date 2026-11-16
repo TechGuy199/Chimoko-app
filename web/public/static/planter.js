@@ -55,6 +55,14 @@
         }
 
         const parts = [];
+        // What these trays earn, by their kind (casual workers only)
+        const kind = row.querySelector("[data-entry-kind]");
+        const picked = kind && kind.selectedOptions[0];
+        if (form.dataset.paid === "1" && picked && picked.value && trays > 0) {
+            const rate = parseFloat(picked.dataset.rate) || 0;
+            const money = function (n) { return (form.dataset.currency || "") + n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }); };
+            parts.push(trays.toLocaleString() + " " + picked.textContent.split(" \u00b7 ")[0].trim() + " tray" + (trays === 1 ? "" : "s") + " \u00d7 " + money(rate) + " = " + money(trays * rate) + " pay.");
+        }
         if (chosen && trays > 0 && holes > 0) {
             const seeds = Math.floor(trays * holes + 0.5 + 1e-9);
             parts.push(trays.toLocaleString() + " trays × " + holes.toLocaleString() + " holes = " + seeds.toLocaleString() + " seeds.");
@@ -89,6 +97,8 @@
         const row = template.content.firstElementChild.cloneNode(true);
         // A new entry starts with the holes of the one before it: usually the same trays
         if (last) row.querySelector("[data-entry-holes]").value = last.querySelector("[data-entry-holes]").value;
+        // and the same kind of tray
+        if (last && last.querySelector("[data-entry-kind]")) row.querySelector("[data-entry-kind]").value = last.querySelector("[data-entry-kind]").value;
         rows.appendChild(row);
         renumber();
         paintAll();
@@ -108,6 +118,14 @@
         if (!row) return;
         paint(row, e.target.matches("[data-entry-item]"));
         if (e.target.matches("[data-entry-item], [data-entry-holes]")) paintAll();
+    });
+    // Choosing the kind of tray fills in how many holes it has
+    rows.addEventListener("change", function (e) {
+        if (!e.target.matches("[data-entry-kind]")) return;
+        const row = e.target.closest("[data-entry]");
+        const holes = e.target.selectedOptions[0] && e.target.selectedOptions[0].dataset.holes;
+        if (holes) row.querySelector("[data-entry-holes]").value = holes;
+        paintAll();
     });
     rows.addEventListener("change", function (e) {
         const row = e.target.closest("[data-entry]");

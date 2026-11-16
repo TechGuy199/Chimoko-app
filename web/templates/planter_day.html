@@ -17,7 +17,15 @@
     </label>
     <div class="grid">
         <label>Trays planted
-            <input name="trays" type="number" min="0.01" max="100000" step="any" inputmode="decimal" placeholder="e.g. 12" required data-entry-trays>
+            <span class="{{ 'tray-with-kind' if kinds }}">
+                <input name="trays" type="number" min="0.01" max="100000" step="any" inputmode="decimal" placeholder="e.g. 12" required data-entry-trays>
+                {% if kinds %}
+                <select name="tray_type" required aria-label="Kind of tray" data-entry-kind>
+                    <option value="">Kind of tray</option>
+                    {% for k in kinds %}<option value="{{ k.id }}" data-holes="{{ k.holes or '' }}" data-rate="{{ k.rate }}">{{ k.name }}{% if casual %} &middot; {{ k.rate|money }}{% endif %}</option>{% endfor %}
+                </select>
+                {% endif %}
+            </span>
         </label>
         <label>Holes in each tray
             <input name="holes" type="number" min="1" max="{{ max_holes }}" step="1" inputmode="numeric" value="{{ usual_holes }}" placeholder="e.g. 242" required data-entry-holes>
@@ -40,7 +48,8 @@
         <h1>{{ e.full_name }}</h1>
         <p class="muted">
             {{ 'Casual worker' if e.employment_type == 'Casual Worker' else 'Permanent staff, on a salary' }}
-            {% if rate %}&middot; paid {{ rate|money }} a tray{% elif rate is not none %}&middot; no pay per tray set yet (HR &rarr; Settings){% endif %}
+            {% if casual and kinds %}&middot; paid by the kind of tray: {% for k in kinds %}{{ k.name }} {{ k.rate|money }}{{ ', ' if not loop.last }}{% endfor %}
+            {% elif rate %}&middot; paid {{ rate|money }} a tray{% elif rate is not none %}&middot; no pay per tray set yet (HR &rarr; Settings){% endif %}
         </p>
     </div>
 </div>
@@ -70,7 +79,7 @@
     <p class="muted">Add an entry for each seed item they planted, then save them together. Trays &times; holes gives the seeds, which come out of inventory.
         An entry for an item already planted on this day (in trays with the same holes) is added to that batch, so it keeps that batch's mortality and ready date.</p>
     <form method="post" action="{{ url_for('planter_save', employee_id=e.id) }}" id="planter-form"
-          data-items="{{ info|tojson|forceescape }}" data-day="{{ day }}">
+          data-items="{{ info|tojson|forceescape }}" data-day="{{ day }}" data-currency="{{ user.currency }}" data-paid="{{ '1' if casual else '0' }}">
         {{ csrf_field() }}
         <input type="hidden" name="date" value="{{ day }}">
         <div id="entry-rows">{{ entry_row(1) }}</div>
@@ -91,11 +100,11 @@
                 <tr>
                     <td><a href="{{ url_for('planting_detail', planting_id=r.planting_id) }}">{{ r.label }}</a>
                         {% if r.holes_per_tray %}<br><small class="muted">{{ r.holes_per_tray }} holes a tray</small>{% endif %}</td>
-                    <td class="num"><strong>{{ '%g'|format(r.trays) }}</strong></td>
+                    <td class="num"><strong>{{ '%g'|format(r.trays) }}</strong>{% if r.tray_type %}<br><small class="muted">{{ r.tray_type }}</small>{% endif %}</td>
                     <td class="num">{{ '%g'|format(r.batch_trays) if r.batch_trays else '—' }}</td>
                     <td class="num">{{ '{:,}'.format(r.seeds_planted) }}</td>
                     <td>{{ r.actual_ready_on or r.ready_on }}</td>
-                    <td>{% if r.paid_payslip_id %}<span class="ok">Paid</span>{% elif rate is not none %}{{ (r.trays * rate)|money }} due{% else %}<span class="muted">On a salary</span>{% endif %}</td>
+                    <td>{% if r.paid_payslip_id %}<span class="ok">Paid</span>{% elif casual %}{{ r.amount|money }} due<br><small class="muted">{{ r.rate|money }} a tray</small>{% else %}<span class="muted">On a salary</span>{% endif %}</td>
                 </tr>
             {% else %}
                 <tr><td colspan="6" class="muted center">Nothing entered for {{ e.full_name }} on this day yet.</td></tr>

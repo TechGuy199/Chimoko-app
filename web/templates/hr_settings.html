@@ -73,4 +73,40 @@
         <button class="btn primary spaced">Save Tray Settings</button>
     </form>
 </div>
+
+<div class="card rules-form" id="tray-types">
+    <form method="post" action="{{ url_for('hr_tray_types') }}">
+        {{ csrf_field() }}
+        <h2>Kinds of tray</h2>
+        <p class="muted">
+            If you plant in more than one kind of tray, list them here with what a casual worker is paid for planting one of each. On
+            <strong>Planting Records</strong> every entry then says which kind was planted, and each person is paid by kind:
+            2 Big trays at 0.75 and 1 Small tray at 0.25 is 1.75. With no kinds listed, every tray is paid at the one rate above.
+        </p>
+        <div class="table-wrap">
+            <table class="kind-table">
+                <thead><tr><th>Name<small>e.g. Big, Medium, Small</small></th><th>Holes in one<small>optional</small></th><th>Pay for planting one ({{ user.currency|trim }})</th></tr></thead>
+                <tbody>
+                {% for k in kinds %}
+                    <tr>
+                        <td><input type="hidden" name="kind_id" value="{{ k.id }}"><input name="kind_name" maxlength="30" value="{{ k.name }}" aria-label="Name of the kind of tray"></td>
+                        <td><input name="kind_holes" type="number" min="1" max="{{ max_holes }}" step="1" inputmode="numeric" value="{{ k.holes or '' }}" aria-label="Holes in one {{ k.name }} tray"></td>
+                        <td><input name="kind_rate" type="number" min="0" step="any" inputmode="decimal" value="{{ '%g'|format(k.rate) }}" aria-label="Pay for one {{ k.name }} tray"></td>
+                    </tr>
+                {% endfor %}
+                {% for n in range(3) %}
+                    <tr>
+                        <td><input type="hidden" name="kind_id" value=""><input name="kind_name" maxlength="30" placeholder="{{ 'New kind' if kinds else ['Big', 'Medium', 'Small'][n] }}" aria-label="Name of a new kind of tray"></td>
+                        <td><input name="kind_holes" type="number" min="1" max="{{ max_holes }}" step="1" inputmode="numeric" placeholder="e.g. 200" aria-label="Holes in one"></td>
+                        <td><input name="kind_rate" type="number" min="0" step="any" inputmode="decimal" placeholder="0.00" aria-label="Pay for planting one"></td>
+                    </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        <p class="muted hint">To remove a kind, clear its name and save. Need more than three new ones? Save, and three more empty rows appear.
+            Trays not yet paid are paid at the rates here when the payslip is made; payslips already made are unchanged.</p>
+        <button class="btn primary spaced">Save Kinds of Tray</button>
+    </form>
+</div>
 {% endblock %}

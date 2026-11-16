@@ -42,7 +42,7 @@
                     <td>{% if e.next_pay_date %}<strong class="{{ 'warn' if d.late else 'gold' if e.next_pay_date == today }}">{{ e.next_pay_date }}</strong><br><small class="muted">{{ d.when }}</small>
                         {% else %}<a href="{{ url_for('edit_employee', employee_id=e.id) }}">Set a pay date</a>{% endif %}</td>
                     <td><small>{{ d.start }} to {{ d.end }}</small></td>
-                    <td>{% if d.basis == 'trays' %}{{ d.trays|trays }} unpaid tray{{ 's' if d.trays != 1 }} &times; {{ d.rate|money }}
+                    <td>{% if d.basis == 'trays' %}{% if d.kinds %}{{ kinds_words(d.kinds) }}{% else %}No unpaid trays{% endif %}
                         {% else %}{{ '%g'|format(d.worked) }} of {{ '%g'|format(d.expected) }} days{% if d.absent %} <small class="warn">({{ '%g'|format(d.absent) }} absent)</small>{% endif %}{% endif %}</td>
                     <td class="num"><strong>{{ d.amount|money }}</strong></td>
                     <td class="num actions"><a class="btn small success" href="{{ url_for('new_payslip', employee=e.id, pay_date=e.next_pay_date or today) }}">Make payslip</a></td>

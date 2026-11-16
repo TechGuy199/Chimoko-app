@@ -1342,20 +1342,20 @@ def prepare_tray_payslip(ctx, args):
     if not (len(month) == 7 and month[4] == "-" and H.day_or_none(month + "-01")):
         raise ToolError("The pay month must be YYYY-MM.")
     rows_, trays = H.unpaid_trays(db, biz, e["id"], month)
-    rate = H.rate_for(e, H.hr_settings_for(db, biz))
+    pay, kinds = H.price_trays(db, biz, e, H.hr_settings_for(db, biz), rows_)
     bonus, deduction = number_of(args.get("bonus")) or 0.0, number_of(args.get("deduction")) or 0.0
     if bonus < 0 or deduction < 0:
         raise ToolError("A bonus or deduction cannot be negative.")
     if not rows_ and not bonus:
         raise ToolError(f"{e['full_name']} has no unpaid trays planted up to {month}.")
-    if rows_ and rate <= 0:
-        raise ToolError(f"{e['full_name']}'s pay for a tray is not set. An admin sets it on their page under HR & Payroll (Edit).")
+    if any(not r["rate"] for r in rows_):
+        raise ToolError(f"Some of {e['full_name']}'s trays have no pay set. An admin sets the pay for each kind of tray under HR Settings, or the worker's own rate on their page.")
     method = money_method(args, True)
     form = {"employee_id": e["id"], "pay_month": month, "pay_basis": "trays", "payment_method": method,
             "bonus_name": text_of(args, "bonus_name", 40) or ("Bonus" if bonus else ""), "bonus_amount": f"{bonus:.2f}" if bonus else "",
             "deduction_name": text_of(args, "deduction_name", 40) or ("Deduction" if deduction else ""), "deduction_amount": f"{deduction:.2f}" if deduction else ""}
-    pay = round(trays * rate, 2)
-    rows = [["Employee", e["full_name"]], ["Pay month", month], ["Trays", f"{trays:g} unpaid, from {len(rows_)} planting(s)"], ["Pay for the trays", f"{trays:g} × {ctx.money(rate)} = {ctx.money(pay)}"]]
+    worked = " + ".join(f"{k['trays']:g}{' ' + k['name'] if k['name'] else ''} × {ctx.money(k['rate'])}" for k in kinds)
+    rows = [["Employee", e["full_name"]], ["Pay month", month], ["Trays", f"{trays:g} unpaid, from {len(rows_)} planting(s)"], ["Pay for the trays", f"{worked} = {ctx.money(pay)}"]]
     if bonus:
         rows.append([form["bonus_name"], "+ " + ctx.money(bonus)])
     if deduction:
@@ -1495,18 +1495,27 @@ def attention_today(ctx, args):
         top = db.all(f"SELECT customer_name, SUM(balance_due) AS owed FROM invoices i WHERE i.business_id=? AND {SALE} AND i.balance_due > 0.005 GROUP BY customer_name ORDER BY owed DESC LIMIT 3", (biz,))
         we_owe = db.one("SELECT COALESCE(SUM(total_cost - COALESCE(amount_paid, total_cost)), 0) AS n FROM procurements WHERE business_id=?", (biz,))["n"]
         hr_set = H.hr_settings_for(db, biz)
-        trays = db.all(
-            """SELECT t.employee_name, e.tray_rate, SUM(t.trays) AS trays FROM planting_trays t JOIN employees e ON e.id = t.employee_id AND e.business_id = t.business_id
-               WHERE t.business_id=? AND t.paid_payslip_id IS NULL AND e.employment_type='Casual Worker' GROUP BY t.employee_name, e.tray_rate ORDER BY trays DESC LIMIT 6""",
+        # Unpaid trays by worker, each paid at the rate of its kind of tray (or the worker's own rate when it has no kind)
+        by_worker = {}
+        for r in db.all(
+            """SELECT t.employee_id, t.employee_name, t.trays, t.tray_type_id, t.tray_type, t.type_rate, e.tray_rate
+               FROM planting_trays t JOIN employees e ON e.id = t.employee_id AND e.business_id = t.business_id
+               WHERE t.business_id=? AND t.paid_payslip_id IS NULL AND e.employment_type='Casual Worker'""",
             (biz,),
-        )
+        ):
+            by_worker.setdefault(r["employee_id"], []).append(r)
+        trays = []
+        for rows_of in by_worker.values():
+            pay, _ = H.price_trays(db, biz, rows_of[0], hr_set, rows_of)
+            trays.append({"employee_name": rows_of[0]["employee_name"], "trays": sum(r["trays"] for r in rows_of), "pay": pay})
+        trays = sorted(trays, key=lambda r: -r["trays"])[:6]
         paydays = db.all(f"SELECT {H.EMPLOYEE_COLUMNS} FROM employees WHERE business_id=? AND next_pay_date IS NOT NULL AND next_pay_date <= ? ORDER BY next_pay_date LIMIT 8",
                          (biz, today))
         asks = db.one("SELECT COUNT(*) AS n FROM permission_requests WHERE business_id=? AND status='pending'", (biz,))["n"]
         out.update({
             "customers_owe": {"invoices": owed["n"], "amount": r2(owed["owed"]), "most": [{"customer": clip(r["customer_name"], 50), "owes": r2(r["owed"])} for r in top]},
             "we_owe_suppliers": r2(we_owe),
-            "trays_to_pay": [{"worker": clip(r["employee_name"], 50), "trays": r2(r["trays"]), "pay": r2(r["trays"] * H.rate_for(r, hr_set)) or None} for r in trays],
+            "trays_to_pay": [{"worker": clip(r["employee_name"], 50), "trays": r2(r["trays"]), "pay": r2(r["pay"]) or None} for r in trays],
             "pay_days": [{"employee": clip(p["full_name"], 50), "on": p["next_pay_date"], "overdue": p["next_pay_date"] < ctx.today,
                           "owed": r2(H.pay_preview(db, biz, p, hr_set, p["next_pay_date"])["amount"])} for p in paydays],
             "requests_waiting_for_approval": asks,

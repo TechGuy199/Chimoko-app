@@ -17,7 +17,7 @@
     <div class="stat"><span>Next pay date</span><strong class="{{ 'warn' if e.next_pay_date and e.next_pay_date < today else 'gold' if e.next_pay_date == today }}">{{ e.next_pay_date or 'Not set' }}</strong>
         <small>{{ preview.start }} to {{ preview.end }}</small></div>
     <a class="stat" href="{{ url_for('new_payslip', employee=e.id, pay_date=e.next_pay_date or today) }}"><span>Owed for the period</span><strong>{{ preview.amount|money }}</strong>
-        <small>{% if preview.basis == 'trays' %}{{ preview.trays|trays }} unpaid trays &times; {{ preview.rate|money }}{% else %}{{ '%g'|format(preview.worked) }} of {{ '%g'|format(preview.expected) }} days{% endif %}, before NAPSA and NHIMA</small></a>
+        <small>{% if preview.basis == 'trays' %}{% if preview.kinds %}{{ kinds_words(preview.kinds) }}{% else %}no unpaid trays{% endif %}{% else %}{{ '%g'|format(preview.worked) }} of {{ '%g'|format(preview.expected) }} days{% endif %}, before NAPSA and NHIMA</small></a>
     {% if e.employment_type == 'Casual Worker' %}
     <div class="stat"><span>Pay for each tray</span><strong>{{ rate|money }}</strong><small>{{ 'their own rate' if e.tray_rate else 'the usual rate from HR Settings' }}</small></div>
     {% else %}

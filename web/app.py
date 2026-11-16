@@ -4110,7 +4110,7 @@ def hr_settings():
         return redirect(url_for("hr_settings"))
 
     settings_row = hr_settings_for(db, biz)
-    return render_template("hr_settings.html", s=settings_row, weekdays=WEEKDAYS, non_working=settings_row["non_working_days"].split(","), max_holes=MAX_TRAY_HOLES)
+    return render_template("hr_settings.html", kinds=tray_types(db, biz), s=settings_row, weekdays=WEEKDAYS, non_working=settings_row["non_working_days"].split(","), max_holes=MAX_TRAY_HOLES)
 
 
 @app.post("/hr/settings/trays")
@@ -4143,13 +4143,71 @@ def hr_tray_settings():
     return redirect(url_for("hr_settings"))
 
 
+@app.post("/hr/tray-types")
+@need("admin")
+def hr_tray_types():
+    """Saves the kinds of tray from HR Settings in one go: each row is a name, the holes in one and the pay for planting one. A row
+    with its name cleared is removed (kept, out of use, if trays were already planted in it); a row with no id is a new kind."""
+    db, biz = get_db(), g.user["business_id"]
+    back = redirect(url_for("hr_settings") + "#tray-types")
+    form = {key: request.form.getlist(key) for key in ("kind_id", "kind_name", "kind_holes", "kind_rate")}
+    current = {str(t["id"]): t for t in tray_types(db, biz)}
+    keep, names = [], set()
+    for i in range(len(form["kind_name"])):
+        value = lambda key: (form[key][i] if i < len(form[key]) else "").strip()  # noqa: E731
+        kind_id, name = value("kind_id"), clean_name(value("kind_name"), 30)
+        if kind_id and kind_id not in current:
+            continue   # not one of this business's kinds
+        if not name:
+            continue   # an empty row, or one being removed
+        try:
+            holes = int(value("kind_holes")) if value("kind_holes") else None
+            rate = round(float(value("kind_rate").replace(",", "")), 4) if value("kind_rate") else 0.0
+            if (holes is not None and not 1 <= holes <= MAX_TRAY_HOLES) or not math.isfinite(rate) or not 0 <= rate <= 10_000_000:
+                raise ValueError
+        except ValueError:
+            flash(f"{name}: the holes must be a whole number from 1 to {MAX_TRAY_HOLES:,} (or empty), and the pay for one a number, 0 or more. Nothing was saved.", "error")
+            return back
+        if norm(name) in names:
+            flash(f"Two kinds of tray are both called '{name}'. Give each its own name. Nothing was saved.", "error")
+            return back
+        names.add(norm(name))
+        keep.append((kind_id, name, holes, rate))
+    if len(keep) > MAX_TRAY_TYPES:
+        flash(f"At most {MAX_TRAY_TYPES} kinds of tray. Nothing was saved.", "error")
+        return back
+    kept_ids = {kind_id for kind_id, *_ in keep if kind_id}
+    try:
+        for kind_id, t in current.items():
+            if kind_id in kept_ids:
+                continue
+            if db.one("SELECT 1 AS x FROM planting_trays WHERE business_id=? AND tray_type_id=? LIMIT 1", (biz, t["id"])):
+                db.execute("UPDATE tray_types SET active=0 WHERE id=? AND business_id=?", (t["id"], biz))   # trays planted in it keep their kind
+            else:
+                db.execute("DELETE FROM tray_types WHERE id=? AND business_id=?", (t["id"], biz))
+        for kind_id, name, holes, rate in keep:
+            if kind_id:
+                db.execute("UPDATE tray_types SET name=?, holes=?, rate=? WHERE id=? AND business_id=?", (name, holes, rate, current[kind_id]["id"], biz))
+                db.execute("UPDATE planting_trays SET tray_type=? WHERE business_id=? AND tray_type_id=?", (name, biz, current[kind_id]["id"]))
+            else:
+                db.execute("INSERT INTO tray_types (business_id, name, holes, rate, active, created_at) VALUES (?, ?, ?, ?, 1, ?)",
+                           (biz, name, holes, rate, now().strftime("%Y-%m-%d %H:%M:%S")))
+        db.commit()
+    except DB_ERRORS:
+        db.rollback()
+        flash("The kinds of tray could not be saved. Please try again.", "error")
+        return back
+    flash("Kinds of tray saved. Unpaid trays are paid at these rates when a payslip is made; payslips already made are unchanged.", "ok")
+    return back
+
+
 def unpaid_trays(db, biz, employee_id, until):
     """The trays a worker planted, on plantings dated up to a day (or the end of a month, given as YYYY-MM), that no payslip has paid yet:
     ([{id, name, batch_no, planted_on, trays}], their total). Earlier unpaid trays are included, so nothing is missed."""
     if len(until) == 7:
         until += "-31"   # dates are YYYY-MM-DD text, so any day of the month sorts at or before the 31st
     rows = db.all(
-        """SELECT t.id, t.trays, p.name, p.batch_no, p.planted_on
+        """SELECT t.id, t.trays, t.tray_type_id, t.tray_type, t.type_rate, p.name, p.batch_no, p.planted_on
            FROM planting_trays t JOIN plantings p ON p.id = t.planting_id AND p.business_id = t.business_id
            WHERE t.business_id=? AND t.employee_id=? AND t.paid_payslip_id IS NULL AND p.planted_on <= ?
            ORDER BY p.planted_on, t.id""",
@@ -4176,6 +4234,44 @@ def rate_for(employee, hr_set):
 
 def is_casual(employee):
     return employee.get("employment_type") == "Casual Worker"
+
+
+# --- Kinds of tray ---
+# A business can plant in several kinds of tray (Big, Small...), each with its own pay for planting one. Trays entered as a kind are
+# paid at that kind's rate: the rate in force when the payslip is made, or the one kept with the trays if the kind has since been
+# removed. Trays entered with no kind are paid as before, at the worker's own rate or the business's usual one.
+MAX_TRAY_TYPES = 30
+
+
+def tray_types(db, biz, with_retired=False):
+    return db.all("SELECT id, name, holes, rate, active FROM tray_types WHERE business_id=?" + ("" if with_retired else " AND active=1") + " ORDER BY active DESC, id", (biz,))
+
+
+@app.template_global()
+def kinds_words(kinds):
+    """Unpaid trays by kind and rate, in words: '2 Big x K0.75 + 1 Small x K0.25'."""
+    return " + ".join(f"{tray_figure(k['trays'])}{' ' + k['name'] if k['name'] else ''} \u00d7 {money(k['rate'])}" for k in kinds)
+
+
+def price_trays(db, biz, employee, hr_set, rows):
+    """Works out what unpaid tray rows earn: each row gets its rate and amount. Returns (total amount, [{name, trays, rate, amount}] by
+    kind of tray and rate, in the order met). employee is whoever planted them (their own rate pays trays with no kind)."""
+    kinds = {t["id"]: t for t in tray_types(db, biz, with_retired=True)}
+    usual = rate_for(employee, hr_set)
+    groups = {}
+    for r in rows:
+        kind = kinds.get(r.get("tray_type_id"))
+        if kind is not None:
+            r["rate"], name = kind["rate"] or 0.0, kind["name"]
+        elif r.get("tray_type"):
+            r["rate"], name = r.get("type_rate") or 0.0, r["tray_type"]   # a kind since deleted: the rate kept with the trays
+        else:
+            r["rate"], name = usual, ""
+        r["amount"] = round(r["trays"] * r["rate"], 2)
+        group = groups.setdefault((name, r["rate"]), {"name": name, "trays": 0.0, "rate": r["rate"], "amount": 0.0})
+        group["trays"] = round(group["trays"] + r["trays"], 2)
+        group["amount"] = round(group["amount"] + r["amount"], 2)
+    return round(sum(g["amount"] for g in groups.values()), 2), list(groups.values())
 
 
 # Who plants trays and so gets a tile on Planting Records: those ticked in HR. Someone never set either way (registered before the
@@ -4266,8 +4362,10 @@ def pay_preview(db, biz, employee, hr_set, pay_date, start=None, end=None):
     out = {"pay_date": pay_date, "start": start, "end": end, "next_pay_date": following_pay_date(employee, pay_date)}
     if is_casual(employee):
         rows, trays = unpaid_trays(db, biz, employee["id"], end)
-        rate = rate_for(employee, hr_set)
-        out.update(basis="trays", rows=rows, trays=trays, rate=rate, amount=round(trays * rate, 2))
+        amount, kinds = price_trays(db, biz, employee, hr_set, rows)
+        # With several kinds of tray there is no single rate; "rate" is then the average over the trays, for the places that show one
+        rate = round(amount / trays, 4) if trays else rate_for(employee, hr_set)
+        out.update(basis="trays", rows=rows, trays=trays, rate=rate, amount=amount, kinds=kinds, unpriced=any(not r["rate"] for r in rows))
     else:
         expected = working_days(start, end, non_working) if start <= end else 0
         absent = min(float(absent_days(db, biz, employee["id"], start, end)), float(expected))
@@ -4302,7 +4400,8 @@ def hr_trays():
         return jsonify(error="The period's first day is after its last day."), 400
     p = pay_preview(db, biz, employee, hr_settings_for(db, biz), pay_date, start, end)
     p["casual"] = is_casual(employee)
-    p["rows"] = [{"planting": planting_label(r), "planted_on": r["planted_on"], "trays": r["trays"]} for r in p.get("rows", [])]
+    p["rows"] = [{"planting": planting_label(r), "planted_on": r["planted_on"], "trays": r["trays"], "kind": r.get("tray_type") or "", "rate": r["rate"],
+                  "amount": r["amount"]} for r in p.get("rows", [])]
     p["pay"] = p["amount"]
     return jsonify(p)
 
@@ -4376,15 +4475,18 @@ def new_payslip():
         tray_rows, trays, tray_rate = [], None, None
         if by_tray:
             tray_rows, trays = unpaid_trays(db, biz, employee["id"], end)
-            tray_rate = rate_for(employee, hr_set)
+            tray_pay, _ = price_trays(db, biz, employee, hr_set, tray_rows)
             if not tray_rows and not bonuses:
                 flash(f"{employee['full_name']} has no unpaid trays planted up to {end}. Trays are recorded on each planting under Planting Records.", "error")
                 return again
-            if tray_rows and tray_rate <= 0:
-                flash(f"Set how much {employee['full_name']} is paid for each tray (Edit, on HR & Payroll) first.", "error")
+            if any(not r["rate"] for r in tray_rows):
+                flash(f"Some of {employee['full_name']}'s trays have no pay set. Set the pay for each kind of tray under HR Settings"
+                      " (or, for trays with no kind, the worker's own rate on their page) first.", "error")
                 return again
             basic = 0.0
-            calculated_basic = round(trays * tray_rate, 2)
+            calculated_basic = tray_pay
+            # The payslip keeps one figure for the rate: with several kinds of tray, the average over the trays it paid
+            tray_rate = round(tray_pay / trays, 4) if trays else 0.0
         else:
             basic = employee["basic_salary"]
             calculated_basic = round(basic / expected * worked, 2)
@@ -4416,6 +4518,9 @@ def new_payslip():
                 db.rollback()
                 flash("The trays changed while the payslip was being made. Nothing was saved; please try again.", "error")
                 return again
+            # Each row keeps the rate it was really paid at, whatever the kind's rate becomes later
+            for r in tray_rows:
+                db.execute("UPDATE planting_trays SET type_rate=? WHERE id=? AND business_id=?", (r["rate"], r["id"], biz))
         # The next period starts the day after this one; the next pay date is the one chosen on the form, or the next on the schedule
         if "next_pay_date" not in request.form:
             due_now = employee["next_pay_date"]
@@ -4457,6 +4562,12 @@ def payslips():
     for slip in slips:
         slip["bonuses"] = json.loads(slip["bonuses_json"] or "{}")
         slip["deductions"] = json.loads(slip["deductions_json"] or "{}")
+        # The trays it paid, by kind of tray and the rate each was paid at (a payslip from before kinds existed has only its one rate)
+        slip["kinds"] = db.all(
+            """SELECT COALESCE(tray_type, '') AS name, type_rate AS rate, SUM(trays) AS trays FROM planting_trays
+               WHERE business_id=? AND paid_payslip_id=? AND type_rate IS NOT NULL GROUP BY COALESCE(tray_type, ''), type_rate ORDER BY name""",
+            (biz, slip["id"]),
+        )
     return render_template("payslips.html", slips=slips)
 
 
@@ -8135,22 +8246,29 @@ def read_trays_form(db, biz, paid=0.0):
     except ValueError:
         return None, f"Trays planted must be a number above zero, and the holes in a tray a whole number from 1 to {MAX_TRAY_HOLES:,}."
     staff = {e["id"]: e for e in planting_staff(db, biz)}
-    pairs = [(who.strip(), amount.strip()) for who, amount in zip(request.form.getlist("planter_id"), request.form.getlist("planter_trays")) if who.strip() or amount.strip()]
+    kinds = {str(t["id"]): t for t in tray_types(db, biz)}
+    whos, amounts, chosen = request.form.getlist("planter_id"), request.form.getlist("planter_trays"), request.form.getlist("planter_type")
+    chosen += [""] * (len(whos) - len(chosen))   # a form without the kind boxes sends none
+    pairs = [(who.strip(), amount.strip(), kind.strip()) for who, amount, kind in zip(whos, amounts, chosen) if who.strip() or amount.strip()]
     given = {}
-    for who, amount in pairs:
+    for who, amount, kind_id in pairs:
         employee = staff.get(int(who)) if who.isascii() and who.isdigit() else None
         if employee is None:
             return None, "Choose the employee for each row of who planted the trays, or remove the row."
+        kind = kinds.get(kind_id)
+        if kind_id and kind is None:
+            return None, "Choose the kind of tray from the list for each row."
         if not amount and len(pairs) == 1 and typed:
             amount = str(typed)   # one person and the total typed: they planted all of it
         try:
             share = tray_count(amount)
         except ValueError:
             return None, f"Enter how many trays {employee['full_name']} planted (a number above zero), or remove the row."
-        given[employee["id"]] = [employee, round(given[employee["id"]][1] + share, 2) if employee["id"] in given else share]
-    rows = [(employee, share) for employee, share in given.values()]
+        key = (employee["id"], kind["id"] if kind else None)   # one person can have rows of different kinds of tray
+        given[key] = [employee, round(given[key][1] + share, 2) if key in given else share, kind]
+    rows = [(employee, share, kind) for employee, share, kind in given.values()]
     if rows or paid:
-        total = round(paid + sum(share for _, share in rows), 2)
+        total = round(paid + sum(share for _, share, _ in rows), 2)
         if typed is not None and abs(typed - total) > 0.005:
             return None, f"The trays given to each person add up to {tray_figure(total)}, but {tray_figure(typed)} trays were entered in total. Make them agree, or leave the total empty."
         typed = total
@@ -8160,11 +8278,13 @@ def read_trays_form(db, biz, paid=0.0):
 def save_tray_rows(db, biz, planting_id, rows):
     """Records who planted how many trays of a planting."""
     stamp = now().strftime("%Y-%m-%d %H:%M:%S")
-    for employee, share in rows:
+    for row in rows:
+        employee, share, kind = row if len(row) == 3 else (*row, None)   # (who, trays) or (who, trays, the kind of tray)
         db.execute(
-            """INSERT INTO planting_trays (business_id, planting_id, employee_id, employee_name, trays, created_by, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (biz, planting_id, employee["id"], employee["full_name"], share, g.user["username"], stamp),
+            """INSERT INTO planting_trays (business_id, planting_id, employee_id, employee_name, trays, created_by, created_at, tray_type_id, tray_type, type_rate)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (biz, planting_id, employee["id"], employee["full_name"], share, g.user["username"], stamp,
+             kind["id"] if kind else None, kind["name"] if kind else None, kind["rate"] if kind else None),
         )
 
 
@@ -8331,27 +8451,33 @@ def planter_day(employee_id):
     shown = datetime.date.fromisoformat(day)
     items, info = planter_seed_items(db, biz, day)
     done = db.all(
-        """SELECT t.id, t.trays, t.paid_payslip_id, p.id AS planting_id, p.name, p.batch_no, p.planted_on, p.holes_per_tray, p.seeds_planted,
-                  p.trays AS batch_trays, p.ready_on, p.actual_ready_on
+        """SELECT t.id, t.trays, t.paid_payslip_id, t.tray_type_id, t.tray_type, t.type_rate, p.id AS planting_id, p.name, p.batch_no, p.planted_on,
+                  p.holes_per_tray, p.seeds_planted, p.trays AS batch_trays, p.ready_on, p.actual_ready_on
            FROM planting_trays t JOIN plantings p ON p.id = t.planting_id AND p.business_id = t.business_id
            WHERE t.business_id=? AND t.employee_id=? AND p.planted_on=? ORDER BY t.id""",
         (biz, employee_id, day),
     )
+    hr_set = hr_settings_for(db, biz)
     for r in done:
         r["label"] = planting_label(r)
-    hr_set = hr_settings_for(db, biz)
+        if r["paid_payslip_id"]:
+            r["rate"] = r["type_rate"]
+            r["amount"] = round(r["trays"] * r["rate"], 2) if r["rate"] else None
+        else:
+            price_trays(db, biz, e, hr_set, [r])
     return render_template(
         "planter_day.html", e=e, day=day, today=today_str(), shown=shown, items=items, info=info, done=done,
         total=round(sum(r["trays"] for r in done), 2), usual_holes=hr_set["holes_per_tray"] or "", max_holes=MAX_TRAY_HOLES,
-        rate=rate_for(e, hr_set) if is_casual(e) else None, planter=is_planter(e),
+        rate=rate_for(e, hr_set) if is_casual(e) else None, planter=is_planter(e), kinds=tray_types(db, biz), casual=is_casual(e),
         prev_day=(shown - datetime.timedelta(days=1)).isoformat(), next_day=(shown + datetime.timedelta(days=1)).isoformat(),
     )
 
 
 def read_planter_entries(db, biz, day):
     """The entries on a planter's day form: ([{item, grant, size, trays, holes, mortality, ready_on}], problems). A row left empty is skipped."""
-    form = {key: request.form.getlist(key) for key in ("item_id", "trays", "holes", "mortality_pct", "ready_on")}
+    form = {key: request.form.getlist(key) for key in ("item_id", "trays", "holes", "mortality_pct", "ready_on", "tray_type")}
     usual = hr_settings_for(db, biz)["holes_per_tray"] or None
+    kinds = {str(t["id"]): t for t in tray_types(db, biz)}
     entries, problems, earlier = [], [], set()
     for i in range(len(form["item_id"])):
         value = lambda key: (form[key][i] if i < len(form[key]) else "").strip()  # noqa: E731
@@ -8376,8 +8502,13 @@ def read_planter_entries(db, biz, day):
         except ValueError:
             problems.append(f"{where}: enter the trays planted of {item['name']} (a number above zero).")
             continue
+        # The kind of tray decides the pay. Once kinds are set up every entry says which; before that there is nothing to choose
+        kind = kinds.get(value("tray_type"))
+        if kinds and kind is None:
+            problems.append(f"{where}: choose the kind of tray ({', '.join(t['name'] for t in kinds.values())}).")
+            continue
         try:
-            holes = int(value("holes")) if value("holes") else usual
+            holes = int(value("holes")) if value("holes") else ((kind or {}).get("holes") or usual)
             if holes is None or not 1 <= holes <= MAX_TRAY_HOLES:
                 raise ValueError
         except ValueError:
@@ -8402,7 +8533,7 @@ def read_planter_entries(db, biz, day):
                 problems.append(f"{where}: at that mortality these seeds would give less than one seedling.")
                 continue
         earlier.add((item["id"], holes))
-        entries.append({"item_id": item["id"], "grant": grant, "trays": trays, "holes": holes, "mortality": mortality, "ready_on": ready_on})
+        entries.append({"item_id": item["id"], "grant": grant, "trays": trays, "holes": holes, "mortality": mortality, "ready_on": ready_on, "kind": kind})
     return entries, problems
 
 
@@ -8460,9 +8591,9 @@ def planter_save(employee_id):
                     "cost_per_seedling": cost_per_seedling, "price": round(price, 2), "planted_on": day, "ready_on": entry["ready_on"],
                     "trays": trays, "holes_per_tray": holes,
                 })
-            save_tray_rows(db, biz, planting_id, [(e, trays)])
+            save_tray_rows(db, biz, planting_id, [(e, trays, entry["kind"])])
             grants.append(entry["grant"])
-            done.append(f"{tray_figure(trays)} tray{'s' if trays != 1 else ''} of {item['name']} ({seeds:,} seeds" + (f", {packs} {pack_word(item, packs)}" if packs else "")
+            done.append(f"{tray_figure(trays)} {entry['kind']['name'] + ' ' if entry['kind'] else ''}tray{'s' if trays != 1 else ''} of {item['name']} ({seeds:,} seeds" + (f", {packs} {pack_word(item, packs)}" if packs else "")
                         + (", added to that day's batch" if batch else "") + ")")
         for grant in grants:
             use_grant(db, grant)
@@ -8507,6 +8638,7 @@ def planting_new():
     return render_template(
         "planting_new.html", seed_items=seeds, info=info, chosen=request.args.get("item", ""), departments=department_names(db, biz), today=today_str(),
         release_days=RELEASE_DAYS, staff=planting_staff(db, biz), usual_holes=hr_settings_for(db, biz)["holes_per_tray"] or "", max_holes=MAX_TRAY_HOLES,
+        kinds=tray_types(db, biz),
     )
 
 
@@ -8671,7 +8803,7 @@ def planting_detail(planting_id):
     orders = db.all("SELECT * FROM preorders WHERE planting_id=? AND business_id=? ORDER BY id DESC", (planting_id, biz))
     return render_template(
         "planting_detail.html", p=f, orders=orders, editable=can_plant(), release_days=RELEASE_DAYS, today=today_str(), planted_by=planting_tray_rows(db, biz, planting_id),
-        staff=planting_staff(db, biz), max_holes=MAX_TRAY_HOLES,
+        staff=planting_staff(db, biz), max_holes=MAX_TRAY_HOLES, kinds=tray_types(db, biz),
     )
 
 
@@ -8679,7 +8811,7 @@ def planting_tray_rows(db, biz, planting_id):
     """Who planted how many trays of a planting, and whether each is paid: on a payslip, still to be paid (a casual worker),
     or not paid by the tray (permanent staff are on a salary; a person since removed from HR is only a name)."""
     rows = db.all(
-        """SELECT t.id, t.employee_id, t.employee_name, t.trays, t.paid_payslip_id, e.employment_type, e.tray_rate, pr.tray_rate AS paid_rate
+        """SELECT t.id, t.employee_id, t.employee_name, t.trays, t.paid_payslip_id, t.tray_type_id, t.tray_type, t.type_rate, e.employment_type, e.tray_rate, pr.tray_rate AS paid_rate
            FROM planting_trays t LEFT JOIN employees e ON e.id = t.employee_id AND e.business_id = t.business_id
            LEFT JOIN payroll pr ON pr.id = t.paid_payslip_id AND pr.business_id = t.business_id
            WHERE t.business_id=? AND t.planting_id=? ORDER BY t.id""",
@@ -8688,8 +8820,14 @@ def planting_tray_rows(db, biz, planting_id):
     hr_set = hr_settings_for(db, biz)
     for r in rows:
         r["state"] = "paid" if r["paid_payslip_id"] else ("due" if r["employment_type"] == "Casual Worker" else "salaried" if r["employment_type"] else "gone")
-        # What the trays earn: at the rate they were paid at, or at the worker's rate now (unpaid trays are paid at the rate in force)
-        r["rate"] = r["paid_rate"] if r["state"] == "paid" else (rate_for(r, hr_set) if r["state"] == "due" else None)
+        # What the trays earn: at the rate they were paid at (kept on the row; an older payslip only has its one rate), or at the rate
+        # in force now for their kind of tray (unpaid trays are paid at the rate in force)
+        if r["state"] == "paid":
+            r["rate"] = r["type_rate"] if r["type_rate"] is not None else r["paid_rate"]
+        elif r["state"] == "due":
+            price_trays(db, biz, r, hr_set, [r])
+        else:
+            r["rate"] = None
         r["earns"] = round(r["trays"] * r["rate"], 2) if r["rate"] else None
     return rows
 
@@ -12825,7 +12963,7 @@ assistant.bind(
     # the reminder report
     reminder_report=reminder_report, reminder_lines=reminder_lines, reminder_stale_days=reminder_stale_days, REMINDER_ORDER_DAYS=REMINDER_ORDER_DAYS,
     # pay: each employee's rate for a tray and what their next payslip would pay
-    rate_for=rate_for, pay_preview=pay_preview, schedule_words=schedule_words, EMPLOYEE_COLUMNS=EMPLOYEE_COLUMNS,
+    rate_for=rate_for, price_trays=price_trays, pay_preview=pay_preview, schedule_words=schedule_words, EMPLOYEE_COLUMNS=EMPLOYEE_COLUMNS,
 )
 
 

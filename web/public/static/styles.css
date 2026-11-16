@@ -1681,3 +1681,9 @@ summary.alerts-lit .badge { background: #fff; color: #111; }
 
 /* What one pack holds: the amount and what it is measured in, side by side */
 .contents-pair { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; }
+
+/* Planting: the kind of tray sits beside the number of trays */
+.tray-with-kind { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr); gap: 8px; }
+.tray-with-kind select { margin: 0; }
+.kind-table input { margin: 0; }
+.kind-table th small { display: block; font-weight: 400; }

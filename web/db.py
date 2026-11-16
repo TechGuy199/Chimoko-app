@@ -229,6 +229,12 @@ SCHEMA = [
         id {pk}, business_id INTEGER NOT NULL, planting_id INTEGER NOT NULL, employee_id INTEGER, employee_name TEXT NOT NULL,
         trays DOUBLE PRECISION NOT NULL, paid_payslip_id INTEGER, created_by TEXT, created_at TEXT
     )""",
+    # The kinds of seedling tray the business plants in (Big, Small...), set under HR Settings: how many holes one has and what a casual
+    # worker is paid for planting one. active = 0 is a kind no longer used: it is kept for the trays already planted in it.
+    """CREATE TABLE IF NOT EXISTS tray_types (
+        id {pk}, business_id INTEGER NOT NULL, name TEXT NOT NULL, holes INTEGER, rate DOUBLE PRECISION NOT NULL DEFAULT 0,
+        active INTEGER NOT NULL DEFAULT 1, created_at TEXT
+    )""",
     # The assistant (Gemini). Each person's recent conversation with it, so a chat carries on; kept 30 days, or until they start a new chat.
     """CREATE TABLE IF NOT EXISTS assistant_messages (
         id {pk}, business_id INTEGER NOT NULL, user_id INTEGER NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT
@@ -620,6 +626,11 @@ def init_schema():
         add_column(db, "products", "pack_measure", "TEXT")
         add_column(db, "products", "loose_amount", "DOUBLE PRECISION DEFAULT 0")
         add_column(db, "invoice_items", "loose_delta", "DOUBLE PRECISION")
+        # The kind of tray a person's trays were (its name is kept with the row), and the pay for one: the kind's rate when the trays
+        # were entered, replaced by the rate actually paid once a payslip pays them.
+        add_column(db, "planting_trays", "tray_type_id", "INTEGER")
+        add_column(db, "planting_trays", "tray_type", "TEXT")
+        add_column(db, "planting_trays", "type_rate", "DOUBLE PRECISION")
         # A payslip paid by trays keeps how many and at what rate, as it was worked out
         add_column(db, "payroll", "trays", "DOUBLE PRECISION")
         add_column(db, "payroll", "tray_rate", "DOUBLE PRECISION")

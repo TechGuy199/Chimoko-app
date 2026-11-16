@@ -63,12 +63,15 @@
                 if (d.basis === "trays") {
                     (d.rows || []).forEach(function (row) {
                         const item = document.createElement("li");
-                        item.textContent = row.planting + ": " + count(row.trays) + " tray" + (row.trays === 1 ? "" : "s");
+                        item.textContent = row.planting + ": " + count(row.trays) + (row.kind ? " " + row.kind : "") + " tray" + (row.trays === 1 ? "" : "s") +
+                            " \u00d7 " + money(row.rate) + " = " + money(row.amount);
                         trayList.appendChild(item);
                     });
                     if (!d.trays) traySummary.textContent = "No unpaid trays planted up to " + d.end + ".";
-                    else if (!d.rate) traySummary.textContent = count(d.trays) + " unpaid trays, but this worker's pay for a tray is not set. Set it on their page first.";
-                    else traySummary.textContent = count(d.trays) + " tray" + (d.trays === 1 ? "" : "s") + " at " + money(d.rate) + " = " + money(d.amount) + " basic pay.";
+                    else if (d.unpriced) traySummary.textContent = count(d.trays) + " unpaid trays, but some have no pay set. Set the pay for each kind of tray under HR Settings (or this worker's own rate on their page) first.";
+                    else traySummary.textContent = (d.kinds || []).map(function (k) {
+                        return count(k.trays) + (k.name ? " " + k.name : "") + " \u00d7 " + money(k.rate);
+                    }).join(" + ") + " = " + money(d.amount) + " basic pay.";
                 } else {
                     expected.value = d.expected;
                     worked.value = d.worked;
