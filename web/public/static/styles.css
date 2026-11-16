@@ -1678,3 +1678,6 @@ summary.alerts-lit .badge { background: #fff; color: #111; }
 .purpose-box legend { padding: 0 6px; font-weight: 650; }
 .purpose-choices { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 6px 14px; margin-bottom: 8px; }
 .purpose-choices input:disabled + span { opacity: 0.55; }
+
+/* What one pack holds: the amount and what it is measured in, side by side */
+.contents-pair { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; }

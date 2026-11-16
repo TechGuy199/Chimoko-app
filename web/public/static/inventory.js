@@ -31,6 +31,16 @@
     const price = document.getElementById("purchase-price");
     const priceLabel = document.getElementById("price-label");
     const canList = purposeBox && purposeBox.dataset.canList === "1";
+    // What one pack holds: seeds in a tin, kg in a bag, litres in a bottle
+    const seedsLabel = document.getElementById("seeds-label");
+    const contentsRow = document.getElementById("contents-row");
+    const contentsLabel = document.getElementById("contents-label");
+    const contentsNote = document.getElementById("contents-note");
+    const packSize = document.getElementById("purchase-pack-size");
+    const packMeasure = document.getElementById("purchase-pack-measure");
+    const contentsTotal = document.getElementById("contents-total");
+    const contentsHelp = contentsNote ? contentsNote.textContent : "";
+    let contentsForced = false;   // true while the contents boxes show an existing item's own pack size
     let purposeTouched = false;   // the choice was made by hand, so a recognised item no longer sets it
     let saleTouched = false;      // the number for sale was typed, so the usual share no longer fills it in
     let purposeFor = null;        // the item code the choice was last filled in from
@@ -96,14 +106,34 @@
         if (!inventory) {
             freeUnit();
             unit.value = "";
-        } else if (isSeed) {
-            lockUnit("pack", "Seed items are counted in packs.");
         } else if (item && item.unit) {
             lockUnit(item.unit, "This item is counted in " + item.unit + ".");
         } else {
             freeUnit();
+            if (isSeed) unitNote.textContent = "How the seed comes: a tin, a sachet, a pack. Left empty, it is counted in packs.";
         }
-        quantityUnit.textContent = unit.value.trim() ? "(" + unit.value.trim() + ")" : "";
+        const packName = unit.value.trim() || "pack";
+        quantityUnit.textContent = unit.value.trim() || isSeed ? "(" + packName + ")" : "";
+        seedsLabel.textContent = "Seeds in one " + packName;
+
+        // Anything that is not seed can say what one pack holds; an item already measured keeps its own pack size
+        contentsRow.hidden = !inventory || isSeed;
+        packSize.disabled = packMeasure.disabled = !inventory || isSeed;
+        contentsLabel.textContent = "One " + packName + " holds";
+        if (item && item.size) {
+            packSize.value = item.size;
+            packMeasure.value = item.measure;
+            packSize.readOnly = packMeasure.readOnly = true;
+            contentsForced = true;
+            contentsNote.textContent = "This item is counted in " + packName + "s of " + Number(item.size).toLocaleString() + " " + item.measure + ". Use a new item code for a different size.";
+        } else {
+            if (contentsForced) { packSize.value = ""; packMeasure.value = ""; }
+            packSize.readOnly = packMeasure.readOnly = false;
+            contentsForced = false;
+            contentsNote.textContent = contentsHelp;
+        }
+        packMeasure.required = !packSize.disabled && packSize.value.trim() !== "";
+        paintTotal(inventory, isSeed, packName);
 
         paintPurpose(inventory, item, isSeed);
 
@@ -117,6 +147,20 @@
             seeds.readOnly = false;
             note.textContent = "Quantity bought below is counted in packs.";
         }
+    }
+
+    // Quantity x what one pack holds: "2 bags x 50 kg = 100 kg", "1 tin x 15,000 seeds = 15,000 seeds"
+    function paintTotal(inventory, isSeed, packName) {
+        const bought = parseInt(quantity.value, 10) || 0;
+        const size = isSeed ? parseFloat(seeds.value) : parseFloat(packSize.value);
+        const measure = isSeed ? "seeds" : packMeasure.value.trim();
+        if (!inventory || !(bought > 0) || !(size > 0) || !measure) {
+            contentsTotal.textContent = "";
+            return;
+        }
+        const total = Math.round(bought * size * 10000) / 10000;
+        contentsTotal.textContent = bought.toLocaleString() + " " + packName + (bought === 1 ? "" : "s") + " \u00d7 " + size.toLocaleString() + " " + measure +
+            " = " + total.toLocaleString() + " " + measure + " in all.";
     }
 
     function paintPurpose(inventory, item, isSeed) {
@@ -209,9 +253,8 @@
     box.addEventListener("change", refresh);
     code.addEventListener("input", refresh);
     categories.concat(departments).forEach(function (radio) { radio.addEventListener("change", refresh); });
-    unit.addEventListener("input", function () {
-        quantityUnit.textContent = unit.value.trim() ? "(" + unit.value.trim() + ")" : "";
-    });
+    unit.addEventListener("input", refresh);
+    [seeds, packSize, packMeasure].forEach(function (field) { field.addEventListener("input", refresh); });
     refresh();
 
     // A code that matches an item also fills in its name, unless a name has already been typed

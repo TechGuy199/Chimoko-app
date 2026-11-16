@@ -35,14 +35,18 @@
 <p>
     In stock: <strong class="{{ 'warn' if item.quantity < user.low_stock_threshold else 'ok' }}">{{ item.quantity }}</strong>
     {% if seed %}
-    pack(s)
+    {{ pack_word(item, item.quantity) }}
     {% if item.seeds_per_pack %}
     of {{ '{:,}'.format(item.seeds_per_pack) }} seeds = <strong>{{ '{:,}'.format(item.seeds_per_pack * item.quantity) }}</strong> seeds
     {% if per_seed is not none %}<span class="muted">&middot; {{ per_seed|money4 }} per seed</span>{% endif %}
-    {% if loose %}<span class="muted">&middot; plus {{ '{:,}'.format(loose) }} loose seeds from an opened pack</span>{% endif %}
+    {% if loose %}<span class="muted">&middot; plus {{ '{:,}'.format(loose) }} loose seeds from an opened {{ pack_word(item) }}</span>{% endif %}
     {% else %}
     <span class="muted">&middot; seeds per pack not recorded yet</span>
     {% endif %}
+    {% elif measured %}
+    {{ pack_word(item, item.quantity) }} of {{ amount_words(measured.size) }} {{ measured.measure }}
+    {% if measured.loose %}<span class="muted">&middot; plus {{ amount_words(measured.loose) }} {{ measured.measure }} in an opened {{ pack_word(item) }}</span>{% endif %}
+    = <strong>{{ amount_words(in_measure) }}</strong> {{ measured.measure }} in all
     {% elif item.unit %}
     {{ item.unit }}
     {% endif %}
@@ -105,7 +109,17 @@
                         <option value="farm">Farm Use (internal)</option>
                     </select>
                 </label>
-                <label>Quantity {% if seed %}(packs){% endif %} <input name="quantity" id="transfer-quantity" type="number" min="1" max="{{ item.quantity }}" step="1" value="1" required></label>
+                <label>Quantity {% if seed or measured %}({{ pack_word(item, 2) }}){% endif %} <input name="quantity" id="transfer-quantity" type="number" min="1" max="{{ item.quantity }}" step="1" value="1" required></label>
+                {% if measured %}
+                {# Farm use by amount: the opened pack first, then whole packs, keeping what is left of the last one #}
+                <label id="use-amount-row" hidden>Or the amount used, in {{ measured.measure }}
+                    <input name="amount" id="use-amount" type="number" min="0" step="{{ '1' if measured.whole else 'any' }}" inputmode="decimal"
+                           data-size="{{ measured.size }}" data-loose="{{ measured.loose }}" data-packs="{{ item.quantity }}" data-measure="{{ measured.measure }}"
+                           data-pack="{{ pack_word(item) }}" data-packs-word="{{ pack_word(item, 2) }}" placeholder="e.g. {{ amount_words(measured.size * 1.2) }}">
+                    <small class="muted">Leave empty to use whole {{ pack_word(item, 2) }}. {{ amount_words(in_measure) }} {{ measured.measure }} in stock{% if measured.loose %}, {{ amount_words(measured.loose) }} of it in an opened {{ pack_word(item) }}, which is used first{% endif %}.</small>
+                </label>
+                <p class="seedling-summary" id="use-amount-note" aria-live="polite"></p>
+                {% endif %}
                 {% if seed %}
                 {# Seed packs are sown; the seedlings that come up are what goes on sale. These are the greenhouse questions. #}
                 <fieldset class="seedling-fields" id="seedling-fields">
@@ -132,7 +146,7 @@
                 {% endif %}
                 <label>Recipient name (farm use) <input name="recipient"></label>
                 <label>Phone number (farm use) <input name="phone"></label>
-                <button class="btn success wide" {{ 'disabled' if item.quantity < 1 }}>Confirm Transfer</button>
+                <button class="btn success wide" {{ 'disabled' if item.quantity < 1 and not (measured and measured.loose) }}>Confirm Transfer</button>
             </form>
             {% else %}
             {{ ask_admin('transfer') }}
@@ -230,11 +244,19 @@
                         </select>
                         <small class="muted">{{ 'Seeds are planted, so they are always for the farm.' if seed else 'Farm use stays in inventory only; what is for sale is on the POS.' }}</small>
                     </label>
-                    <label>Packaging unit
-                        <input name="unit" id="detail-unit" list="unit-choices" maxlength="30" autocomplete="off" placeholder="e.g. bag, box, kg, litre"
-                               value="{{ item.unit or '' }}" {{ 'readonly' if seed }}>
-                        <small class="muted" id="detail-unit-note">{{ 'Seed items are always counted in packs.' if seed else 'What the quantity is counted in.' }}</small>
+                    <label>Bought as
+                        <input name="unit" id="detail-unit" list="unit-choices" maxlength="30" autocomplete="off" placeholder="e.g. bag, tin, sachet, bottle"
+                               value="{{ item.unit or '' }}">
+                        <small class="muted" id="detail-unit-note">How it comes, and what the quantity is counted in.</small>
                     </label>
+                    <label id="detail-contents-row" {{ 'hidden' if seed }}>One of them holds <span class="muted">(optional)</span>
+                        <span class="contents-pair">
+                            <input name="pack_size" type="number" min="0" step="any" inputmode="decimal" value="{{ amount_words(item.pack_size).replace(',', '') if item.pack_size else '' }}" placeholder="e.g. 50" aria-label="How much one pack holds" {{ 'disabled' if seed }}>
+                            <input name="pack_measure" list="measure-choices" maxlength="20" autocomplete="off" value="{{ item.pack_measure or '' }}" placeholder="kg, litres&hellip;" aria-label="What it is measured in" {{ 'disabled' if seed }}>
+                        </span>
+                        <small class="muted">For something measured out when used. It can then be used by the kg or litre.</small>
+                    </label>
+                    <datalist id="measure-choices">{% for m in measures %}<option value="{{ m }}">{% endfor %}</datalist>
                     <label id="detail-seeds-row" {{ 'hidden' if not seed }}>Seeds per pack
                         <input name="seeds_per_pack" id="detail-seeds" type="number" min="1" step="1" inputmode="numeric" value="{{ item.seeds_per_pack or '' }}">
                     </label>

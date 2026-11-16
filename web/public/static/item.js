@@ -18,18 +18,13 @@
             const isSeed = SEED_WORD.test(category.value);
             detailRow.hidden = !isSeed;
             detailSeeds.required = isSeed;
-            if (detailUnit) {
-                if (isSeed) {
-                    if (!detailUnit.readOnly) rememberedUnit = detailUnit.value;
-                    detailUnit.value = "pack";
-                    detailUnit.readOnly = true;
-                    detailUnitNote.textContent = "Seed items are always counted in packs.";
-                } else if (detailUnit.readOnly) {
-                    detailUnit.value = rememberedUnit;
-                    detailUnit.readOnly = false;
-                    detailUnitNote.textContent = "What the quantity is counted in.";
-                }
+            // Seeds have their seeds per pack; anything else can say what one pack holds
+            const contents = document.getElementById("detail-contents-row");
+            if (contents) {
+                contents.hidden = isSeed;
+                contents.querySelectorAll("input").forEach(function (field) { field.disabled = isSeed; });
             }
+            if (detailUnit && isSeed && !detailUnit.value.trim()) detailUnit.value = "pack";
         };
         // The category is a drop-down; "input" and "change" cover every browser
         category.addEventListener("input", showPackSize);
@@ -60,6 +55,44 @@
         qtyNew.addEventListener("input", updateQtyLabel);
         updateQtyLabel();
     }
+
+    // Farm use of a measured item can be given as an amount: it shows which packs that opens and what is left over
+    (function () {
+        const amount = document.getElementById("use-amount");
+        const row = document.getElementById("use-amount-row");
+        const where = document.getElementById("transfer-destination");
+        const whole = document.getElementById("transfer-quantity");
+        const note = document.getElementById("use-amount-note");
+        if (!amount || !where) return;
+        const size = parseFloat(amount.dataset.size) || 0;
+        const loose = parseFloat(amount.dataset.loose) || 0;
+        const packs = parseInt(amount.dataset.packs, 10) || 0;
+        const measure = amount.dataset.measure;
+        const words = function (n) { return (Math.round(n * 10000) / 10000).toLocaleString(); };
+        function paint() {
+            const farm = where.value === "farm";
+            row.hidden = !farm;
+            if (!farm) amount.value = "";
+            const typed = parseFloat(amount.value);
+            const byAmount = farm && typed > 0;
+            whole.disabled = byAmount;   // the amount decides; whole packs are not asked for
+            if (!byAmount) { note.textContent = ""; return; }
+            const fromOpen = Math.min(loose, typed);
+            const opened = Math.max(0, Math.ceil((typed - fromOpen) / size - 1e-9));
+            if (opened > packs) {
+                note.textContent = "Only " + words(packs * size + loose) + " " + measure + " is in stock.";
+                return;
+            }
+            const left = loose - fromOpen + opened * size - (typed - fromOpen);
+            note.textContent = words(typed) + " " + measure + ": " +
+                (fromOpen > 0 ? words(fromOpen) + " from the opened " + amount.dataset.pack + (opened ? ", then " : ". ") : "") +
+                (opened ? opened + " " + (opened === 1 ? amount.dataset.pack : amount.dataset.packsWord) + " opened. " : (fromOpen > 0 ? "" : "")) +
+                (left > 1e-9 ? words(left) + " " + measure + " left in the opened " + amount.dataset.pack + "." : "Nothing left over.");
+        }
+        amount.addEventListener("input", paint);
+        where.addEventListener("change", paint);
+        paint();
+    })();
 
     const form = document.getElementById("transfer-form");
     if (!form || form.dataset.seed !== "1") return;

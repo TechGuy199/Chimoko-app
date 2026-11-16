@@ -613,6 +613,13 @@ def init_schema():
         # NULL = never said. And how much of a purchase went straight on the POS for sale (the rest went into inventory for farm use).
         add_column(db, "products", "purpose", "TEXT")
         add_column(db, "procurements", "sale_qty", "INTEGER")
+        # What one pack of an item holds, for anything measured out when it is used (a 50 kg bag, a 1 litre bottle): the amount, what it
+        # is measured in, and what is left in a pack already opened (used first next time). Seed items keep their own columns for the
+        # same thing (seeds_per_pack, loose_seeds). A farm-use line remembers how the opened-pack amount changed, so returning it undoes it.
+        add_column(db, "products", "pack_size", "DOUBLE PRECISION")
+        add_column(db, "products", "pack_measure", "TEXT")
+        add_column(db, "products", "loose_amount", "DOUBLE PRECISION DEFAULT 0")
+        add_column(db, "invoice_items", "loose_delta", "DOUBLE PRECISION")
         # A payslip paid by trays keeps how many and at what rate, as it was worked out
         add_column(db, "payroll", "trays", "DOUBLE PRECISION")
         add_column(db, "payroll", "tray_rate", "DOUBLE PRECISION")

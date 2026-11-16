@@ -1946,7 +1946,7 @@ def delivery_list_pdf_bytes(d, day, layout):
     return buffer.getvalue()
 
 # --- INVENTORY ---
-ITEM_COLUMNS = "id, item_code, name, category, department, batch_no, date_planted, quantity, unit_cost, price, supplier_name, invoice_no, purchase_date, expiry_date, seeds_per_pack, unit, purpose"
+ITEM_COLUMNS = "id, item_code, name, category, department, batch_no, date_planted, quantity, unit_cost, price, supplier_name, invoice_no, purchase_date, expiry_date, seeds_per_pack, unit, purpose, pack_size, pack_measure, loose_amount, loose_seeds"
 
 # --- Packaging unit: what a quantity of an item is counted in (bag, box, kg, litre...). Seed items are always packs. ---
 DEFAULT_UNITS = ("bag", "bottle", "box", "bundle", "carton", "kg", "litre", "pack", "piece", "roll", "sachet", "tin", "tray")
@@ -2009,6 +2009,114 @@ def seeds_per_pack_for(existing, category, typed):
     if stored:
         return stored, None
     return None, "seeds per pack is needed for a seed item (how many seeds are in one pack)"
+
+
+# --- What a pack holds ---
+# Stock is counted in packs, in the way the item is bought (a bag, a tin, a sachet). A pack can also say what it holds: 50 kg in a bag
+# of fertiliser, 15,000 seeds in a tin. Then the item can be used by that amount: what is left in an opened pack is used first, whole
+# packs are opened for the rest, and what remains of the last one is kept as the opened pack for next time.
+MEASURES = ("kg", "g", "litres", "ml")
+MAX_PACK_SIZE = 10_000_000
+
+
+@app.template_global()
+def amount_words(value):
+    """An amount without needless decimals: 50, 2.5, 15,000."""
+    value = round(float(value or 0), 4)
+    return f"{int(value):,}" if value == int(value) else f"{value:,.4f}".rstrip("0").rstrip(".")
+
+
+def pack_contents_for(existing, category, typed_size, typed_measure):
+    """What one pack holds, for a purchase or an edit of an item that is not seed: (amount or None, measure or None, problem or None).
+    Left empty, an item keeps what it has (or stays unmeasured). One item code cannot switch pack size without muddling the count."""
+    if is_seed_category(existing["category"] if existing else category):
+        return None, None, None
+    stored_size, stored_measure = (existing.get("pack_size"), existing.get("pack_measure")) if existing else (None, None)
+    typed_size, typed_measure = (typed_size or "").strip().replace(",", ""), " ".join((typed_measure or "").split())[:20]
+    if not typed_size:
+        return stored_size, stored_measure, None
+    try:
+        size = float(typed_size)
+        if not math.isfinite(size) or not 0 < size <= MAX_PACK_SIZE:
+            raise ValueError
+    except ValueError:
+        return None, None, f"what one pack holds ('{typed_size}') must be a number above zero"
+    measure = typed_measure or stored_measure
+    if not measure:
+        return None, None, "say what the pack's contents are measured in (kg, litres, g, ml...)"
+    if stored_size and (abs(stored_size - size) > 1e-6 or norm(stored_measure) != norm(measure)):
+        return None, None, (f"this item is already counted in packs of {amount_words(stored_size)} {stored_measure}; "
+                            f"use a new item code for packs of {amount_words(size)} {measure}")
+    return round(size, 4), measure, None
+
+
+def measured(item):
+    """How an item's packs are measured, or None when they are not: {size, measure, loose (in the opened pack), column, whole (seeds)}."""
+    if is_seed_category(item["category"]):
+        if not item.get("seeds_per_pack"):
+            return None
+        return {"size": item["seeds_per_pack"], "measure": "seeds", "loose": item.get("loose_seeds") or 0, "column": "loose_seeds", "whole": True}
+    if not item.get("pack_size"):
+        return None
+    return {"size": item["pack_size"], "measure": item.get("pack_measure") or "", "loose": round(item.get("loose_amount") or 0.0, 4), "column": "loose_amount", "whole": False}
+
+
+@app.template_global()
+def pack_word(item, count=1):
+    """What a pack of the item is called: its unit ('bag', 'tin'), or 'pack'. Plural for any count but one."""
+    word = (item.get("unit") or "pack").strip() or "pack"
+    return word if count == 1 else word + ("es" if word.endswith(("s", "x", "ch", "sh")) else "s")
+
+
+def stock_in_measure(item):
+    """Everything in stock in the item's measure (whole packs and the opened one), or None when it is not measured."""
+    m = measured(item)
+    return None if m is None else round(item["quantity"] * m["size"] + m["loose"], 4)
+
+
+class NotEnoughStock(Exception):
+    """More of an item was asked for than is in stock; the message says what there is."""
+
+
+def take_contents(db, biz, item, amount):
+    """Takes an amount (kg, litres, seeds...) of a measured item out of inventory: the opened pack first, then whole packs, keeping
+    what is left of the last one opened. Returns (packs opened, change in the opened-pack amount, what the opened pack now holds).
+    Raises NotEnoughStock when the stock is short, StockError when it changed underneath. The caller commits or rolls back."""
+    m = measured(item)
+    size, loose = m["size"], m["loose"]
+    from_loose = min(loose, amount)
+    need = amount - from_loose
+    packs = int(math.ceil(need / size - 1e-9)) if need > 1e-9 else 0
+    if packs > item["quantity"]:
+        raise NotEnoughStock(
+            f"Only {amount_words(item['quantity'] * size + loose)} {m['measure']} of {item['name']} is in stock "
+            f"({item['quantity']} {pack_word(item, item['quantity'])} of {amount_words(size)} {m['measure']}"
+            + (f" and {amount_words(loose)} {m['measure']} in an opened {pack_word(item)}" if loose else "") + ").")
+    left = loose - from_loose + packs * size - need
+    left = int(round(left)) if m["whole"] else max(0.0, round(left, 4))
+    moved = db.execute(
+        f"UPDATE products SET quantity = quantity - ?, {m['column']}=? WHERE id=? AND business_id=? AND quantity >= ?",
+        (packs, left, item["id"], biz, packs),
+    )
+    if moved.rowcount != 1:
+        raise StockError(item["name"])
+    if packs:
+        low_stock_alert(db, item["name"], item["item_code"], item["quantity"], item["quantity"] - packs, "in inventory")
+    return packs, left - loose, left
+
+
+def return_to_stock(db, biz, table, line):
+    """Puts an invoice line's quantity back where it came from. A farm-use line that was measured out also undoes its change to the
+    opened pack. Returns False when the item is no longer there."""
+    if db.execute(f"UPDATE {table} SET quantity = quantity + ? WHERE business_id=? AND item_code=?", (line["qty"], biz, line["item_code"])).rowcount != 1:
+        return False
+    if table == "products" and line.get("loose_delta"):
+        item = db.one("SELECT category FROM products WHERE business_id=? AND item_code=?", (biz, line["item_code"]))
+        if is_seed_category(item["category"]):
+            db.execute("UPDATE products SET loose_seeds = COALESCE(loose_seeds, 0) - ? WHERE business_id=? AND item_code=?", (int(round(line["loose_delta"])), biz, line["item_code"]))
+        else:
+            db.execute("UPDATE products SET loose_amount = COALESCE(loose_amount, 0) - ? WHERE business_id=? AND item_code=?", (line["loose_delta"], biz, line["item_code"]))
+    return True
 
 
 def seedling_name_for(seed_name):
@@ -2125,6 +2233,7 @@ def inventory():
     # by what it is for: one that is only for sale is judged by its POS stock, everything else by what is in inventory.
     on_pos = {r["item_code"]: r["quantity"] for r in db.all("SELECT item_code, quantity FROM pos_products WHERE business_id=?", (biz,))}
     for i in everything:
+        i["measured"], i["in_measure"] = measured(i), stock_in_measure(i)
         i["pos_qty"] = on_pos.get(i["item_code"], 0)
         i["low"] = (i["pos_qty"] if i["purpose"] == "sale" else i["quantity"]) < g.user["low_stock_threshold"]
     search = request.args.get("q", "").strip()
@@ -2177,7 +2286,7 @@ def procurement_new():
 def purchase_form(origin):
     """The guided purchase form: is it an inventory item, which category, which department, then the details."""
     db, biz = get_db(), g.user["business_id"]
-    items = db.all("SELECT item_code, name, category, department, seeds_per_pack, unit, purpose FROM products WHERE business_id=? ORDER BY name LIMIT 5000", (biz,))
+    items = db.all("SELECT item_code, name, category, department, seeds_per_pack, unit, purpose, pack_size, pack_measure FROM products WHERE business_id=? ORDER BY name LIMIT 5000", (biz,))
     # How the latest purchase of each item was split, so a restock of an item bought for both starts from the same share for sale
     shares = {}
     for r in db.all("SELECT item_code, quantity, sale_qty FROM procurements WHERE business_id=? AND sale_qty IS NOT NULL AND quantity > 0 ORDER BY id", (biz,)):
@@ -2192,6 +2301,7 @@ def purchase_form(origin):
         i["item_code"]: {
             "name": i["name"], "category": i["category"] or "General", "department": i["department"] or "General",
             "seeds": i["seeds_per_pack"] or 0, "unit": i["unit"] or "", "purpose": i["purpose"] or "", "share": shares.get(i["item_code"]),
+            "size": i["pack_size"] or 0, "measure": i["pack_measure"] or "",
         }
         for i in items
     }
@@ -2206,7 +2316,7 @@ def purchase_form(origin):
     asked = request.args.get("inventory")
     as_inventory = bool(start) or (asked == "1" if asked in ("0", "1") else origin == "inventory")
     return render_template(
-        "inventory_new.html", origin=origin, as_inventory=as_inventory, can_list=can("transfer"), categories=categories, methods=PAYMENT_METHODS,
+        "inventory_new.html", origin=origin, as_inventory=as_inventory, can_list=can("transfer"), measures=MEASURES, categories=categories, methods=PAYMENT_METHODS,
         known_suppliers=db.all("SELECT name, phone FROM suppliers WHERE business_id=? ORDER BY name LIMIT 1000", (biz,)), departments=departments, known=known, today=now().strftime("%Y-%m-%d"), units=unit_choices(db, biz),
         pre_category=next((c["name"] for c in categories if norm(c["name"]) == want_cat), ""),
         pre_department=next((d["name"] for d in departments if norm(d["name"]) == want_dept), ""),
@@ -2543,7 +2653,7 @@ def purchase():
             flash(problem, "error")
             return redirect(again)
 
-    known = db.one("SELECT category, department, seeds_per_pack, price FROM products WHERE business_id=? AND item_code=?", (biz, code)) if inventory else None
+    known = db.one("SELECT category, department, seeds_per_pack, price, pack_size, pack_measure FROM products WHERE business_id=? AND item_code=?", (biz, code)) if inventory else None
     try:
         # An item already in stock keeps its own category and department; a new one is filed where the form says.
         # A category that is new is added to the list, but only once the whole purchase is saved.
@@ -2551,9 +2661,12 @@ def purchase():
         department = known["department"] if known else chosen_department(db, biz)
 
         # Seed items must say how many seeds a pack holds. Something that is not an inventory item has no packs, unit or selling price.
-        seeds_per_pack = None
+        seeds_per_pack, pack_size, pack_measure = None, None, None
         if inventory:
             seeds_per_pack, problem = seeds_per_pack_for(known, category, text("seeds_per_pack"))
+            if not problem:
+                # Anything else can say what one pack holds (50 kg in a bag), so it can be used by that amount
+                pack_size, pack_measure, problem = pack_contents_for(known, category, text("pack_size"), text("pack_measure"))
             if problem:
                 flash(problem[0].upper() + problem[1:] + ".", "error")
                 return redirect(again)
@@ -2568,7 +2681,9 @@ def purchase():
 
         existing_name = record_purchase(db, biz, {
             "in_inventory": inventory, "amount_paid": amount_paid, "seeds_per_pack": seeds_per_pack, "purpose": purpose, "sale_qty": sale_qty,
-            "unit": (SEED_UNIT if seeds_per_pack else resolve_unit(db, biz, text("unit"))) if inventory else "",
+            # How it is bought: a bag, a tin, a sachet. A seed item with nothing said is counted in packs
+            "unit": (resolve_unit(db, biz, text("unit")) or (SEED_UNIT if seeds_per_pack else "")) if inventory else "",
+            "pack_size": pack_size, "pack_measure": pack_measure,
             "item_code": code, "name": name, "category": category, "department": department,
             "quantity": qty, "unit_cost": unit_cost, "price": price, "supplier_name": text("supplier_name"), "supplier_phone": text("supplier_phone"),
             "payment_method": method, "payment_reference": reference,
@@ -2582,6 +2697,9 @@ def purchase():
         return redirect(again)
 
     seed_note = f" That is {qty * seeds_per_pack:,} seeds in {qty:,} pack(s) of {seeds_per_pack:,}." if seeds_per_pack else ""
+    if pack_size:
+        bought_as = pack_word({"unit": text("unit")}, qty)
+        seed_note = f" That is {amount_words(qty * pack_size)} {pack_measure} in {qty:,} {bought_as} of {amount_words(pack_size)} {pack_measure}."
     if not inventory:
         flash(f"Purchase logged for '{name}' in Procurements. It was not added to inventory.", "ok")
     elif sale_qty:
@@ -2620,19 +2738,21 @@ def record_purchase(db, biz, p):
         price = existing["price"] if p["price"] is None else p["price"]
         db.execute(
             """UPDATE products SET quantity = quantity + ?, unit_cost=?, price=?, batch_no=?, supplier_name=?, invoice_no=?, purchase_date=?, expiry_date=?,
-                                  seeds_per_pack = COALESCE(?, seeds_per_pack), unit=?, purpose = COALESCE(?, purpose)
+                                  seeds_per_pack = COALESCE(?, seeds_per_pack), unit=?, purpose = COALESCE(?, purpose),
+                                  pack_size = COALESCE(?, pack_size), pack_measure = COALESCE(?, pack_measure)
                WHERE id=? AND business_id=?""",
             (kept_qty, p["unit_cost"], price, p["batch_no"], p["supplier_name"], p["invoice_no"], p["purchase_date"], p["expiry_date"],
-             p.get("seeds_per_pack"), unit, purpose, existing["id"], biz),
+             p.get("seeds_per_pack"), unit, purpose, p.get("pack_size"), p.get("pack_measure"), existing["id"], biz),
         )
     elif inventory:
         price = p["unit_cost"] if p["price"] is None else p["price"]
         db.execute(
-            """INSERT INTO products (business_id, item_code, name, category, department, batch_no, date_planted, quantity, unit_cost, price, supplier_name, invoice_no, purchase_date, expiry_date, seeds_per_pack, unit, purpose)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            """INSERT INTO products (business_id, item_code, name, category, department, batch_no, date_planted, quantity, unit_cost, price, supplier_name, invoice_no, purchase_date, expiry_date, seeds_per_pack, unit, purpose, pack_size, pack_measure)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 biz, p["item_code"], p["name"], p["category"], p["department"], p["batch_no"], p["date_planted"], kept_qty,
                 p["unit_cost"], price, p["supplier_name"], p["invoice_no"], p["purchase_date"], p["expiry_date"], p.get("seeds_per_pack"), p.get("unit") or "", purpose,
+                p.get("pack_size"), p.get("pack_measure"),
             ),
         )
     total_cost = round(p["quantity"] * p["unit_cost"], 2)
@@ -2708,7 +2828,7 @@ def item(item_id):
         category_choices.append(current["category"] or "General")
 
     return render_template(
-        "item.html", item=current, purposes=ITEM_PURPOSES, departments=department_names(db, biz), category_choices=category_choices, units=unit_choices(db, biz),
+        "item.html", item=current, purposes=ITEM_PURPOSES, measured=measured(current), in_measure=stock_in_measure(current), measures=MEASURES, departments=department_names(db, biz), category_choices=category_choices, units=unit_choices(db, biz),
         access={action: item_access_state(db, item_id, action) for action, _ in ITEM_ACTIONS}, actions=ITEM_ACTIONS,
         seed=seed, listing=listing, batches=batches, per_seed=per_seed, loose=loose, plantings=plantings, seedling_name=(listing or {}).get("name") or seedling_name_for(current["name"]),
     )
@@ -2748,13 +2868,26 @@ def update_item(item_id):
             flash("A seed item needs the number of seeds in one pack (a whole number above zero).", "error")
             return redirect(url_for("item", item_id=item_id))
 
-    # The packaging unit. Seed items are always counted in packs; otherwise it is whatever was typed (blank = none set)
-    if is_seed_category(category):
-        unit = SEED_UNIT
-    elif "unit" in request.form:
+    # How it is bought: a bag, a tin, a sachet (blank = none set). A seed item with nothing said is counted in packs
+    if "unit" in request.form:
         unit = resolve_unit(db, biz, text("unit"))
     else:
         unit = current["unit"] or ""
+    if is_seed_category(category) and not unit:
+        unit = SEED_UNIT
+
+    # What one pack holds (not for seeds, which have their seeds per pack). Here a wrong one can be corrected, or cleared
+    pack_size, pack_measure = current["pack_size"], current["pack_measure"]
+    if is_seed_category(category):
+        pack_size, pack_measure = None, None
+    elif "pack_size" in request.form:
+        if not text("pack_size"):
+            pack_size, pack_measure = None, None
+        else:
+            pack_size, pack_measure, problem = pack_contents_for(None, category, text("pack_size"), text("pack_measure"))
+            if problem:
+                flash(problem[0].upper() + problem[1:] + ".", "error")
+                return redirect(url_for("item", item_id=item_id))
 
     # What the item is for; left as it is when the form does not send it. Seeds are always for the farm (they are planted)
     purpose = current["purpose"]
@@ -2769,11 +2902,11 @@ def update_item(item_id):
     try:
         db.execute(
             """UPDATE products SET name=?, category=?, department=?, batch_no=?, date_planted=?, unit_cost=?, price=?, supplier_name=?, invoice_no=?, purchase_date=?, expiry_date=?,
-                                  seeds_per_pack = COALESCE(?, seeds_per_pack), unit=?, purpose=?
+                                  seeds_per_pack = COALESCE(?, seeds_per_pack), unit=?, purpose=?, pack_size=?, pack_measure=?
                WHERE id=? AND business_id=?""",
             (
                 name, category, dept, text("batch_no"), text("date_planted"), unit_cost, price, text("supplier_name"),
-                text("invoice_no"), text("purchase_date"), text("expiry_date"), seeds_per_pack, unit, purpose, item_id, biz,
+                text("invoice_no"), text("purchase_date"), text("expiry_date"), seeds_per_pack, unit, purpose, pack_size, pack_measure, item_id, biz,
             ),
         )
         db.execute(
@@ -2856,6 +2989,54 @@ def adjust_quantity(item_id):
     return back
 
 
+def use_by_amount(db, biz, p, grant):
+    """Farm use of a measured item by amount: the opened pack is used first, whole packs are opened for the rest, and what is left of
+    the last one is kept. It is recorded as a farm-use invoice like any other, whose line counts the packs opened."""
+    back = redirect(url_for("item", item_id=p["id"]))
+    m = measured(p)
+    if m is None:
+        flash("This item's packs are not measured yet. Edit the item to say what one pack holds, or use whole units.", "error")
+        return back
+    try:
+        amount = float(text("amount").replace(",", ""))
+        if not math.isfinite(amount) or amount <= 0 or (m["whole"] and amount != int(amount)):
+            raise ValueError
+    except ValueError:
+        flash(f"Enter how many {m['measure']} are being used: a {'whole ' if m['whole'] else ''}number above zero.", "error")
+        return back
+    amount = int(amount) if m["whole"] else round(amount, 4)
+    try:
+        packs, delta, left = take_contents(db, biz, p, amount)
+        invoice_id = db.insert(
+            """INSERT INTO invoices (business_id, invoice_no, kind, customer_name, customer_phone, payment_status, total, amount_paid, balance_due, created_by, created_at)
+               VALUES (?, ?, 'FARM_USE', ?, ?, 'INTERNAL', 0, 0, 0, ?, ?)""",
+            (biz, next_invoice_no(db, biz), text("recipient") or "Farm Internal", text("phone"), g.user["username"], now().strftime("%Y-%m-%d %H:%M:%S")),
+        )
+        db.execute(
+            """INSERT INTO invoice_items (invoice_id, business_id, item_code, item_name, department, batch_no, qty, unit_price, line_total, loose_delta)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)""",
+            (invoice_id, biz, p["item_code"], f"{p['name']} ({amount_words(amount)} {m['measure']} used)"[:200], p["department"], p["batch_no"], packs, p["price"], delta),
+        )
+        use_grant(db, grant)
+        db.commit()
+    except NotEnoughStock as short:
+        db.rollback()
+        flash(f"{short} Nothing was used.", "error")
+        return back
+    except StockError:
+        db.rollback()
+        flash("The stock changed while you were working. Nothing was used; please try again.", "error")
+        return back
+    except DB_ERRORS:
+        db.rollback()
+        flash("The use could not be saved. Please try again.", "error")
+        return back
+    opened = f"{packs} {pack_word(p, packs)} opened" if packs else f"taken from the opened {pack_word(p)}, no new one opened"
+    kept = f"{amount_words(left)} {m['measure']} left in the opened {pack_word(p)}" if left else f"no opened {pack_word(p)} left over"
+    flash(f"Used {amount_words(amount)} {m['measure']} of {p['name']}: {opened}; {kept}. {p['quantity'] - packs} full {pack_word(p, p['quantity'] - packs)} {'remains' if p['quantity'] - packs == 1 else 'remain'}.", "ok")
+    return redirect(url_for("invoice", invoice_id=invoice_id))
+
+
 @app.post("/inventory/<int:item_id>/transfer")
 @need(None)
 def transfer(item_id):
@@ -2865,6 +3046,9 @@ def transfer(item_id):
     if grant is None:
         return refuse_item_action(item_id)
     destination = text("destination")
+    # Farm use of a measured item can be given as an amount (70 kg, 18,000 seeds) instead of whole packs
+    if destination == "farm" and text("amount"):
+        return use_by_amount(db, biz, p, grant)
     try:
         qty = number("quantity", int)
     except ValueError:
@@ -3353,7 +3537,7 @@ def delete_invoice(invoice_id):
         grant, reason, approved_by = row, row["reason"], row["decided_by"] or ""
 
     lines = db.all(
-        "SELECT item_code, item_name, department, batch_no, qty, unit_price, COALESCE(discount, 0) AS discount, line_total FROM invoice_items WHERE invoice_id=? AND business_id=? ORDER BY id",
+        "SELECT item_code, item_name, department, batch_no, qty, unit_price, COALESCE(discount, 0) AS discount, line_total, COALESCE(loose_delta, 0) AS loose_delta FROM invoice_items WHERE invoice_id=? AND business_id=? ORDER BY id",
         (invoice_id, biz),
     )
     payments = db.all(
@@ -3367,10 +3551,7 @@ def delete_invoice(invoice_id):
         missing = []
         if request.form.get("return_stock"):
             for line in lines:
-                back_in = db.execute(
-                    f"UPDATE {table} SET quantity = quantity + ? WHERE business_id=? AND item_code=?", (line["qty"], biz, line["item_code"]),
-                ).rowcount
-                if back_in != 1:
+                if not return_to_stock(db, biz, table, line):
                     missing.append(line["item_code"])
             where = "inventory" if table == "products" else "POS stock"
             stock_note = f"Items returned to {where}." if not missing else f"Items returned to {where}, except {', '.join(missing)} (no longer listed)."
@@ -3453,15 +3634,14 @@ def cancel_invoice(invoice_id):
             flash(("Choose how the refund was paid." if not text("payment_method") else problem) + " Nothing was changed.", "error")
             return back
 
-    lines = db.all("SELECT item_code, qty FROM invoice_items WHERE invoice_id=? AND business_id=?", (invoice_id, biz))
+    lines = db.all("SELECT item_code, qty, COALESCE(loose_delta, 0) AS loose_delta FROM invoice_items WHERE invoice_id=? AND business_id=?", (invoice_id, biz))
     try:
         stock_note = ""
         if request.form.get("return_stock"):
             table = invoice_stock_table(inv["kind"])
             missing = []
             for line in lines:
-                back_in = db.execute(f"UPDATE {table} SET quantity = quantity + ? WHERE business_id=? AND item_code=?", (line["qty"], biz, line["item_code"])).rowcount
-                if back_in != 1:
+                if not return_to_stock(db, biz, table, line):
                     missing.append(line["item_code"])
             stock_note = "Items returned to the POS." if not missing else f"Items returned to the POS, except {', '.join(missing)} (no longer listed)."
         db.execute(
@@ -8002,7 +8182,7 @@ def take_seeds(db, biz, item, size, seeds):
     packs = -(-need_seeds // size)
     if packs > item["quantity"]:
         available = item["quantity"] * size + loose
-        raise NotEnoughSeeds(f"Only {available:,} seeds of {item['name']} are in stock ({item['quantity']} pack(s) of {size:,}"
+        raise NotEnoughSeeds(f"Only {available:,} seeds of {item['name']} are in stock ({item['quantity']} {pack_word(item, item['quantity'])} of {size:,}"
                              + (f" and {loose:,} loose seeds" if loose else "") + ").")
     loose_left = loose - from_loose + (packs * size - need_seeds)
     moved = db.execute(
@@ -8282,7 +8462,7 @@ def planter_save(employee_id):
                 })
             save_tray_rows(db, biz, planting_id, [(e, trays)])
             grants.append(entry["grant"])
-            done.append(f"{tray_figure(trays)} tray{'s' if trays != 1 else ''} of {item['name']} ({seeds:,} seeds" + (f", {packs} pack{'s' if packs != 1 else ''}" if packs else "")
+            done.append(f"{tray_figure(trays)} tray{'s' if trays != 1 else ''} of {item['name']} ({seeds:,} seeds" + (f", {packs} {pack_word(item, packs)}" if packs else "")
                         + (", added to that day's batch" if batch else "") + ")")
         for grant in grants:
             use_grant(db, grant)

@@ -37,7 +37,7 @@
     <td>
         {{ sold_link(i.item_code, i.name) }}
         {% if i.purpose %}<span class="chip {{ {'farm': 'info', 'sale': 'ok', 'both': 'gold'}[i.purpose] }}">{{ {'farm': 'Farm use', 'sale': 'For sale', 'both': 'Sale + farm'}[i.purpose] }}</span>{% endif %}
-        {% if i.seeds_per_pack %}<small class="seed-note">{{ '{:,}'.format(i.seeds_per_pack) }} seeds per pack &middot; {{ '{:,}'.format(i.seeds_per_pack * i.quantity) }} seeds in stock</small>{% endif %}
+        {% if i.measured %}<small class="seed-note">{{ amount_words(i.measured.size) }} {{ i.measured.measure }} in a {{ pack_word(i) }}{% if i.measured.loose %} &middot; {{ amount_words(i.measured.loose) }} {{ i.measured.measure }} in an opened {{ pack_word(i) }}{% endif %} &middot; {{ amount_words(i.in_measure) }} {{ i.measured.measure }} in stock</small>{% endif %}
     </td>
     {% if show_category %}<td>{{ i.category or '—' }}</td>{% endif %}
     <td>{{ i.department }}</td>
