@@ -24,6 +24,7 @@
         <label>Quantity of the product <input name="product_qty" type="number" min="0" step="any" inputmode="decimal" placeholder="e.g. 2"></label>
         <label>Unit <input name="product_unit" maxlength="30" placeholder="kg, litres, bags" autocomplete="off" data-unit></label>
     </div>
+    <p class="seedling-summary" data-stock-note aria-live="polite" hidden></p>
     <label>Work done <input name="work_done" maxlength="120" placeholder="e.g. 3 rows, 120 trays, half the block"></label>
     <p class="row-actions"><button type="button" class="btn ghost small" data-remove-row>Remove this activity</button></p>
 </fieldset>
@@ -60,7 +61,8 @@
 {% else %}
 <section class="card block no-print">
     <h2>What the workers did</h2>
-    <p class="muted">Add as many activities as you need, then save them together. Choosing "Everyone on this plot" logs the activity for each of its workers.</p>
+    <p class="muted">Add as many activities as you need, then save them together. Choosing "Everyone on this plot" logs the activity for each of its workers.
+        A product picked from the inventory list, with its quantity, is taken out of stock (once, whoever it is logged for); anything else is only noted.</p>
     <form method="post" action="{{ url_for('log_activities', plot_id=plot.id) }}" id="activity-form">
         {{ csrf_field() }}
         <input type="hidden" name="date" value="{{ day }}">
@@ -70,7 +72,7 @@
         <button class="btn success wide">Save activities</button>
     </form>
     <datalist id="activity-items">
-        {% for i in items %}<option value="{{ i.name }}" data-unit="{{ i.unit or '' }}">{{ i.category }}</option>{% endfor %}
+        {% for i in items %}<option value="{{ i.name }}" data-unit="{{ i.unit or '' }}" data-stock="{{ i.stock }}" data-pack="{{ i.pack }}" data-measure="{{ i.measure }}">{{ i.stock }}</option>{% endfor %}
     </datalist>
 </section>
 {% endif %}

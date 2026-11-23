@@ -11256,7 +11256,7 @@ def get_plot(db, biz, plot_id):
 
 def day_activities(db, biz, day, plot_id=None):
     sql = """SELECT id, plot_id, plot_name, department, employee_id, worker_name, period, description, tools, product, product_qty, product_unit,
-                    work_done, recorded_by, recorded_at
+                    work_done, recorded_by, recorded_at, stock_line_id
              FROM activities WHERE business_id=? AND work_date=?"""
     params = [biz, day]
     if plot_id:
@@ -11406,9 +11406,74 @@ def plot_day(plot_id):
         "plot_day.html", plot=plot, day=day, today=today_str(), shown=shown, groups=by_worker(rows), total=len(rows),
         prev_day=(shown - datetime.timedelta(days=1)).isoformat(), next_day=(shown + datetime.timedelta(days=1)).isoformat(),
         periods=ACTIVITY_PERIODS, default_period="morning" if now().hour < 12 else "afternoon",
-        items=db.all("SELECT name, category, unit FROM products WHERE business_id=? ORDER BY name", (biz,)),
+        items=activity_items(db, biz),
         return_to=url_for("plot_day", plot_id=plot_id, date=day),
     )
+
+
+# --- Products used in daily activities come out of inventory ---
+# A product logged on an activity that is an inventory item (by name or code) and has a quantity is taken out of stock, as farm use:
+# a measured item by its measure (kg, litres, seeds), the opened pack first and whole packs for the rest; anything else in whole units.
+# The use is recorded on a farm-use invoice, one for each time a plot's activities are saved, so it shows wherever farm use does.
+def inventory_item_named(db, biz, typed):
+    """The inventory item a product typed on an activity is: its exact name or code (any case), or None for something else."""
+    key = norm(typed)
+    if not key:
+        return None
+    rows = db.all("SELECT " + ITEM_COLUMNS + " FROM products WHERE business_id=?", (biz,))
+    return next((r for r in rows if norm(r["item_code"]) == key), None) or next((r for r in rows if norm(r["name"]) == key), None)
+
+
+def use_words(item, amount, unit):
+    """How an amount used is said: '70 kg', '2 bags'."""
+    return f"{amount_words(amount)} {unit or pack_word(item, amount)}"
+
+
+def activity_items(db, biz):
+    """The inventory items an activity's product box suggests, each with what it is measured in and what is in stock in words."""
+    out = []
+    for i in db.all("SELECT " + ITEM_COLUMNS + " FROM products WHERE business_id=? ORDER BY name", (biz,)):
+        m = measured(i)
+        if m:
+            stock = f"{amount_words(stock_in_measure(i))} {m['measure']} in stock"
+        else:
+            stock = f"{i['quantity']:,} {pack_word(i, i['quantity'])} in stock"
+        out.append({"name": i["name"], "category": i["category"], "unit": m["measure"] if m else (i["unit"] or ""), "stock": stock,
+                    "pack": pack_word(i), "measure": m["measure"] if m else ""})
+    return out
+
+
+def plan_use(item, qty, unit):
+    """How a quantity of an inventory item logged on an activity is taken: ('amount', amount, measure) for a measured item given in its
+    measure, ('packs', n, unit) in whole units, or (None, problem). Units are matched loosely: 'kg', 'KG', 'bags' for 'bag'."""
+    m = measured(item)
+    said = norm(unit).rstrip("s") if unit else ""
+    pack = norm(item.get("unit") or "pack").rstrip("s")
+    if m and (not said or said == norm(m["measure"]).rstrip("s")):
+        if m["whole"] and qty != int(qty):
+            return None, f"{item['name']} is counted in whole {m['measure']}"
+        return "amount", (int(qty) if m["whole"] else round(qty, 4)), m["measure"]
+    if not said or said in (pack, "pack", "unit", "piece", "pc"):
+        if qty != int(qty) or qty < 1:
+            return None, (f"{item['name']} is used in whole {pack_word(item, 2)}" + (f", or by the {m['measure']}" if m else "")
+                          + ": give a whole number" + (f" of {pack_word(item, 2)} or an amount in {m['measure']}" if m else ""))
+        return "packs", int(qty), pack_word(item, int(qty))
+    return None, (f"{item['name']} is counted in {pack_word(item, 2)}" + (f" of {amount_words(m['size'])} {m['measure']}" if m else "")
+                  + f"; give the quantity in {pack_word(item, 2)}" + (f" or {m['measure']}" if m else "") + f", not {unit}")
+
+
+def take_for_activity(db, biz, item, how, qty):
+    """Takes what an activity used out of inventory: (packs or units taken, change in the opened pack). Raises NotEnoughStock or StockError."""
+    if how == "amount":
+        packs, delta, _ = take_contents(db, biz, item, qty)
+        return packs, delta
+    if qty > item["quantity"]:
+        raise NotEnoughStock(f"Only {item['quantity']:,} {pack_word(item, item['quantity'])} of {item['name']} are in inventory.")
+    moved = db.execute("UPDATE products SET quantity = quantity - ? WHERE id=? AND business_id=? AND quantity >= ?", (qty, item["id"], biz, qty))
+    if moved.rowcount != 1:
+        raise StockError(item["name"])
+    low_stock_alert(db, item["name"], item["item_code"], item["quantity"], item["quantity"] - qty, "in inventory")
+    return qty, 0
 
 
 @app.post("/activities/plots/<int:plot_id>/log")
@@ -11453,10 +11518,21 @@ def log_activities(plot_id):
                 problems.append(f"{number_of}: the quantity of product must be a number")
             if not value("product"):
                 problems.append(f"{number_of}: say which product the quantity is of")
+        # A product from inventory, with a quantity, is taken out of stock
+        stock = None
+        item = inventory_item_named(db, biz, value("product")) if value("product") and quantity else None
+        if item and quantity:
+            planned = plan_use(item, quantity, value("product_unit"))
+            if planned[0] is None:
+                problems.append(f"{number_of}: {planned[1]}")
+            elif item_grant(db, item["id"], "transfer") is None:
+                problems.append(f"{number_of}: your account cannot take {item['name']} out of inventory (ask an admin, or leave the quantity empty)")
+            else:
+                stock = {"item_id": item["id"], "how": planned[0], "qty": planned[1], "unit": planned[2], "grant": item_grant(db, item["id"], "transfer")}
         rows.append({
             "workers": list(names.items()) if worker == "all" else [(int(worker), names.get(int(worker), ""))] if worker.isdigit() else [],
             "period": value("period"), "description": value("description")[:300], "tools": value("tools")[:200], "product": value("product")[:120],
-            "qty": quantity, "unit": value("product_unit")[:30], "work_done": value("work_done")[:120],
+            "qty": quantity, "unit": value("product_unit")[:30], "work_done": value("work_done")[:120], "stock": stock,
         })
     if problems:
         flash("Nothing was saved. " + "; ".join(problems) + ".", "error")
@@ -11465,25 +11541,55 @@ def log_activities(plot_id):
         flash("Write at least one activity.", "error")
         return back
     stamp = now().strftime("%Y-%m-%d %H:%M:%S")
-    saved = 0
+    saved, used, invoice_id = 0, [], None
     try:
         for r in rows:
+            line_id = None
+            if r["stock"]:
+                # Taken once for the row, however many workers it is logged for. The item is read again: an earlier row may have used some.
+                st = r["stock"]
+                item = db.one("SELECT " + ITEM_COLUMNS + " FROM products WHERE id=? AND business_id=?", (st["item_id"], biz))
+                packs, delta = take_for_activity(db, biz, item, st["how"], st["qty"])
+                if invoice_id is None:
+                    invoice_id = db.insert(
+                        """INSERT INTO invoices (business_id, invoice_no, kind, customer_name, customer_phone, payment_status, total, amount_paid, balance_due, created_by, created_at)
+                           VALUES (?, ?, 'FARM_USE', ?, '', 'INTERNAL', 0, 0, 0, ?, ?)""",
+                        (biz, next_invoice_no(db, biz), f"{plot['name']} ({plot['department']}), daily activities", g.user["username"], stamp_for_day(day) if day != today_str() else stamp),
+                    )
+                words = use_words(item, st["qty"], st["unit"])
+                line_id = db.insert(
+                    """INSERT INTO invoice_items (invoice_id, business_id, item_code, item_name, department, batch_no, qty, unit_price, line_total, loose_delta)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)""",
+                    (invoice_id, biz, item["item_code"], f"{item['name']} ({words} used: {r['description']})"[:200], plot["department"], item["batch_no"], packs, item["price"], delta),
+                )
+                use_grant(db, st["grant"])
+                left = stock_in_measure(db.one("SELECT " + ITEM_COLUMNS + " FROM products WHERE id=?", (item["id"],)))
+                used.append(f"{words} of {item['name']}" + (f" ({amount_words(left)} {measured(item)['measure']} left)" if left is not None else ""))
             for employee_id, worker_name in r["workers"]:
                 db.execute(
                     """INSERT INTO activities (business_id, plot_id, plot_name, department, work_date, employee_id, worker_name, period, description, tools,
-                                               product, product_qty, product_unit, work_done, recorded_by, recorded_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                               product, product_qty, product_unit, work_done, recorded_by, recorded_at, stock_line_id)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (biz, plot_id, plot["name"], plot["department"], day, employee_id, worker_name, r["period"], r["description"], r["tools"],
-                     r["product"], r["qty"], r["unit"], r["work_done"], g.user["username"], stamp),
+                     r["product"], r["qty"], r["unit"], r["work_done"], g.user["username"], stamp, line_id),
                 )
                 saved += 1
         db.commit()
+    except NotEnoughStock as short:
+        db.rollback()
+        flash(f"{short} Nothing was saved.", "error")
+        return back
+    except StockError:
+        db.rollback()
+        flash("The stock changed while you were working. Nothing was saved; please try again.", "error")
+        return back
     except DB_ERRORS:
         db.rollback()
         flash("The activities could not be saved. Please try again.", "error")
         return back
     flash(f"Saved {len(rows)} activit{'y' if len(rows) == 1 else 'ies'} on {plot['name']} for {datetime.date.fromisoformat(day).strftime('%d %b %Y')}"
-          + (f" ({saved} entries, one for each worker)." if saved != len(rows) else "."), "ok")
+          + (f" ({saved} entries, one for each worker)" if saved != len(rows) else "")
+          + (". Taken out of inventory: " + "; ".join(used) + "." if used else "."), "ok")
     return back
 
 
@@ -11492,15 +11598,30 @@ def log_activities(plot_id):
 def delete_activity(entry_id):
     """Removes one logged activity: the person who logged it, or an admin."""
     db, biz = get_db(), g.user["business_id"]
-    entry = db.one("SELECT id, recorded_by FROM activities WHERE id=? AND business_id=?", (entry_id, biz))
+    entry = db.one("SELECT id, recorded_by, stock_line_id FROM activities WHERE id=? AND business_id=?", (entry_id, biz))
     if entry is None:
         abort(404)
     if g.user["role"] != "admin" and entry["recorded_by"] != g.user["username"]:
         flash("Only the person who logged an activity, or an admin, can remove it.", "error")
     else:
-        db.execute("DELETE FROM activities WHERE id=? AND business_id=?", (entry_id, biz))
-        db.commit()
-        flash("Activity removed.", "ok")
+        note = ""
+        try:
+            db.execute("DELETE FROM activities WHERE id=? AND business_id=?", (entry_id, biz))
+            line = db.one("SELECT id, invoice_id, item_code, item_name, qty, COALESCE(loose_delta, 0) AS loose_delta FROM invoice_items WHERE id=? AND business_id=?",
+                          (entry["stock_line_id"], biz)) if entry["stock_line_id"] else None
+            # The product it used goes back into inventory once no other activity shares it (one logged for everyone on a plot)
+            if line and not db.one("SELECT 1 AS x FROM activities WHERE business_id=? AND stock_line_id=?", (biz, line["id"])):
+                back_in = return_to_stock(db, biz, "products", line)
+                db.execute("DELETE FROM invoice_items WHERE id=? AND business_id=?", (line["id"], biz))
+                if not db.one("SELECT 1 AS x FROM invoice_items WHERE invoice_id=? AND business_id=?", (line["invoice_id"], biz)):
+                    db.execute("DELETE FROM invoices WHERE id=? AND business_id=? AND kind='FARM_USE'", (line["invoice_id"], biz))
+                note = " What it used went back into inventory." if back_in else " The product it used is no longer in inventory, so nothing went back."
+            db.commit()
+        except DB_ERRORS:
+            db.rollback()
+            flash("The activity could not be removed. Please try again.", "error")
+            return activity_back(url_for("activities"))
+        flash("Activity removed." + note, "ok")
     return activity_back(url_for("activities"))
 
 

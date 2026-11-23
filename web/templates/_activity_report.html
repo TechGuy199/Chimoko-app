@@ -19,7 +19,7 @@
                     {% if with_plot %}<td>{{ e.plot_name }}<br><small class="muted">{{ e.department }}</small></td>{% endif %}
                     <td>{{ e.description }}</td>
                     <td>{{ e.tools or '—' }}</td>
-                    <td>{% if e.product %}{{ e.product }}{% if e.product_qty is not none %}<br><small class="muted">{{ '%g'|format(e.product_qty) }} {{ e.product_unit }}</small>{% endif %}{% else %}—{% endif %}</td>
+                    <td>{% if e.product %}{{ e.product }}{% if e.product_qty is not none %}<br><small class="muted">{{ '%g'|format(e.product_qty) }} {{ e.product_unit }}</small>{% endif %}{% if e.stock_line_id %}<br><span class="chip info">From stock</span>{% endif %}{% else %}—{% endif %}</td>
                     <td>{{ e.work_done or '—' }}</td>
                     <td>{{ e.recorded_by }}<br><small class="muted">{{ e.recorded_at[11:16] }}</small></td>
                     <td class="num no-print">

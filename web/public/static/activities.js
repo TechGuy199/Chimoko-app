@@ -33,12 +33,32 @@
         renumber();
     });
 
-    // Picking a product from inventory fills in the unit it is counted in, unless one was typed
+    // Picking a product from inventory fills in what it is measured in (kg, litres) or counted in (bag), and says it comes out of stock
+    function matchOf(row) {
+        const typed = row.querySelector("[data-product]").value.trim().toLowerCase();
+        return Array.from(document.querySelectorAll("#activity-items option")).find(function (o) { return o.value.toLowerCase() === typed; });
+    }
+    function paintStock(row) {
+        const note = row.querySelector("[data-stock-note]");
+        if (!note) return;
+        const match = matchOf(row);
+        const qty = parseFloat(row.querySelector('[name="product_qty"]').value);
+        note.hidden = !match;
+        if (!match) return;
+        const unit = row.querySelector("[data-unit]").value.trim() || match.dataset.unit || match.dataset.pack;
+        note.textContent = (qty > 0 ? qty.toLocaleString() + " " + unit + " will come out of inventory. " : "From inventory: give the quantity used and it comes out of stock. ") +
+            match.dataset.stock + "." + (match.dataset.measure ? " Give it in " + match.dataset.measure + ", or in whole " + match.dataset.pack + "s." : "");
+    }
     rows.addEventListener("change", function (e) {
         if (!e.target.matches("[data-product]")) return;
-        const unit = e.target.closest(".activity-row").querySelector("[data-unit]");
-        const match = Array.from(document.querySelectorAll("#activity-items option")).find(function (o) { return o.value === e.target.value; });
+        const row = e.target.closest(".activity-row");
+        const unit = row.querySelector("[data-unit]");
+        const match = matchOf(row);
         if (match && match.dataset.unit && !unit.value) unit.value = match.dataset.unit;
+        paintStock(row);
+    });
+    rows.addEventListener("input", function (e) {
+        if (e.target.matches('[data-product], [name="product_qty"], [data-unit]')) paintStock(e.target.closest(".activity-row"));
     });
 
     renumber();

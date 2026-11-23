@@ -631,6 +631,9 @@ def init_schema():
         add_column(db, "planting_trays", "tray_type_id", "INTEGER")
         add_column(db, "planting_trays", "tray_type", "TEXT")
         add_column(db, "planting_trays", "type_rate", "DOUBLE PRECISION")
+        # An activity whose product came out of inventory: the farm-use invoice line that took it (several activities share one when a
+        # product was logged for everyone on a plot). Removing the last activity on a line puts its stock back.
+        add_column(db, "activities", "stock_line_id", "INTEGER")
         # A payslip paid by trays keeps how many and at what rate, as it was worked out
         add_column(db, "payroll", "trays", "DOUBLE PRECISION")
         add_column(db, "payroll", "tray_rate", "DOUBLE PRECISION")
