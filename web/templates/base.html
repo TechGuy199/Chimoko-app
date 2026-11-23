@@ -49,7 +49,7 @@
     ('Stock', [
         ('Inventory', 'inventory', ['inventory', 'item', 'inventory_new', 'categories_page'], false, 'M4 7.5 12 3l8 4.5v9L12 21l-8-4.5v-9Zm0 0 8 4.5m0 0 8-4.5M12 12v9'),
         ('Inventory Analysis', 'inventory_analysis', ['inventory_analysis'], false, 'M12 3v9h9a9 9 0 1 1-9-9Zm3 .5A9 9 0 0 1 20.5 9H15V3.5Z'),
-        ('Planting Records', 'planting_list', ['planting_list', 'planting_new', 'planting_detail', 'up_next'], false, 'M12 21v-9m0 0c0-4-3-6-7-6 0 4 3 6 7 6Zm0 3c0-3 2.5-5 7-5 0 3.5-3 5-7 5Z'),
+        ('Planting Records', 'planting_list', ['planting_list', 'planting_new', 'planting_detail', 'up_next', 'planter_day'], false, 'M12 21v-9m0 0c0-4-3-6-7-6 0 4 3 6 7 6Zm0 3c0-3 2.5-5 7-5 0 3.5-3 5-7 5Z'),
         ('Procurements', 'procurements', ['procurements', 'procurement', 'procurement_new'], false, 'M9 4h6v3H9zM7 5.5H5V21h14V5.5h-2M9 12h6m-6 4h4'),
         ('Suppliers', 'suppliers', ['suppliers', 'supplier_statement', 'supplier_duplicates'], true, 'M4 9l1.5-5h13L20 9M4 9v11h16V9M4 9h16M9 20v-6h6v6'),
         ('Import', 'import_data', ['import_data'], true, 'M12 16V4m0 0-4 4m4-4 4 4M4 16v4h16v-4'),
@@ -151,11 +151,12 @@
 </header>
 
 {# Phones only: the pages used most, one tap away at the bottom of the screen. More opens the full menu as a sheet. #}
+{# Planting sits here rather than Reports: on a phone the greenhouse is logged far more often than reports are read #}
 {% set tabs = [
     ('Sell', 'pos', ['pos'], 'M3 4h2l2.4 10.2a1 1 0 0 0 1 .8h8.9a1 1 0 0 0 1-.8L20 8H6.2M9 20a1 1 0 1 0 0-2 1 1 0 0 0 0 2Zm9 0a1 1 0 1 0 0-2 1 1 0 0 0 0 2Z'),
     ('Sales', 'history', ['history', 'invoice', 'item_sales'], 'M7 3h10a1 1 0 0 1 1 1v17l-3-2-3 2-3-2-3 2V4a1 1 0 0 1 1-1Zm2 5h6m-6 4h6m-6 4h3'),
     ('Stock', 'inventory', ['inventory', 'item', 'inventory_new', 'categories_page'], 'M4 7.5 12 3l8 4.5v9L12 21l-8-4.5v-9Zm0 0 8 4.5m0 0 8-4.5M12 12v9'),
-    ('Reports', 'reports', ['reports', 'report_department'], 'M4 20h16M7 16v-5m5 5V7m5 9v-3'),
+    ('Planting', 'planting_list', ['planting_list', 'planting_new', 'planting_detail', 'up_next', 'planter_day'], 'M12 21v-9m0 0c0-4-3-6-7-6 0 4 3 6 7 6Zm0 3c0-3 2.5-5 7-5 0 3.5-3 5-7 5Z'),
 ] %}
 <nav class="tabbar no-print" aria-label="Main">
     {% for label, endpoint, active, icon in tabs %}
@@ -251,6 +252,21 @@
 <script src="{{ asset('offline-store.js') }}" data-user="{{ user.id }}" data-snapshot="{{ url_for('offline_snapshot') }}"></script>
 {% endif %}
 <div id="page-scripts">{% block scripts %}{% endblock %}</div>
+<script>
+    // On a phone, a section marked data-fold-mobile (a long form or the filters) starts folded, so what is used most comes first.
+    // It stays open when it holds something to see (data-fold-mobile="open": filters in force, say). Runs on each in-place page change.
+    (function () {
+        function fold() {
+            if (!window.matchMedia("(max-width: 760px)").matches) return;
+            document.querySelectorAll("details[data-fold-mobile]:not([data-folded])").forEach(function (box) {
+                box.dataset.folded = "1";
+                if (box.dataset.foldMobile !== "open") box.open = false;
+            });
+        }
+        fold();
+        document.addEventListener("nav:swapped", fold);
+    })();
+</script>
 <script>
     // Lets the browser install this as an app (Windows, Android, desktop Chrome/Edge). Safe to skip silently
     // where it is not supported (older browsers, some iOS versions): the site still works normally either way.

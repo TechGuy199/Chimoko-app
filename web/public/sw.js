@@ -15,8 +15,9 @@
 // v3: the app's versioned CSS and JS come from the cache with no trip to the network, one version of each kept
 // v4: pages kept for offline viewing, and the offline screens
 // v5: the offline screens' files kept under their bare path, and refreshed while the app is online
+// v6: the icons redrawn with more room around them, under the same addresses; the offline screens can log plantings
 // (Push notifications, below, change no caching.)
-const CACHE_NAME = "ms-pos-shell-v5";
+const CACHE_NAME = "ms-pos-shell-v6";
 const PAGES = "ms-pos-pages-v1";
 const OFFLINE_URL = "/static/offline.html";
 const PRECACHE = [OFFLINE_URL, "/static/offline-app.js", "/static/offline-store.js", "/static/styles.css", "/static/mobile.css",

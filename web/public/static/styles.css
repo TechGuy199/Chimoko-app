@@ -1687,3 +1687,11 @@ summary.alerts-lit .badge { background: #fff; color: #111; }
 .tray-with-kind select { margin: 0; }
 .kind-table input { margin: 0; }
 .kind-table th small { display: block; font-weight: 400; }
+
+/* A section that can be folded (the filters, a long form): its heading is the summary */
+details.fold > summary { display: flex; align-items: center; gap: 8px; min-height: 40px; cursor: pointer; list-style: none; color: var(--text-muted); font-weight: 600; }
+details.fold > summary::-webkit-details-marker { display: none; }
+details.fold > summary::after { content: ""; width: 8px; height: 8px; margin-left: auto; border: solid currentColor; border-width: 0 2px 2px 0; transform: rotate(45deg); transition: transform 0.18s var(--ease); }
+details.fold[open] > summary::after { transform: rotate(-135deg); }
+details.fold > summary h2 { margin: 0; }
+details.fold.no-print > summary { padding: 0 4px; }

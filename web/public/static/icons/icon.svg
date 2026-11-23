@@ -1,9 +1,11 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
-  <!-- MS-POS: a tomato with its seedling. The PNG icons are drawn from these same shapes. -->
-  <rect width="512" height="512" rx="112" fill="#12372a"/>
-  <ellipse cx="256" cy="324" rx="122" ry="104" fill="#e8484d"/>
-  <line x1="256" y1="214" x2="256" y2="148" stroke="#7fd66b" stroke-width="24" stroke-linecap="round"/>
-  <polygon points="256,194 263.6,217.5 288.3,217.5 268.4,232 276,255.5 256,241 236,255.5 243.6,232 223.7,217.5 248.4,217.5" fill="#4fae5a" stroke="#4fae5a" stroke-width="6" stroke-linejoin="round"/>
-  <ellipse cx="200" cy="120" rx="62" ry="28" fill="#7fd66b" transform="rotate(30 200 120)"/>
-  <ellipse cx="312" cy="120" rx="62" ry="28" fill="#7fd66b" transform="rotate(-30 312 120)"/>
-</svg>
+  <!-- MS-POS: a tomato with its seedling, with room around it. The PNG icons are drawn from this same design (maskable and
+       iPhone ones full-bleed, the artwork inside the area those shapes keep). -->
+  <defs><linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#17463a"/><stop offset="1" stop-color="#0f2f24"/></linearGradient></defs><rect width="512" height="512" rx="124" fill="url(#bg)"/><g transform="translate(256 256) scale(0.76) translate(-256 -260)">
+    <ellipse cx="256" cy="324" rx="122" ry="104" fill="#e8484d"/>
+    <ellipse cx="214" cy="292" rx="34" ry="22" fill="#ffffff" opacity="0.18" transform="rotate(-28 214 292)"/>
+    <line x1="256" y1="214" x2="256" y2="148" stroke="#7fd66b" stroke-width="24" stroke-linecap="round"/>
+    <polygon points="256,194 263.6,217.5 288.3,217.5 268.4,232 276,255.5 256,241 236,255.5 243.6,232 223.7,217.5 248.4,217.5" fill="#4fae5a" stroke="#4fae5a" stroke-width="6" stroke-linejoin="round"/>
+    <ellipse cx="200" cy="120" rx="62" ry="28" fill="#7fd66b" transform="rotate(30 200 120)"/>
+    <ellipse cx="312" cy="120" rx="62" ry="28" fill="#7fd66b" transform="rotate(-30 312 120)"/>
+  </g></svg>

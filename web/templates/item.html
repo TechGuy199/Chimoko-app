@@ -55,8 +55,8 @@
 <p class="muted">Seedlings on sale from this seed: <strong>{{ listing.quantity }}</strong> as &ldquo;{{ listing.name }}&rdquo; at {{ listing.price|money }} each.</p>
 {% endif %}
 
-<div class="split">
-    <section class="card grow">
+<div class="split item-split">
+    <section class="card grow item-details">
         <h2>Details</h2>
         {% if access.procure.state == 'approved' %}
         <p class="flash ok">An admin approved one edit of this item. Save your changes before {{ access.procure.until }}.</p>
@@ -85,7 +85,7 @@
     </section>
 
     <div class="side">
-        <section class="card">
+        <section class="card item-correct">
             <h2>Correct the Quantity</h2>
             {% if can_edit %}
             {% if access.procure.state == 'approved' %}<p class="flash ok">An admin approved one edit of this item. Save before {{ access.procure.until }}.</p>{% endif %}
@@ -96,7 +96,7 @@
             {% endif %}
         </section>
 
-        <section class="card">
+        <section class="card item-use">
             <h2>Transfer / Use</h2>
             {% if access.transfer.state in ('own', 'approved') %}
             {% if access.transfer.state == 'approved' %}<p class="flash ok">An admin approved one transfer. Use it before {{ access.transfer.until }}.</p>{% endif %}
@@ -154,7 +154,7 @@
         </section>
 
         {% if seed %}
-        <section class="card">
+        <section class="card item-plant">
             <h2>Plant in greenhouse</h2>
             <p class="muted">Push seeds into a planting record. Enter how many seeds are planted and the packs they use are taken out of stock here.</p>
             <a class="btn success wide" href="{{ url_for('planting_new', item=item.id) }}">Record a planting</a>
@@ -169,7 +169,7 @@
         </section>
         {% endif %}
 
-        <section class="card">
+        <section class="card item-delete">
             <h2>Delete</h2>
             {% if access.delete.state in ('own', 'approved') %}
             {% if access.delete.state == 'approved' %}<p class="flash ok">An admin approved deleting this item. Use it before {{ access.delete.until }}.</p>{% endif %}

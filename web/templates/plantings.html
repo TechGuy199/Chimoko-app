@@ -33,6 +33,9 @@
     {% endif %}
 </section>
 
+
+<details class="fold no-print" open data-fold-mobile="{{ 'open' if f.filtered }}">
+<summary>Search &amp; filter batches{% if f.filtered %} <span class="chip info">filtered</span>{% endif %}</summary>
 <form method="get" class="toolbar planting-filters no-print" id="planting-filters">
     {% if show != 'all' %}<input type="hidden" name="show" value="{{ show }}">{% endif %}
     <input type="search" name="q" id="planting-q" value="{{ f.q }}" placeholder="Search batch, seed, batch number or notes" aria-label="Search planting records" autocomplete="off">
@@ -49,6 +52,7 @@
     <button class="btn primary">Filter</button>
     {% if f.filtered %}<a class="btn" href="{{ url_for('planting_list', **({'show': show} if show != 'all' else {})) }}">Clear</a>{% endif %}
 </form>
+</details>
 
 <div class="toolbar">
     <a class="chip {{ 'active' if show == 'all' }}" href="{{ tab('all') }}">All <small>{{ counts.all }}</small></a>

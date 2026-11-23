@@ -235,3 +235,31 @@ dialog.assistant { z-index: 60; }
 .assistant-mini-close, .assistant-menu button { min-height: 44px; min-width: 44px; }
 .offline-pill { bottom: calc(var(--tabbar-height) + var(--safe-bottom) + 14px); left: 12px; }
 .offline-tabs button { min-height: 44px; }
+
+/* ---------- Page order on a phone: what is done most comes first ---------- */
+/* An item: use or plant it first, then its details, then the occasional corrections */
+.item-split { display: flex; flex-direction: column; align-items: stretch; }
+.item-split > .side { display: contents; }
+.item-use { order: 1; }
+.item-plant { order: 2; }
+.item-details { order: 3; }
+.item-correct { order: 4; }
+.item-delete { order: 5; }
+
+/* A folded section takes one line until it is opened */
+details.fold:not([open]) { margin-bottom: 4px; }
+details.fold > summary { min-height: 44px; }
+.card > details.fold > summary h2 { font-size: 12px; }
+
+/* Several chips in a table cell sit on their own lines instead of running off the screen */
+td .chip { white-space: nowrap; }
+td .chip + .chip { margin-top: 4px; }
+td:has(.chip + .chip) { white-space: normal; }
+
+/* The planter tiles: two to a row, easy to hit */
+.planter-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.planter-tile { min-height: 92px; }
+
+/* The head buttons wrap as one tidy row of smaller pills */
+.page-head .head-actions { gap: 8px; }
+.page-head .head-actions > .btn { min-height: 38px; padding: 8px 14px; font-size: 14px; }

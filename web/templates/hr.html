@@ -89,8 +89,10 @@
     </section>
 
     <section class="card side">
-        <h2>Register Employee</h2>
-        {% include "_employee_form.html" %}
+        <details class="fold" open data-fold-mobile>
+            <summary><h2>Register Employee</h2></summary>
+            {% include "_employee_form.html" %}
+        </details>
     </section>
 </div>
 
