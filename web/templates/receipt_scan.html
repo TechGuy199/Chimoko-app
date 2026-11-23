@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block title %}Scan a receipt — {% endblock %}
+{% block content %}
+<div class="page-head">
+    <div>
+        <a class="back" href="{{ url_for('procurements') }}">&larr; Procurements</a>
+        <h1>Scan a receipt</h1>
+        <p class="muted">Photograph a supplier's receipt, invoice or delivery note, check its lines, and log them as purchases in one go. The receipt is kept with them.</p>
+    </div>
+</div>
+
+<section class="card block receipt-scan" id="receipt-scan" data-url="{{ url_for('receipt_upload') }}" data-csrf="{{ csrf_token() }}"
+         data-max="{{ (max_mb * 1000000)|int }}">
+    {# Step 1: the receipt. On a phone "Take a photo" opens the camera; "Choose" offers the photos (and on a computer, files) #}
+    <div class="receipt-pick" id="receipt-pick">
+        <label class="btn primary wide receipt-camera">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h3l2-3h6l2 3h3v11H4zM12 17a4 4 0 1 0 0-8 4 4 0 0 0 0 8Z"/></svg>
+            Take a photo
+            <input type="file" accept="image/*" capture="environment" id="receipt-camera" hidden>
+        </label>
+        <label class="btn wide">
+            Choose a photo or PDF
+            <input type="file" accept="image/*,application/pdf,.pdf,.heic,.heif" id="receipt-file" hidden>
+        </label>
+        <p class="muted hint">Lay the receipt flat in good light, with all of it in the picture. A photo or a PDF up to {{ max_mb }} MB.</p>
+    </div>
+
+    {# Step 2: how its lines get onto the page #}
+    <div class="receipt-chosen" id="receipt-chosen" hidden>
+        <div class="receipt-preview" id="receipt-preview"></div>
+        <p class="flash error" id="receipt-error" hidden></p>
+        <p class="seedling-summary" id="receipt-status" aria-live="polite" hidden></p>
+        <div class="receipt-ways" id="receipt-ways">
+            {% if gemini %}
+            <button type="button" class="btn success wide" data-read="gemini">Read it with Gemini</button>
+            <p class="muted hint gemini-note">
+                <strong>Uses AI:</strong> the photo is sent to Google's Gemini, which copies out the supplier, date and lines. It counts as one
+                assistant question. You check and correct everything before anything is saved.
+            </p>
+            <button type="button" class="btn wide" data-read="hand">Type it in myself</button>
+            {% else %}
+            <p class="flash notice">{{ why_not }}</p>
+            <button type="button" class="btn success wide" data-read="hand">Type it in myself</button>
+            <p class="muted hint">The receipt stays on screen beside the form while you type its lines.</p>
+            {% endif %}
+            <button type="button" class="btn ghost wide" id="receipt-again">Use a different photo</button>
+        </div>
+    </div>
+</section>
+{% endblock %}
+{% block scripts %}<script src="{{ asset('receipt.js') }}"></script>{% endblock %}

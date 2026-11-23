@@ -15,6 +15,7 @@
             <dt>Purchase date</dt><dd>{{ p.purchase_date or '—' }}</dd>
             <dt>Supplier</dt><dd>{{ p.supplier_name or '—' }}</dd>
             <dt>Supplier invoice no</dt><dd>{{ p.invoice_no or '—' }}</dd>
+            {% if p.receipt_id %}<dt>Receipt</dt><dd><a href="{{ url_for('receipt_image', scan_id=p.receipt_id) }}" target="_blank" rel="noopener">See the scanned receipt</a></dd>{% endif %}
             <dt>Quantity</dt><dd>{{ p.quantity }} at {{ p.unit_cost|money }}</dd>
             <dt>Total cost</dt><dd>{{ p.total_cost|money }}</dd>
             <dt>Amount paid</dt><dd>{{ p.amount_paid|money }}</dd>

@@ -40,7 +40,7 @@ PARAM_TABLES = {
     "pos_id": "pos_products", "po_id": "preorders", "request_id": "permission_requests", "notification_id": "notifications",
     "payment_id": "supplier_payments", "category_id": "categories", "dept_id": "departments", "plot_id": "plots",
     "op_id": "users", "admin_id": "users", "action_id": "assistant_actions", "memory_id": "assistant_memory", "pref_id": "stock_preferences",
-    "cr_id": "customer_requests", "absence_id": "employee_absences",
+    "cr_id": "customer_requests", "absence_id": "employee_absences", "scan_id": "receipt_scans",
 }
 # "entry_id" means a different table on different pages
 ENTRY_TABLES = {"assign_account_entry": "cashbook", "delete_account_entry": "cashbook", "delete_activity": "activities"}
@@ -195,6 +195,9 @@ class BusinessSeparation(unittest.TestCase):
         # What Alpha has said to the assistant, and a change it prepared and left waiting: Beta must not read or confirm either
         alpha_user = x.one("SELECT id FROM users WHERE business_id=? AND username='alphaowner'", (biz,))["id"]
         x.insert("INSERT INTO assistant_messages (business_id, user_id, role, content, created_at) VALUES (?, ?, 'user', 'Alpha secret note', ?)", (biz, alpha_user, stamp))
+        x.insert("""INSERT INTO receipt_scans (business_id, data, mime, read, read_by, status, created_by, created_at)
+                    VALUES (?, ?, 'image/png', ?, 'gemini', 'open', 'alphaowner', ?)""",
+                 (biz, "iVBORw0KGgo=", json.dumps({"supplier": "Alpha secret note", "lines": [{"name": "Alpha secret note", "qty": 1, "cost": 5}]}), stamp))
         x.insert("""INSERT INTO assistant_actions (business_id, user_id, kind, request, summary, status, created_at, expires_at)
                     VALUES (?, ?, 'handover', ?, '{"title": "Alpha secret note", "rows": [["Alpha secret note", "x"]]}', 'pending', ?, '2999-01-01 00:00:00')""",
                  (biz, alpha_user, '{"path": "/invoices/1/delivered", "form": {}, "perm": "sell"}', stamp))

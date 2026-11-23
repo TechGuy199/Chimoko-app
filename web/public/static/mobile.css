@@ -263,3 +263,11 @@ td:has(.chip + .chip) { white-space: normal; }
 /* The head buttons wrap as one tidy row of smaller pills */
 .page-head .head-actions { gap: 8px; }
 .page-head .head-actions > .btn { min-height: 38px; padding: 8px 14px; font-size: 14px; }
+
+/* Scan a receipt on a phone: the photo first and smaller, then the lines; the camera button big and easy */
+.receipt-layout { grid-template-columns: 1fr; gap: 12px; }
+.receipt-photo { position: static; }
+.receipt-photo img { max-height: 42vh; }
+.receipt-photo iframe { height: 50vh; }
+.receipt-scan { max-width: none; }
+.receipt-camera { min-height: 72px; }

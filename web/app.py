@@ -2779,6 +2779,7 @@ def record_purchase(db, biz, p):
             paid_now, 1 if inventory else 0, supplier_id, sale_qty if inventory and (sale_qty or purpose) else None,
         ),
     )
+    g.last_procurement_id = procurement_id   # a scanned receipt links the purchases it made to itself
     if supplier_id and paid_now > 0.005:
         # What was paid when the purchase was logged is a payment to the supplier too, with its method and reference
         add_supplier_payment(
@@ -2805,6 +2806,346 @@ def record_purchase(db, biz, p):
             )
     requests_arrived(db, biz, existing["name"] if existing else p["name"], p["item_code"] if inventory else "", f"{p['quantity']:,} bought on {p['purchase_date']}")
     return existing["name"] if existing else None
+
+# --- Scan a receipt ---
+# A supplier's receipt is photographed (or a photo or PDF of it chosen) and kept. It is read by Gemini, if the person chooses that and the
+# assistant is on, or typed in by hand while looking at it. Either way the review page shows the receipt beside its lines, each matched to
+# an inventory item, a new item or an expense, and nothing is saved until Save: then every line is logged as a purchase, all or none,
+# through the same purchase logging as the form, and each purchase keeps a link to the receipt.
+SCAN_KEEP_DAYS = 7   # a receipt scanned but never saved is cleared after this
+MAX_SCAN_LINES = 30
+
+
+def receipt_gemini_state():
+    """Whether Gemini can read a receipt for this person: (True, "") or (False, why not, in words for the page)."""
+    if not assistant.enabled_for(g.user):
+        return False, "Reading receipts automatically uses the assistant (Google's Gemini), which is switched off for this business. An admin can switch it on in Settings."
+    if not assistant.configured():
+        return False, "Reading receipts automatically needs a Gemini key on the server (GEMINI_API_KEY). Until an admin adds it, type the lines in."
+    return True, ""
+
+
+def get_scan(db, scan_id):
+    scan = db.one("SELECT id, mime, read, read_by, status, created_by, created_at FROM receipt_scans WHERE id=? AND business_id=?", (scan_id, g.user["business_id"]))
+    if scan is None:
+        abort(404)
+    return scan
+
+
+def match_line(items, name, code):
+    """Which inventory item a line read from a receipt is: (item or None, how sure: 'code', 'name', 'close' or '')."""
+    by_code = {norm(i["item_code"]): i for i in items}
+    if code and norm(code) in by_code:
+        return by_code[norm(code)], "code"
+    named = [i for i in items if norm(i["name"]) == norm(name)]
+    if named:
+        return named[0], "name"
+    if name:
+        close = difflib.get_close_matches(norm(name), [norm(i["name"]) for i in items], n=1, cutoff=0.75)
+        if close:
+            return next(i for i in items if norm(i["name"]) == close[0]), "close"
+    return None, ""
+
+
+def tidy_reading(found, items):
+    """What Gemini read, made safe to show: every field the expected type, numbers that are numbers, lines matched to inventory."""
+    def number(value):
+        try:
+            out = float(str(value).replace(",", ""))
+        except (TypeError, ValueError):
+            return None
+        return round(out, 4) if math.isfinite(out) and out >= 0 else None
+
+    def words(value, size):
+        return " ".join(str(value or "").split())[:size]
+
+    lines = []
+    for raw in (found.get("lines") or [])[:MAX_SCAN_LINES]:
+        if not isinstance(raw, dict):
+            continue
+        name = words(raw.get("name"), 100)
+        qty, cost, total = number(raw.get("quantity")), number(raw.get("unit_cost")), number(raw.get("line_total"))
+        if cost is None and total is not None and qty:
+            cost = round(total / qty, 2)   # only the line's total was printed
+        if qty is not None and qty != int(qty):
+            qty = None   # purchases are whole quantities: a fraction is left for the person to give
+        item, sure = match_line(items, name, words(raw.get("match"), 40))
+        if name or qty or cost:
+            lines.append({"name": name, "qty": int(qty) if qty else "", "cost": cost if cost is not None else "", "item_id": item["id"] if item else "",
+                          "sure": sure, "printed_total": total})
+    day = day_or_none(str(found.get("date") or "")) if found.get("date") else None
+    return {
+        "readable": found.get("readable") is not False, "problem": words(found.get("problem"), 200),
+        "supplier": words(found.get("supplier"), 100), "supplier_phone": words(found.get("supplier_phone"), 40), "receipt_no": words(found.get("receipt_no"), 40),
+        "date": day if day and day <= today_str() else "", "payment": found.get("payment") if found.get("payment") in PAYMENT_STATUSES else "",
+        "amount_paid": number(found.get("amount_paid")), "total": number(found.get("total")), "lines": lines,
+    }
+
+
+@app.get("/procurements/receipt")
+@need("procure")
+def receipt_scan_page():
+    ready, why = receipt_gemini_state()
+    return render_template("receipt_scan.html", gemini=ready, why_not=why, max_mb=round(assistant.MAX_ATTACHMENT_BYTES / 1_000_000, 1))
+
+
+@app.post("/procurements/receipt")
+@need("procure")
+def receipt_upload():
+    """Keeps the receipt sent, reads it with Gemini if asked (and possible), and opens the review page. Answers JSON for the page's script:
+    {ok, url, note} or {ok: false, error}."""
+    db, biz = get_db(), g.user["business_id"]
+    upload = request.files.get("receipt")
+    data = upload.read() if upload else b""
+    if not data:
+        return jsonify(ok=False, error="Take a photo of the receipt, or choose a photo or PDF of it."), 400
+    if len(data) > assistant.MAX_ATTACHMENT_BYTES:
+        return jsonify(ok=False, error="That file is too big. Take the photo again, or choose a PDF under 2 MB."), 413
+    kind = assistant.attachment_kind(data)
+    if kind is None:
+        return jsonify(ok=False, error="Only a photo (JPEG, PNG, WebP or HEIC) or a PDF of the receipt can be used."), 415
+    stamp = now().strftime("%Y-%m-%d %H:%M:%S")
+    # Receipts scanned but never saved are cleared after a week, so photos do not pile up
+    db.execute("DELETE FROM receipt_scans WHERE business_id=? AND status='open' AND created_at < ?", (biz, add_days(today_str(), -SCAN_KEEP_DAYS)))
+    scan_id = db.insert("INSERT INTO receipt_scans (business_id, data, mime, read, read_by, status, created_by, created_at) VALUES (?, ?, ?, NULL, 'hand', 'open', ?, ?)",
+                        (biz, base64.b64encode(data).decode("ascii"), kind[1], g.user["username"], stamp))
+    db.commit()
+    url, note = url_for("receipt_review", scan_id=scan_id), ""
+    if request.form.get("read") == "gemini":
+        ready, why = receipt_gemini_state()
+        if not ready:
+            note = why
+        else:
+            items = db.all("SELECT id, item_code, name FROM products WHERE business_id=? ORDER BY name", (biz,))
+            try:
+                found = assistant.read_receipt(db, g.user, data, [(i["item_code"], i["name"]) for i in items])
+                db.execute("UPDATE receipt_scans SET read=?, read_by='gemini' WHERE id=? AND business_id=?", (json.dumps(tidy_reading(found, items)), scan_id, biz))
+                db.commit()
+            except assistant.Refused as e:
+                db.rollback()
+                note = e.message
+    if note:
+        session["receipt_note"] = note
+    return jsonify(ok=True, url=url, note=note)
+
+
+@app.get("/procurements/receipt/<int:scan_id>/image")
+@need("procure")
+def receipt_image(scan_id):
+    db = get_db()
+    get_scan(db, scan_id)
+    row = db.one("SELECT data, mime FROM receipt_scans WHERE id=? AND business_id=?", (scan_id, g.user["business_id"]))
+    return Response(base64.b64decode(row["data"]), mimetype=row["mime"], headers={"Cache-Control": "private, max-age=86400", "X-Content-Type-Options": "nosniff"})
+
+
+def receipt_lines_from_form():
+    """The lines on the review form, as typed: [{name, item, qty, cost, category, department, unit, price, seeds, size, measure, purpose, sale_qty}]."""
+    keys = ("line_name", "line_item", "line_qty", "line_cost", "line_category", "line_department", "line_unit", "line_price", "line_seeds",
+            "line_size", "line_measure", "line_purpose", "line_sale_qty")
+    form = {key: request.form.getlist(key) for key in keys}
+    out = []
+    for i in range(len(form["line_name"])):
+        row = {key[5:]: " ".join((form[key][i] if i < len(form[key]) else "").split()) for key in keys}
+        if any(row[k] for k in ("name", "qty", "cost")):
+            out.append(row)
+    return out
+
+
+@app.get("/procurements/receipt/<int:scan_id>")
+@need("procure")
+def receipt_review(scan_id):
+    db, biz = get_db(), g.user["business_id"]
+    scan = get_scan(db, scan_id)
+    if scan["status"] == "saved":
+        flash("This receipt's purchases are saved already. They are listed under Procurements.", "ok")
+        return redirect(url_for("procurements"))
+    reading = json.loads(scan["read"]) if scan["read"] else None
+    note = session.pop("receipt_note", "")
+    items = db.all("SELECT " + ITEM_COLUMNS + " FROM products WHERE business_id=? ORDER BY name", (biz,))
+    lines = (reading or {}).get("lines") or [{"name": "", "qty": "", "cost": "", "item_id": "", "sure": ""}]
+    return render_template(
+        "receipt_review.html", scan=scan, reading=reading, note=note, lines=lines, items=items, today=today_str(), methods=PAYMENT_METHODS,
+        categories=[r["name"] for r in category_rows(db, biz)], departments=department_names(db, biz), units=unit_choices(db, biz), measures=MEASURES,
+        known_suppliers=db.all("SELECT name, phone FROM suppliers WHERE business_id=? ORDER BY name LIMIT 1000", (biz,)), can_list=can("transfer"),
+        item_info={str(i["id"]): {"name": i["name"], "code": i["item_code"], "seed": is_seed_category(i["category"]), "purpose": i["purpose"] or "farm",
+                                  "unit": i["unit"] or "", "cost": i["unit_cost"]} for i in items},
+    )
+
+
+@app.post("/procurements/receipt/<int:scan_id>")
+@need("procure")
+def receipt_save(scan_id):
+    """Logs every line of the reviewed receipt as a purchase, all or none, and links each purchase to the receipt."""
+    db, biz = get_db(), g.user["business_id"]
+    scan = get_scan(db, scan_id)
+    back = redirect(url_for("receipt_review", scan_id=scan_id))
+    if scan["status"] == "saved":
+        flash("This receipt's purchases are saved already.", "ok")
+        return redirect(url_for("procurements"))
+    lines = receipt_lines_from_form()
+    problems = []
+    if not lines:
+        problems.append("Add at least one line: what was bought, how many and the price of one")
+    if len(lines) > MAX_SCAN_LINES:
+        problems.append(f"A receipt can have at most {MAX_SCAN_LINES} lines")
+    day = day_or_none(text("purchase_date")) if text("purchase_date") else today_str()
+    if day is None or day > today_str():
+        problems.append("The receipt's date must be a date, today or earlier")
+    supplier, phone, receipt_no = clean_name(text("supplier_name"), 100), text("supplier_phone")[:40], text("invoice_no")[:40]
+    items = {str(i["id"]): i for i in db.all("SELECT " + ITEM_COLUMNS + " FROM products WHERE business_id=?", (biz,))}
+    departments = department_names(db, biz)
+    planned, taken_codes = [], set()
+    for n, row in enumerate(lines, 1):
+        where = f"Line {n}" + (f" ({row['name']})" if row["name"] else "")
+        try:
+            qty = int(parse_amount(row["qty"])) if row["qty"] else 0
+            cost = round(parse_amount(row["cost"]), 4) if row["cost"] else None
+            if qty != (parse_amount(row["qty"]) if row["qty"] else 0):
+                raise ValueError
+        except ValueError:
+            problems.append(f"{where}: the quantity must be a whole number and the price a number")
+            continue
+        if qty < 1 or cost is None or cost < 0:
+            problems.append(f"{where}: give how many were bought (1 or more) and the price of one")
+            continue
+        p = {"quantity": qty, "unit_cost": cost, "supplier_name": supplier, "supplier_phone": phone, "invoice_no": receipt_no, "purchase_date": day,
+             "batch_no": "", "date_planted": "", "expiry_date": "", "price": None, "sale_qty": 0, "purpose": None}
+        choice = row["item"]
+        if choice == "expense":
+            if not row["name"]:
+                problems.append(f"{where}: an expense still needs a name, such as Diesel")
+                continue
+            p.update(in_inventory=False, item_code="", name=row["name"][:100], category=resolve_category(db, biz, row["category"] or "General"),
+                     department=row["department"] if row["department"] in departments else "General", unit="")
+            planned.append(p)
+            continue
+        try:
+            price = round(parse_amount(row["price"]), 2) if row["price"] else None
+            if price is not None and price < 0:
+                raise ValueError
+        except ValueError:
+            problems.append(f"{where}: the selling price must be a number, 0 or more")
+            continue
+        if choice in items:
+            item = items[choice]
+            seed = is_seed_category(item["category"])
+            p.update(in_inventory=True, item_code=item["item_code"], name=item["name"], category=item["category"], department=item["department"],
+                     unit=item["unit"] or "", seeds_per_pack=item["seeds_per_pack"], pack_size=None, pack_measure=None)
+        elif choice == "new":
+            name = clean_name(row["name"], 100)
+            if not name:
+                problems.append(f"{where}: give the new item a name")
+                continue
+            category = resolve_category(db, biz, row["category"]) if row["category"] else None
+            if not category:
+                problems.append(f"{where}: choose the new item's category")
+                continue
+            seed = is_seed_category(category)
+            code = seed_code_for(name)[:16]
+            base, k = code, 2
+            while code in taken_codes or db.one("SELECT 1 AS x FROM products WHERE business_id=? AND item_code=?", (biz, code)) \
+                    or db.one("SELECT 1 AS x FROM pos_products WHERE business_id=? AND item_code=?", (biz, code)):
+                code, k = f"{base}-{k}", k + 1
+            taken_codes.add(code)
+            spp = None
+            if seed:
+                try:
+                    spp = int(parse_amount(row["seeds"])) if row["seeds"] else 0
+                except ValueError:
+                    spp = 0
+                if spp < 1:
+                    problems.append(f"{where}: a new seed item needs the number of seeds in one pack")
+                    continue
+            size, measure, problem = pack_contents_for(None, category, row["size"], row["measure"])
+            if problem:
+                problems.append(f"{where}: {problem}")
+                continue
+            p.update(in_inventory=True, item_code=code, name=name, category=category,
+                     department=row["department"] if row["department"] in departments else ("Greenhouse" if seed and "Greenhouse" in departments else "General"),
+                     unit=resolve_unit(db, biz, row["unit"]) or (SEED_UNIT if seed else ""), seeds_per_pack=spp, pack_size=size, pack_measure=measure)
+        else:
+            problems.append(f"{where}: choose the inventory item it is, a new item, or an expense")
+            continue
+        # What it is for: the farm (inventory only), for sale (on the POS), or both; seeds are always for the farm
+        purpose = row["purpose"] if row["purpose"] in ITEM_PURPOSES else "farm"
+        if seed:
+            purpose = "farm"
+        sale_qty = 0
+        if purpose in ("sale", "both"):
+            if not can("transfer"):
+                problems.append(f"{where}: your account cannot put stock on the POS; choose farm use, or ask an admin")
+                continue
+            if purpose == "sale":
+                sale_qty = qty
+            else:
+                try:
+                    sale_qty = int(parse_amount(row["sale_qty"])) if row["sale_qty"] else -1
+                except ValueError:
+                    sale_qty = -1
+                if not 0 <= sale_qty <= qty:
+                    problems.append(f"{where}: say how many of the {qty:,} are for sale (the rest are for the farm)")
+                    continue
+            known_price = items[choice]["price"] if choice in items else None
+            if price is None and not known_price:
+                problems.append(f"{where}: give the selling price, since some go on the POS")
+                continue
+        p.update(price=price, purpose=purpose, sale_qty=sale_qty)
+        planned.append(p)
+
+    # Payment: the whole receipt paid, not paid, or part paid (the part paid goes to the lines in order)
+    total = round(sum(p["quantity"] * p["unit_cost"] for p in planned), 2)
+    method, reference, paid_amount = NOT_RECORDED, "", 0.0
+    if not problems:
+        try:
+            paid_amount = amount_for_status(text("payment_status"), text("amount_paid"), total) if total > 0 else 0.0
+        except ValueError as e:
+            problems.append(str(e).capitalize())
+        if paid_amount > 0.005:
+            method, reference, problem = read_payment_details(strict=True) if supplier else read_money_method(required=True)
+            if problem:
+                problems.append(problem.rstrip("."))
+    if problems:
+        db.rollback()   # a category the form would have added is not kept
+        flash("Nothing was saved. " + "; ".join(problems) + ".", "error")
+        return back
+
+    left = paid_amount
+    made = []
+    try:
+        for p in planned:
+            line_total = round(p["quantity"] * p["unit_cost"], 2)
+            share = round(min(left, line_total), 2)
+            left = round(left - share, 2)
+            p.update(amount_paid=share, payment_method=method, payment_reference=reference)
+            record_purchase(db, biz, p)
+            made.append(g.last_procurement_id)
+        marks = ",".join("?" for _ in made)
+        db.execute(f"UPDATE procurements SET receipt_id=? WHERE business_id=? AND id IN ({marks})", [scan_id, biz] + made)
+        db.execute("UPDATE receipt_scans SET status='saved', saved_at=? WHERE id=? AND business_id=?", (now().strftime("%Y-%m-%d %H:%M:%S"), scan_id, biz))
+        db.commit()
+    except DB_ERRORS:
+        db.rollback()
+        flash("The receipt could not be saved. Nothing was saved; please try again.", "error")
+        return back
+    on_pos = sum(p["sale_qty"] for p in planned)
+    flash(f"Receipt saved: {len(planned)} purchase{'s' if len(planned) != 1 else ''}" + (f" from {supplier}" if supplier else "") + f", {money(total)} in all"
+          + (f", {money(paid_amount)} paid" if paid_amount and paid_amount < total else (", paid" if paid_amount else ", not paid yet")) + "."
+          + (f" {on_pos:,} unit(s) for sale went on the POS." if on_pos else "") + " The receipt is kept with each purchase.", "ok")
+    return redirect(url_for("procurements"))
+
+
+@app.post("/procurements/receipt/<int:scan_id>/discard")
+@need("procure")
+def receipt_discard(scan_id):
+    db, biz = get_db(), g.user["business_id"]
+    scan = get_scan(db, scan_id)
+    if scan["status"] == "saved":
+        flash("This receipt's purchases are saved, so it is kept with them.", "error")
+        return redirect(url_for("procurements"))
+    db.execute("DELETE FROM receipt_scans WHERE id=? AND business_id=? AND status='open'", (scan_id, biz))
+    db.commit()
+    flash("Receipt discarded. Nothing was logged from it.", "ok")
+    return redirect(url_for("receipt_scan_page"))
 
 
 @app.get("/inventory/<int:item_id>")
@@ -3736,7 +4077,7 @@ def invoice_payment(invoice_id):
 
 
 # --- PROCUREMENTS ---
-PROCUREMENT_COLUMNS = "id, purchase_date, supplier_name, invoice_no, item_code, name, category, department, quantity, unit_cost, total_cost, expiry_date, amount_paid, COALESCE(in_inventory, 1) AS in_inventory, supplier_id, sale_qty"
+PROCUREMENT_COLUMNS = "id, purchase_date, supplier_name, invoice_no, item_code, name, category, department, quantity, unit_cost, total_cost, expiry_date, amount_paid, COALESCE(in_inventory, 1) AS in_inventory, supplier_id, sale_qty, receipt_id"
 PROCUREMENT_KINDS = (("", "All purchases"), ("inventory", "Inventory items"), ("expense", "Not in inventory"))
 
 

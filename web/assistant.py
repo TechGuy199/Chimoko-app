@@ -212,8 +212,8 @@ class Gemini:
         ))
         self.last_usage = (0, 0)   # tokens (in, out) of the last recording heard or answer spoken
 
-    def turn(self, system, steps, tools, timeout=CALL_SECONDS):
-        config = {"max_output_tokens": MAX_OUTPUT_TOKENS}
+    def turn(self, system, steps, tools, timeout=CALL_SECONDS, max_tokens=MAX_OUTPUT_TOKENS):
+        config = {"max_output_tokens": max_tokens}
         if THINKING:   # ASSISTANT_THINKING= (empty) leaves it to the model, for a model that does not take the setting
             config["thinking_level"] = THINKING
         request = dict(model=MODEL, input=steps, system_instruction=system, store=False, generation_config=config)
@@ -615,6 +615,70 @@ def attachment_kind(data):
     if data[:5] == b"%PDF-":
         return "document", "application/pdf"
     return None
+
+
+# ---------- Reading a receipt (Scan a receipt, on Procurements) ----------
+# Not a chat: one photo or PDF goes to Gemini with fixed instructions, and what it read comes back as JSON for the person to check and
+# correct on the review page. Nothing is saved from it until they press Save there. It counts as a question against the daily limits.
+RECEIPT_TOKENS = 4000   # room for a long receipt's lines, and the model's thinking
+MAX_RECEIPT_LINES = 30
+RECEIPT_INSTRUCTIONS = """You read photos and PDFs of supplier receipts, invoices and delivery notes for a farm business, and copy what they say.
+Reply with one JSON object and nothing else (no words before or after it, no code fences), in exactly this shape:
+{"readable": true, "problem": "", "supplier": "", "supplier_phone": "", "receipt_no": "", "date": "YYYY-MM-DD",
+ "payment": "Paid" or "Unpaid" or "Partial Payment" or "", "amount_paid": null, "total": null,
+ "lines": [{"name": "", "match": "", "quantity": null, "unit_cost": null, "line_total": null}]}
+Rules:
+- Copy only what you can read clearly. Leave a field empty ("" or null) rather than guess a number, a name or a date.
+- One entry in lines for each product line, in the order printed, at most 30. Leave out totals, tax and change lines.
+- quantity is how many were bought; unit_cost the price of one; line_total the line's amount. Give whichever are printed.
+- date: dates here are usually written day first (05/11/2026 is 5 November 2026).
+- payment: "Paid" only when the document shows it was paid (paid, cash sale, a payment or change line); "Unpaid" for an unpaid invoice; else "".
+- match: when a line is clearly the same product as one in the inventory list given, its code; otherwise "".
+- If this is not a receipt or cannot be read, set readable to false and say why in problem, in one short sentence."""
+
+
+def receipt_json(text):
+    """The JSON object in what the model wrote: tolerant of code fences or words around it. None when there is none."""
+    text = (text or "").strip()
+    start, end = text.find("{"), text.rfind("}")
+    if start < 0 or end <= start:
+        return None
+    try:
+        out = json.loads(text[start:end + 1])
+    except ValueError:
+        return None
+    return out if isinstance(out, dict) else None
+
+
+def read_receipt(db, user, data, inventory):
+    """Reads a receipt with Gemini: the raw JSON it gave (a dict), or raises Refused with what to tell the person. inventory is
+    [(code, name)] for the model to match lines against."""
+    kind = attachment_kind(data)
+    if kind is None:
+        raise Refused("Only a photo (JPEG, PNG, WebP or HEIC) or a PDF can be read.", 415)
+    need_ready(db, user)
+    charge(db, user, questions=1)   # counted first, so a read that fails still counts and the limits hold
+    listing = "; ".join(f"{code}: {name}" for code, name in inventory[:300]) or "(nothing in inventory yet)"
+    steps = [{"type": "user_input", "content": [
+        {"type": "text", "text": "Read this receipt. Today is " + H.today_str() + ". Inventory items (code: name): " + listing},
+        {"type": kind[0], "data": base64.b64encode(data).decode("ascii"), "mime_type": kind[1]},
+    ]}]
+    gemini = client()
+    try:
+        # The real client takes a larger answer than a chat reply; a stand-in (the tests) may not take the setting
+        turn = gemini.turn(RECEIPT_INSTRUCTIONS, steps, None, timeout=QUESTION_SECONDS, max_tokens=RECEIPT_TOKENS) if isinstance(gemini, Gemini) \
+            else gemini.turn(RECEIPT_INSTRUCTIONS, steps, None)
+    except Refused:
+        raise
+    except Exception as e:   # noqa: BLE001  anything from the network or Google: told plainly, never a crash
+        raise unavailable(e)
+    charge(db, user, tokens_in=turn.tokens_in, tokens_out=turn.tokens_out)
+    log_call(db, user, "receipt", MODEL, 1, len(RECEIPT_INSTRUCTIONS) + len(listing), turn.tokens_in, turn.tokens_out, getattr(turn, "tokens_cached", 0))
+    db.commit()
+    found = receipt_json(turn.text)
+    if found is None:
+        raise Refused("Gemini did not give a reading of this receipt. Type the lines in from the photo instead.", 502)
+    return found
 
 
 def converse(db, user, message, voice=False, attachment=None, shown_as=None, handsfree=False):

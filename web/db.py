@@ -235,6 +235,13 @@ SCHEMA = [
         id {pk}, business_id INTEGER NOT NULL, name TEXT NOT NULL, holes INTEGER, rate DOUBLE PRECISION NOT NULL DEFAULT 0,
         active INTEGER NOT NULL DEFAULT 1, created_at TEXT
     )""",
+    # A photo (or PDF) of a supplier's receipt, scanned to log the purchases on it. data is the file, base64. read is what was read from it
+    # (by Gemini, or nothing when it was typed in by hand), as JSON. status: 'open' until its purchases are saved, then 'saved'. An open
+    # scan never saved is cleared after a week. The purchases saved from it point back at it (procurements.receipt_id).
+    """CREATE TABLE IF NOT EXISTS receipt_scans (
+        id {pk}, business_id INTEGER NOT NULL, data TEXT NOT NULL, mime TEXT NOT NULL, read TEXT, read_by TEXT, status TEXT NOT NULL DEFAULT 'open',
+        created_by TEXT, created_at TEXT, saved_at TEXT
+    )""",
     # The assistant (Gemini). Each person's recent conversation with it, so a chat carries on; kept 30 days, or until they start a new chat.
     """CREATE TABLE IF NOT EXISTS assistant_messages (
         id {pk}, business_id INTEGER NOT NULL, user_id INTEGER NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT
@@ -634,6 +641,8 @@ def init_schema():
         # An activity whose product came out of inventory: the farm-use invoice line that took it (several activities share one when a
         # product was logged for everyone on a plot). Removing the last activity on a line puts its stock back.
         add_column(db, "activities", "stock_line_id", "INTEGER")
+        # The receipt a purchase was scanned from, if it was
+        add_column(db, "procurements", "receipt_id", "INTEGER")
         # A payslip paid by trays keeps how many and at what rate, as it was worked out
         add_column(db, "payroll", "trays", "DOUBLE PRECISION")
         add_column(db, "payroll", "tray_rate", "DOUBLE PRECISION")

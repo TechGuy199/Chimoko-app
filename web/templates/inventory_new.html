@@ -15,6 +15,11 @@
     <input type="hidden" name="next" value="new">
 </form>
 
+<a class="card receipt-shortcut" href="{{ url_for('receipt_scan_page') }}">
+    <strong>Have the receipt? Scan it instead</strong>
+    <small class="muted">Take a photo of it: every line is logged in one go, and the receipt is kept with the purchases.</small>
+</a>
+
 <form method="post" action="{{ url_for('purchase') }}" id="purchase-form" data-items="{{ known|tojson|forceescape }}">
     {{ csrf_field() }}
     <input type="hidden" name="origin" value="{{ origin }}">

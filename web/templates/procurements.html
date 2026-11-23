@@ -5,7 +5,10 @@
     <section class="card grow">
         <div class="page-head">
             <h2 class="grow-title">Procurements</h2>
-            {% if can('procure') %}<a class="btn primary" href="{{ url_for('procurement_new') }}">Log a purchase</a>{% endif %}
+            {% if can('procure') %}<span class="head-actions">
+                <a class="btn success" href="{{ url_for('receipt_scan_page') }}">Scan a receipt</a>
+                <a class="btn primary" href="{{ url_for('procurement_new') }}">Log a purchase</a>
+            </span>{% endif %}
         </div>
         <form method="get" class="toolbar">
             <select name="category" onchange="this.form.requestSubmit()">
@@ -29,7 +32,7 @@
                         <td>{% if user.role == 'admin' and r.supplier_id %}<a href="{{ url_for('supplier_statement', supplier_id=r.supplier_id) }}">{{ r.supplier_name }}</a>{% else %}{{ r.supplier_name or '—' }}{% endif %}</td>
                         <td>{{ r.invoice_no or '—' }}</td>
                         <td>{{ r.item_code or '—' }}</td>
-                        <td>{{ sold_link(r.item_code, r.name) }}</td>
+                        <td>{{ sold_link(r.item_code, r.name) }}{% if r.receipt_id %}<br><a class="receipt-link" href="{{ url_for('receipt_image', scan_id=r.receipt_id) }}" target="_blank" rel="noopener">Receipt</a>{% endif %}</td>
                         <td>{{ r.category }}</td>
                         <td>{{ r.department }}</td>
                         <td>{% if r.in_inventory %}<span class="ok">Yes</span>{% if r.sale_qty is not none %}<br><small class="muted">{% if r.sale_qty %}{{ r.sale_qty }} for sale{% endif %}{% if r.sale_qty and r.quantity - r.sale_qty %} &middot; {% endif %}{% if r.quantity - r.sale_qty %}{{ r.quantity - r.sale_qty }} farm use{% endif %}</small>{% endif %}{% else %}<span class="muted">No</span>{% endif %}</td>

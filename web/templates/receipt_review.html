@@ -1,0 +1,148 @@
+{% extends "base.html" %}
+{% block title %}Check the receipt — {% endblock %}
+{% block content %}
+{# One line of the receipt. l is the line read (or None for a blank one). Every field is sent for every line, so the rows line up. #}
+{% macro line_row(l) %}
+{% set picked = (l.item_id|string) if l and l.item_id else ('new' if l and l.name else '') %}
+<fieldset class="activity-row receipt-line" data-line>
+    <legend>Line <span data-row-number>1</span>
+        {% if l and l.sure == 'close' %}<span class="chip gold">Closest match: check it</span>
+        {% elif l and l.sure in ('code', 'name') %}<span class="chip ok">Matched</span>
+        {% elif l and l.name and not l.item_id %}<span class="chip info">Not in inventory</span>{% endif %}
+    </legend>
+    <label>What was bought (as on the receipt)
+        <input name="line_name" maxlength="100" value="{{ l.name if l else '' }}" placeholder="e.g. D-Compound 50kg" data-line-name>
+    </label>
+    <label>It is
+        <select name="line_item" data-line-item>
+            <option value="" {{ 'selected' if not picked }}>Choose&hellip;</option>
+            <option value="new" {{ 'selected' if picked == 'new' }}>A new inventory item</option>
+            <option value="expense">An expense, not stock (fuel, repairs, a service)</option>
+            {% if items %}<optgroup label="Already in inventory">
+                {% for i in items %}<option value="{{ i.id }}" {{ 'selected' if picked == i.id|string }}>{{ i.name }} ({{ i.item_code }})</option>{% endfor %}
+            </optgroup>{% endif %}
+        </select>
+    </label>
+    <div class="grid">
+        <label>How many <input name="line_qty" type="number" min="1" step="1" inputmode="numeric" value="{{ l.qty if l else '' }}" data-line-qty></label>
+        <label>Price of one ({{ user.currency|trim }}) <input name="line_cost" type="number" min="0" step="any" inputmode="decimal" value="{{ l.cost if l else '' }}" data-line-cost></label>
+    </div>
+    <p class="seedling-summary" data-line-total aria-live="polite"></p>
+
+    {# A new item: where it is filed, how it comes, and its pack #}
+    <div class="receipt-new" data-show-new hidden>
+        <div class="grid">
+            <label>Category
+                <input name="line_category" list="receipt-categories" maxlength="60" autocomplete="off" placeholder="e.g. Fertiliser" data-line-category>
+            </label>
+            <label>Department
+                <select name="line_department">{% for d in departments %}<option {{ 'selected' if d == 'General' }}>{{ d }}</option>{% endfor %}</select>
+            </label>
+            <label>Bought as <input name="line_unit" list="receipt-units" maxlength="30" autocomplete="off" placeholder="bag, tin, bottle"></label>
+            <label data-show-seed hidden>Seeds in one <input name="line_seeds" type="number" min="1" step="1" inputmode="numeric" placeholder="e.g. 15000"></label>
+        </div>
+        <label data-hide-seed>One holds <span class="muted">(optional, for something used by the kg or litre)</span>
+            <span class="contents-pair">
+                <input name="line_size" type="number" min="0" step="any" inputmode="decimal" placeholder="e.g. 50" aria-label="How much one holds">
+                <input name="line_measure" list="receipt-measures" maxlength="20" autocomplete="off" placeholder="kg, litres" aria-label="Measured in">
+            </span>
+        </label>
+    </div>
+    {# Stock (new or known): what it is for, and its selling price when some go on the POS #}
+    <div class="grid" data-show-stock hidden>
+        <label>For
+            <select name="line_purpose" data-line-purpose>
+                <option value="farm">Farm use (inventory only)</option>
+                <option value="sale" {{ 'disabled' if not can_list }}>For sale (on the POS)</option>
+                <option value="both" {{ 'disabled' if not can_list }}>Both</option>
+            </select>
+        </label>
+        <label data-show-both hidden>How many for sale <input name="line_sale_qty" type="number" min="0" step="1" inputmode="numeric"></label>
+        <label data-show-price>Selling price <span class="muted" data-price-hint>(optional)</span>
+            <input name="line_price" type="number" min="0" step="0.01" inputmode="decimal">
+        </label>
+    </div>
+    <p class="row-actions"><button type="button" class="btn ghost small" data-remove-row>Remove this line</button></p>
+</fieldset>
+{% endmacro %}
+
+<div class="page-head">
+    <div>
+        <a class="back" href="{{ url_for('receipt_scan_page') }}">&larr; Scan another receipt</a>
+        <h1>Check the receipt</h1>
+        <p class="muted">
+            {% if scan.read_by == 'gemini' %}Read by Gemini (AI): check every line against the receipt and correct anything it got wrong.
+            {% else %}Type in the receipt's lines while looking at it.{% endif %}
+            Nothing is saved until you press Save.
+        </p>
+    </div>
+</div>
+
+{% if note %}<p class="flash notice">{{ note }} Type the lines in from the photo instead.</p>{% endif %}
+{% if reading and not reading.readable %}<p class="flash error">Gemini could not read this as a receipt{% if reading.problem %}: {{ reading.problem }}{% endif %}. Type the lines in, or take a clearer photo.</p>{% endif %}
+
+<div class="receipt-layout">
+    <aside class="card receipt-photo">
+        {% if scan.mime == 'application/pdf' %}
+        <iframe src="{{ url_for('receipt_image', scan_id=scan.id) }}" title="The receipt (PDF)"></iframe>
+        <a class="btn small" href="{{ url_for('receipt_image', scan_id=scan.id) }}" target="_blank" rel="noopener">Open the PDF</a>
+        {% else %}
+        <a href="{{ url_for('receipt_image', scan_id=scan.id) }}" target="_blank" rel="noopener" title="Open the photo full size">
+            <img src="{{ url_for('receipt_image', scan_id=scan.id) }}" alt="The receipt">
+        </a>
+        <small class="muted">Tap the photo to see it full size.</small>
+        {% endif %}
+    </aside>
+
+    <form method="post" action="{{ url_for('receipt_save', scan_id=scan.id) }}" class="card receipt-form" id="receipt-form"
+          data-items="{{ item_info|tojson|forceescape }}" data-currency="{{ user.currency }}" data-printed="{{ reading.total if reading and reading.total is not none else '' }}">
+        {{ csrf_field() }}
+        <h2>From the receipt</h2>
+        <div class="grid">
+            <label>Supplier <input name="supplier_name" list="receipt-suppliers" maxlength="100" autocomplete="off" value="{{ reading.supplier if reading else '' }}" id="receipt-supplier"></label>
+            <label>Supplier's phone <span class="muted">(optional)</span> <input name="supplier_phone" maxlength="40" value="{{ reading.supplier_phone if reading else '' }}" id="receipt-phone"></label>
+            <label>Receipt number <input name="invoice_no" maxlength="40" value="{{ reading.receipt_no if reading else '' }}" id="receipt-no"></label>
+            <label>Date <input name="purchase_date" type="date" max="{{ today }}" value="{{ (reading.date if reading else '') or today }}"></label>
+        </div>
+
+        <h2 class="spaced">Lines</h2>
+        <div id="receipt-lines">{% for l in lines %}{{ line_row(l) }}{% endfor %}</div>
+        <template id="receipt-line-template">{{ line_row(None) }}</template>
+        <p class="toolbar"><button type="button" class="btn" id="receipt-add">+ Add a line</button></p>
+        <p class="receipt-total" id="receipt-total" aria-live="polite"></p>
+
+        <h2 class="spaced">Payment</h2>
+        <div class="grid">
+            <label>Paid to the supplier
+                <select name="payment_status" id="receipt-status-pay">
+                    {% for st in ('Paid', 'Unpaid', 'Partial Payment') %}<option {{ 'selected' if reading and reading.payment == st }}>{{ st }}</option>{% endfor %}
+                </select>
+            </label>
+            <label id="receipt-paid-row" hidden>Amount paid so far <input name="amount_paid" type="number" min="0" step="0.01" inputmode="decimal"
+                   value="{{ reading.amount_paid if reading and reading.amount_paid is not none else '' }}"></label>
+            <label id="receipt-method-row">How it was paid
+                <select name="payment_method" id="receipt-method">
+                    <option value="">Choose a method</option>
+                    {% for m, label in methods %}<option value="{{ m }}">{{ m }}</option>{% endfor %}
+                </select>
+            </label>
+            <label id="receipt-reference-row">Reference <span class="muted" id="receipt-reference-optional">(optional)</span>
+                <input name="payment_reference" maxlength="60" id="receipt-reference" placeholder="for cash, the receipt number"></label>
+        </div>
+        <p class="muted hint">Paid to a named supplier, it is kept on their statement and needs its reference (for cash, the receipt number is enough).
+            A part payment goes to the lines in order.</p>
+
+        <button class="btn success wide spaced" id="receipt-save">Save purchases</button>
+    </form>
+</div>
+<form method="post" action="{{ url_for('receipt_discard', scan_id=scan.id) }}" class="receipt-discard" data-confirm="Discard this receipt? Nothing has been logged from it.">
+    {{ csrf_field() }}
+    <button class="btn ghost danger">Discard this receipt</button>
+</form>
+
+<datalist id="receipt-suppliers">{% for s in known_suppliers %}<option value="{{ s.name }}" data-phone="{{ s.phone }}">{% endfor %}</datalist>
+<datalist id="receipt-categories">{% for c in categories %}<option value="{{ c }}">{% endfor %}</datalist>
+<datalist id="receipt-units">{% for u in units %}<option value="{{ u }}">{% endfor %}</datalist>
+<datalist id="receipt-measures">{% for m in measures %}<option value="{{ m }}">{% endfor %}</datalist>
+{% endblock %}
+{% block scripts %}<script src="{{ asset('receipt.js') }}"></script>{% endblock %}
