@@ -6,7 +6,7 @@
     const O = window.MSOffline;
     const view = document.getElementById("off-view");
     const tabs = Array.from(document.querySelectorAll("[data-tab]"));
-    let snap = null, all = [], tab = "sell", cart = [], receipt = null;
+    let snap = null, all = [], tab = "sell", cart = [], receipt = null, planted = null;
 
     function el(tag, className, text) {
         const node = document.createElement(tag);
@@ -317,7 +317,7 @@
         const out = el("div");
         function paint(q) {
             out.replaceChildren();
-            const pending = all.filter(function (s) { return s.status !== "uploaded" && has(q, s.ref, s.fields.customer_name); });
+            const pending = all.filter(function (s) { return s.kind !== "planting" && s.status !== "uploaded" && has(q, s.ref, s.fields.customer_name); });
             if (pending.length) {
                 out.appendChild(el("h3", "", "Made offline, not uploaded yet"));
                 out.appendChild(table(["Number", "When", "Customer", "Total"], pending.map(function (s) { return [s.ref, when(s.made_at), s.fields.customer_name || snap.business.walk_in, money(s.total)]; }), [0, 0, 0, 1]));
@@ -342,7 +342,172 @@
         paint("");
     }
 
+    function today() {
+        const d = new Date();
+        const pad = function (n) { return String(n).padStart(2, "0"); };
+        return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate());
+    }
+
+    function plusDays(day, days) {
+        const parts = day.split("-").map(Number);
+        const d = new Date(parts[0], parts[1] - 1, parts[2] + days);
+        const pad = function (n) { return String(n).padStart(2, "0"); };
+        return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate());
+    }
+
+    function labelled(parent, text, input) {
+        const l = el("label", "", text + " ");
+        l.appendChild(input);
+        parent.appendChild(l);
+        return input;
+    }
+
+    // Trays planted, entered with no connection: who planted, on which day, and an entry for each seed item. Kept on this device and
+    // uploaded when the connection is back, where the app checks it like any other entry and takes the seeds out of stock.
+    function showPlantForm() {
+        const P = snap.planting;
+        if (planted) {
+            const done = card("Kept on this device");
+            done.appendChild(el("p", "", planted.ref + ": " + planted.summary));
+            done.appendChild(el("p", "muted", "It uploads by itself when the connection is back, and the seeds come out of stock then. Until then it waits under Waiting."));
+            const more = el("button", "btn primary", "Log more trays");
+            more.type = "button";
+            more.addEventListener("click", function () { planted = null; show(); });
+            done.appendChild(more);
+            return;
+        }
+        const c = card("Log trays planted");
+        if (!P || !P.planters.length) {
+            c.appendChild(el("p", "muted", P ? "No one is set to plant trays. An admin ticks \"Plants trays\" for them in HR." : "Open the app once with a connection to bring the planting form onto this device."));
+            return;
+        }
+        const usable = P.seeds.filter(function (x) { return x.usable; });
+        if (!usable.length) { c.appendChild(el("p", "muted", "No seed item in the copy has stock you can plant from.")); return; }
+        const form = el("div", "offline-plant-form");
+        const who = labelled(form, "Who planted", el("select"));
+        const none = el("option", "", "Choose the person");
+        none.value = "";
+        who.appendChild(none);
+        P.planters.forEach(function (e) { const o = el("option", "", e.name); o.value = e.id; who.appendChild(o); });
+        const day = labelled(form, "Day planted", el("input"));
+        day.type = "date";
+        day.value = day.max = today();
+        c.appendChild(form);
+
+        const rows = el("div");
+        c.appendChild(rows);
+        function addRow() {
+            const box = el("fieldset", "activity-row offline-plant-row");
+            box.appendChild(el("legend", "", "Entry"));
+            const item = labelled(box, "Seed", el("select"));
+            const pick = el("option", "", "Choose the seed item");
+            pick.value = "";
+            item.appendChild(pick);
+            usable.forEach(function (x) {
+                const o = el("option", "", x.name + " (" + x.code + ") \u2014 " + x.packs + " in stock" + (x.loose ? " + " + x.loose.toLocaleString() + " loose" : ""));
+                o.value = x.id;
+                item.appendChild(o);
+            });
+            const grid = el("div", "grid");
+            box.appendChild(grid);
+            const trays = labelled(grid, "Trays planted", el("input"));
+            trays.type = "number"; trays.min = "0.01"; trays.step = "any"; trays.inputMode = "decimal";
+            let kind = null;
+            if (P.kinds.length) {
+                kind = labelled(grid, "Kind of tray", el("select"));
+                const k0 = el("option", "", "Choose the kind");
+                k0.value = "";
+                kind.appendChild(k0);
+                P.kinds.forEach(function (k) { const o = el("option", "", k.name); o.value = k.id; kind.appendChild(o); });
+            }
+            const holes = labelled(grid, "Holes in each tray", el("input"));
+            holes.type = "number"; holes.min = "1"; holes.max = P.max_holes; holes.step = "1"; holes.inputMode = "numeric";
+            if (P.usual_holes) holes.value = P.usual_holes;
+            const mortality = labelled(grid, "Expected mortality (%)", el("input"));
+            mortality.type = "number"; mortality.min = "0"; mortality.max = "99.99"; mortality.step = "any"; mortality.inputMode = "decimal";
+            const ready = labelled(grid, "Expected ready on", el("input"));
+            ready.type = "date";
+            const note = el("p", "seedling-summary");
+            box.appendChild(note);
+            const remove = el("button", "btn small ghost", "Remove this entry");
+            remove.type = "button";
+            remove.addEventListener("click", function () { if (rows.children.length > 1) box.remove(); });
+            box.appendChild(remove);
+            function paintNote() {
+                const t = parseFloat(trays.value), h = parseInt(holes.value, 10);
+                note.textContent = t > 0 && h > 0 ? t.toLocaleString() + (t === 1 ? " tray" : " trays") + " \u00d7 " + h.toLocaleString() + " holes = " + Math.floor(t * h + 0.5).toLocaleString() + " seeds." : "";
+            }
+            item.addEventListener("change", function () {
+                const seed = usable.find(function (x) { return String(x.id) === item.value; });
+                if (!seed) return;
+                if (seed.mortality !== null && !mortality.value) mortality.value = seed.mortality;
+                if (seed.grow !== null && !ready.value && day.value) ready.value = plusDays(day.value, seed.grow);
+            });
+            if (kind) kind.addEventListener("change", function () {
+                const k = P.kinds.find(function (x) { return String(x.id) === kind.value; });
+                if (k && k.holes) holes.value = k.holes;
+                paintNote();
+            });
+            trays.addEventListener("input", paintNote);
+            holes.addEventListener("input", paintNote);
+            box.read = function () { return { item: item, trays: trays, kind: kind, holes: holes, mortality: mortality, ready: ready }; };
+            rows.appendChild(box);
+        }
+        addRow();
+        const add = el("button", "btn", "+ Add another entry");
+        add.type = "button";
+        add.addEventListener("click", addRow);
+        c.appendChild(add);
+        const problem = el("p", "flash error");
+        problem.hidden = true;
+        c.appendChild(problem);
+        const save = el("button", "btn success wide", "Save entries");
+        save.type = "button";
+        c.appendChild(save);
+        c.appendChild(el("p", "muted", "Kept on this device and uploaded when the connection is back. The app then checks the stock and takes the seeds out of inventory; an entry it cannot accept waits under Waiting with the reason."));
+
+        save.addEventListener("click", function () {
+            problem.hidden = true;
+            const person = P.planters.find(function (e) { return String(e.id) === who.value; });
+            let error = !person ? "Choose who planted." : !day.value || day.value > today() ? "Choose the day planted (today or earlier)." : "";
+            const lines = [];
+            Array.from(rows.children).forEach(function (box, i) {
+                if (error) return;
+                const f = box.read();
+                const seed = usable.find(function (x) { return String(x.id) === f.item.value; });
+                const t = parseFloat(f.trays.value), h = parseInt(f.holes.value, 10), m = parseFloat(f.mortality.value);
+                const k = f.kind ? P.kinds.find(function (x) { return String(x.id) === f.kind.value; }) : null;
+                const n = "Entry " + (i + 1) + ": ";
+                if (!seed) error = n + "choose the seed item.";
+                else if (!(t > 0)) error = n + "enter the trays planted.";
+                else if (f.kind && !k) error = n + "choose the kind of tray.";
+                else if (!(h >= 1)) error = n + "enter the holes in each tray.";
+                else if (!(m >= 0 && m < 100)) error = n + "enter the expected mortality, from 0 up to (not including) 100.";
+                else if (!f.ready.value || f.ready.value < day.value) error = n + "enter the day the seedlings are expected to be ready (not before the day planted).";
+                else lines.push({ item_id: seed.id, item: seed.name, trays: t, holes: h, kind_id: k ? k.id : "", kind: k ? k.name : "", mortality: m, ready_on: f.ready.value });
+            });
+            if (error) { problem.textContent = error; problem.hidden = false; return; }
+            const now = new Date();
+            const pad = function (n) { return String(n).padStart(2, "0"); };
+            const entry = {
+                user: snap.user.id, userName: snap.user.name, employee_id: person.id, employee: person.name, date: day.value, entries: lines,
+                made_at: now.getFullYear() + "-" + pad(now.getMonth() + 1) + "-" + pad(now.getDate()) + " " + pad(now.getHours()) + ":" + pad(now.getMinutes()) + ":" + pad(now.getSeconds()),
+                summary: person.name + ", " + day.value + ": " + lines.map(function (l) { return l.trays.toLocaleString() + (l.kind ? " " + l.kind : "") + (l.trays === 1 ? " tray" : " trays") + " of " + l.item; }).join("; ") + ".",
+            };
+            save.disabled = true;
+            O.recordPlanting(entry).then(function (saved) {
+                planted = saved;
+                load();
+            }, function () {
+                save.disabled = false;
+                problem.textContent = "This device could not keep the entries (its storage may be full or blocked). Write them down and enter them later.";
+                problem.hidden = false;
+            });
+        });
+    }
+
     function showPlantings() {
+        showPlantForm();
         const c = card("Batches in the greenhouse");
         c.appendChild(table(["Batch", "Planted", "Ready", "Stage", "Seedlings", "Free", "Pre-ordered"],
             snap.plantings.map(function (b) { return [b.batch, b.planted_on, b.ready_on, b.stage, b.seedlings, b.free, b.preordered]; }), [0, 0, 0, 0, 1, 1, 1]));
@@ -353,7 +518,7 @@
 
     // ---------- Sales waiting to upload ----------
     function showWaiting() {
-        const c = card("Sales made offline");
+        const c = card("Made offline: sales and planting entries");
         const row = el("div", "toolbar");
         const reachable = O.reachable ? O.reachable() : navigator.onLine;
         const now = el("button", "btn primary", reachable ? "Upload now" : "Uploads when the connection is back");
@@ -364,10 +529,10 @@
         c.appendChild(row);
         if (!all.length) { c.appendChild(el("p", "muted", "Nothing made offline on this device.")); return; }
         const sorted = all.slice().sort(function (a, b) { return a.made_at < b.made_at ? 1 : -1; });
-        c.appendChild(table(["Number", "When", "By", "Customer", "Total", "Where it stands", ""], sorted.map(function (s) {
+        c.appendChild(table(["Number", "When", "By", "What", "Total", "Where it stands", ""], sorted.map(function (s) {
             let where;
             if (s.status === "uploaded") {
-                where = el("a", "", "Uploaded as " + s.invoice_no);
+                where = el("a", "", s.kind === "planting" ? "Uploaded: open the day" : "Uploaded as " + s.invoice_no);
                 where.href = s.url;
             } else if (s.status === "attention") {
                 where = el("span", "warn", "Needs attention: " + s.problem);
@@ -387,6 +552,7 @@
                 act.appendChild(retry);
                 act.appendChild(drop);
             }
+            if (s.kind === "planting") return [s.ref, when(s.made_at), s.userName, "Planting: " + s.summary, "\u2014", where, act];
             return [s.ref, when(s.made_at), s.userName, s.fields.customer_name || snap.business.walk_in, money(s.total), where, act];
         }), [0, 0, 0, 0, 1, 0, 0]));
         c.appendChild(el("p", "muted", "A sale the app turns down when it is uploaded (a product no longer on the POS, say) waits here with the reason. Put it right in the app, then try again."));
@@ -425,7 +591,12 @@
         const wanted = location.hash.slice(1);
         if (SCREENS[wanted] && wanted !== tab) { tab = wanted; show(); }
     });
-    O.onChange(function () { if (!document.querySelector(".offline-sale-form") || !cart.length) load(); });
+    // A change in the background repaints the screen, unless a form on it is being filled in
+    O.onChange(function () {
+        if (document.querySelector(".offline-sale-form") && cart.length) return;
+        if (document.querySelector(".offline-plant-form")) return;
+        load();
+    });
     window.addEventListener("online", load);
     window.addEventListener("offline", load);
     load();

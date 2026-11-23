@@ -1525,11 +1525,22 @@ def offline_snapshot():
     preorders = db.all(
         """SELECT po.customer_name, po.customer_phone, po.qty, po.collect_on, p.name AS plant, p.batch_no, p.planted_on FROM preorders po
            JOIN plantings p ON p.id = po.planting_id WHERE po.business_id=? AND po.status='pending' ORDER BY po.collect_on, po.id""", (biz,))
+    # What the offline planting form needs: who plants, the seed items they can plant from (with the stock and the usual mortality
+    # and growing time of each), and the kinds of tray
+    seed_items, seed_info = planter_seed_items(db, biz, today_str())
+    planting = {
+        "planters": [{"id": e["id"], "name": e["full_name"]} for e in planters(db, biz)],
+        "seeds": [{"id": i["id"], "name": i["name"], "code": i["item_code"], "packs": i["quantity"], "loose": i["loose_seeds"] or 0,
+                   "size": i["seeds_per_pack"] or 0, "usable": i["usable"], "mortality": seed_info[str(i["id"])]["mortality"],
+                   "grow": seed_info[str(i["id"])]["grow"]} for i in seed_items],
+        "kinds": [{"id": t["id"], "name": t["name"], "holes": t["holes"]} for t in tray_types(db, biz)],
+        "usual_holes": hr_settings_for(db, biz)["holes_per_tray"] or None, "max_holes": MAX_TRAY_HOLES,
+    }
     response = jsonify({
-        "at": now().strftime("%Y-%m-%d %H:%M:%S"), "csrf": csrf_token(), "days": OFFLINE_DAYS,
+        "at": now().strftime("%Y-%m-%d %H:%M:%S"), "csrf": csrf_token(), "days": OFFLINE_DAYS, "planting": planting,
         "user": {"id": user["id"], "name": user["username"], "admin": admin, "sell": can("sell")},
         "business": {"name": user["business_name"], "currency": user["currency"] or "", "low": user["low_stock_threshold"], "walk_in": WALK_IN},
-        "methods": METHOD_NAMES, "statuses": list(PAYMENT_STATUSES), "urls": {"sales": url_for("offline_sale"), "snapshot": url_for("offline_snapshot")},
+        "methods": METHOD_NAMES, "statuses": list(PAYMENT_STATUSES), "urls": {"sales": url_for("offline_sale"), "snapshot": url_for("offline_snapshot"), "plantings": url_for("offline_planting")},
         "products": products, "inventory": inventory, "customers": customers,
         "invoices": [dict(i, items=items.get(i["id"], [])) for i in invoices],
         "plantings": [{"batch": b["label"], "planted_on": b["planted_on"], "ready_on": b["actual_ready_on"] or b["ready_on"], "stage": b["stage_label"],
@@ -8537,27 +8548,18 @@ def read_planter_entries(db, biz, day):
     return entries, problems
 
 
-@app.post("/planting/planter/<int:employee_id>")
-@need(None)
-def planter_save(employee_id):
-    """Saves every entry on a planter's day form at once, or none of them if anything is wrong."""
-    db, biz = get_db(), g.user["business_id"]
-    e = get_employee(db, employee_id)
-    day = day_or_none(text("date")) if text("date") else None
-    back = redirect(url_for("planter_day", employee_id=employee_id, date=day or today_str()))
+def save_planter_day(db, biz, e, day, upload_key=None):
+    """Saves every entry sent for a planter's day at once, or none of them if anything is wrong: (True, what was saved) or
+    (False, what is wrong). Shared by the planter's page and by entries made offline (which carry an upload key)."""
     if day is None or day > today_str():
-        flash("Choose the day the trays were planted (today or earlier).", "error")
-        return back
+        return False, "Choose the day the trays were planted (today or earlier)."
     if not is_planter(e):
-        flash(f"{e['full_name']} is not set to plant trays. An admin can tick \"Plants trays\" for them in HR.", "error")
-        return back
+        return False, f"{e['full_name']} is not set to plant trays. An admin can tick \"Plants trays\" for them in HR."
     entries, problems = read_planter_entries(db, biz, day)
     if problems:
-        flash(" ".join(problems) + " Nothing was saved.", "error")
-        return back
+        return False, " ".join(problems) + " Nothing was saved."
     if not entries:
-        flash("Add at least one entry: the seed item and the trays planted.", "error")
-        return back
+        return False, "Add at least one entry: the seed item and the trays planted."
 
     done, joined, grants = [], set(), []
     try:
@@ -8597,26 +8599,66 @@ def planter_save(employee_id):
                         + (", added to that day's batch" if batch else "") + ")")
         for grant in grants:
             use_grant(db, grant)
+        if upload_key:
+            # Entered offline: the key is recorded with the entries, so the same upload sent twice is recorded once
+            db.execute("INSERT INTO offline_uploads (business_id, upload_key, invoice_id, created_by, created_at) VALUES (?, ?, NULL, ?, ?)",
+                       (biz, upload_key, g.user["username"], now().strftime("%Y-%m-%d %H:%M:%S")))
         db.commit()
     except NotEnoughSeeds as short:
         db.rollback()
-        flash(f"{short} Nothing was saved.", "error")
-        return back
+        return False, f"{short} Nothing was saved."
     except StockError:
         db.rollback()
-        flash("The stock changed while you were working. Nothing was saved; please try again.", "error")
-        return back
+        return False, "The stock changed while you were working. Nothing was saved; please try again."
     except DB_ERRORS:
         db.rollback()
-        flash("The entries could not be saved. Please try again.", "error")
-        return back
+        return False, "The entries could not be saved. Please try again."
 
     release_plantings(db, biz)
     for planting_id in joined:
         sync_planting(db, biz, planting_id)   # a batch already on the POS lists the extra seedlings
     db.commit()
-    flash(f"Saved for {e['full_name']} on {day}: " + "; ".join(done) + ".", "ok")
-    return back
+    return True, f"Saved for {e['full_name']} on {day}: " + "; ".join(done) + "."
+
+
+@app.post("/planting/planter/<int:employee_id>")
+@need(None)
+def planter_save(employee_id):
+    """Saves every entry on a planter's day form at once, or none of them if anything is wrong."""
+    db, biz = get_db(), g.user["business_id"]
+    e = get_employee(db, employee_id)
+    day = day_or_none(text("date")) if text("date") else None
+    ok, message = save_planter_day(db, biz, e, day)
+    flash(message, "ok" if ok else "error")
+    return redirect(url_for("planter_day", employee_id=employee_id, date=day or today_str()))
+
+
+@app.post("/offline/plantings")
+@need(None)
+def offline_planting():
+    """A planter's day entered offline: recorded once, however often it is sent, as {ok, message, url} or {ok: false, error}."""
+    db, biz = get_db(), g.user["business_id"]
+    key = text("upload_key")
+    if not re.fullmatch(r"[A-Za-z0-9-]{8,80}", key):
+        return jsonify({"ok": False, "error": "These entries are not ones the app made offline."}), 400
+    employee = db.one(f"SELECT {EMPLOYEE_COLUMNS} FROM employees WHERE id=? AND business_id=?", (request.form.get("employee_id", type=int), biz))
+    day = day_or_none(text("date")) if text("date") else None
+    url = url_for("planter_day", employee_id=employee["id"], date=day or today_str()) if employee else url_for("planting_list")
+    recorded = lambda: db.one("SELECT 1 AS x FROM offline_uploads WHERE business_id=? AND upload_key=?", (biz, key))  # noqa: E731
+    if recorded():
+        return jsonify({"ok": True, "message": "Already recorded.", "url": url, "again": True})
+    if employee is None:
+        return jsonify({"ok": False, "error": "That person is no longer in HR. Enter these trays in the app for whoever planted them."}), 409
+    try:
+        ok, message = save_planter_day(db, biz, employee, day, upload_key=key)
+    except DB_ERRORS:
+        db.rollback()
+        ok, message = False, "The entries could not be saved. Please try again."
+    if not ok:
+        if recorded():   # the same entries sent twice at once: the other one recorded them
+            return jsonify({"ok": True, "message": "Already recorded.", "url": url, "again": True})
+        return jsonify({"ok": False, "error": message}), 409
+    return jsonify({"ok": True, "message": message, "url": url})
 
 
 @app.get("/planting/new")

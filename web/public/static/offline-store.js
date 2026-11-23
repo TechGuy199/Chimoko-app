@@ -119,6 +119,31 @@
         }).then(function () { upload(); return sale; });
     }
 
+    // A planter's day entered offline: {kind: "planting", user, userName, made_at, employee_id, employee, date, entries: [{item_id, item,
+    // trays, holes, kind_id, kind, mortality, ready_on}], summary}. It waits in the same queue as the sales and uploads the same way.
+    function recordPlanting(entry) {
+        entry.kind = "planting";
+        entry.key = newKey();
+        entry.ref = device();
+        entry.status = "waiting";
+        return putSale(entry).then(function () {
+            // The device's own seed stock goes down with it, so the next offline entry sees what is left
+            return snapshot().then(function (snap) {
+                if (!snap || !snap.planting) return;
+                entry.entries.forEach(function (line) {
+                    const seed = snap.planting.seeds.find(function (x) { return x.id === line.item_id; });
+                    if (!seed || !seed.size) return;
+                    const seeds = Math.floor(line.trays * line.holes + 0.5);
+                    const fromLoose = Math.min(seed.loose, seeds);
+                    const packs = Math.min(seed.packs, Math.ceil((seeds - fromLoose) / seed.size));
+                    seed.loose = Math.max(0, seed.loose - fromLoose + packs * seed.size - (seeds - fromLoose));
+                    seed.packs -= packs;
+                });
+                return set("snapshot", snap);
+            });
+        }).then(function () { upload(); return entry; });
+    }
+
     // Each waiting sale of the person signed in, oldest first. Stops at the first one that cannot be sent (no connection, signed out);
     // one the server turns down is kept under "Needs attention" with its reason, and the rest go on.
     function upload() {
@@ -140,7 +165,38 @@
         return uploading;
     }
 
+    function sendPlanting(snap, entry) {
+        const form = new FormData();
+        form.append("csrf", snap.csrf);
+        form.append("upload_key", entry.key);
+        form.append("employee_id", entry.employee_id);
+        form.append("date", entry.date);
+        entry.entries.forEach(function (line) {
+            form.append("item_id", line.item_id);
+            form.append("trays", line.trays);
+            form.append("holes", line.holes);
+            form.append("tray_type", line.kind_id || "");
+            form.append("mortality_pct", line.mortality);
+            form.append("ready_on", line.ready_on);
+        });
+        return fetch(snap.urls.plantings, { method: "POST", body: form, credentials: "same-origin", headers: { Accept: "application/json" } }).then(function (r) {
+            if (r.redirected) return false;   // signed out: kept for later
+            return r.json().then(function (answer) {
+                if (answer.ok) {
+                    entry.status = "uploaded";
+                    entry.url = answer.url;
+                    entry.uploaded_at = new Date().toISOString();
+                } else {
+                    entry.status = "attention";
+                    entry.problem = answer.error || "The app did not accept it.";
+                }
+                return putSale(entry).then(function () { return true; });
+            });
+        }, function () { return false; });   // the connection dropped: tried again later
+    }
+
     function send(snap, sale) {
+        if (sale.kind === "planting") return snap.urls.plantings ? sendPlanting(snap, sale) : Promise.resolve(false);
         const form = new FormData();
         form.append("csrf", snap.csrf);
         form.append("upload_key", sale.key);
@@ -199,7 +255,7 @@
         e.stopImmediatePropagation();
         sales().then(function (all) {
             const waiting = all.filter(function (s) { return s.status !== "uploaded" && String(s.user) === String(me.user); }).length;
-            if (waiting && !confirm(waiting + " sale(s) made offline have not uploaded yet. They stay on this device and upload when you sign in again. Sign out?")) return;
+            if (waiting && !confirm(waiting + " record(s) made offline (sales or planting entries) have not uploaded yet. They stay on this device and upload when you sign in again. Sign out?")) return;
             return wipe().then(function () {
                 form.dataset.wiped = "1";
                 form.submit();
@@ -216,7 +272,8 @@
             const waiting = mine.filter(function (s) { return s.status === "waiting"; }).length;
             const attention = mine.filter(function (s) { return s.status === "attention"; }).length;
             const offline = !navigator.onLine || unreachable === true;
-            const text = attention ? attention + " offline sale(s) need attention" : waiting ? waiting + " sale(s) waiting to upload" : offline ? "No connection: work offline" : "";
+            const what = mine.some(function (s) { return s.kind === "planting" && s.status !== "uploaded"; }) ? "offline record(s)" : "offline sale(s)";
+            const text = attention ? attention + " " + what + " need attention" : waiting ? waiting + " " + what + " waiting to upload" : offline ? "No connection: work offline" : "";
             if (!pill) {
                 pill = document.createElement("a");
                 pill.className = "offline-pill no-print";
@@ -234,7 +291,7 @@
     window.addEventListener("offline", paintPill);
 
     window.MSOffline = {
-        snapshot: snapshot, sales: sales, record: record, upload: upload, removeSale: removeSale, putSale: putSale,
+        snapshot: snapshot, sales: sales, record: record, recordPlanting: recordPlanting, upload: upload, removeSale: removeSale, putSale: putSale,
         reachable: function () { return navigator.onLine && unreachable === false; },
         checking: function () { return navigator.onLine && unreachable === null; },
         refresh: function () { return snapshot().then(function (s) { return s ? refresh(s.urls.snapshot) : null; }); },
