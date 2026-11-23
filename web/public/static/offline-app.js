@@ -266,10 +266,52 @@
         c.appendChild(table(["Product", "Qty", "Price", "Total"], s.lines.map(function (l) { return [l[0], l[1], money(l[2]), money(l[3])]; }), [0, 1, 1, 1]));
         c.appendChild(el("p", "offline-total", "Total " + money(s.total) + " · Paid " + money(s.paid) + (s.total - s.paid > 0.005 ? " · Owing " + money(s.total - s.paid) : "")));
         c.appendChild(el("p", "muted", "Made while offline. Its invoice number is given when it is uploaded; " + s.ref + " stays on it so the two can be matched."));
+        // The same receipt for a receipt (thermal) printer: printed only, never shown (print.js picks it)
+        const t = el("div", "thermal");
+        t.setAttribute("data-thermal", "");
+        t.setAttribute("aria-hidden", "true");
+        const head = el("div", "t-center");
+        head.appendChild(el("h1", "", snap.business.name));
+        head.appendChild(el("p", "t-strong", "RECEIPT (made offline)"));
+        t.appendChild(head);
+        t.appendChild(el("hr", "t-rule"));
+        function trow(a, b, cls) {
+            const p = el("p", "t-row" + (cls ? " " + cls : ""));
+            p.appendChild(el("span", "", a));
+            p.appendChild(el("span", "", b));
+            t.appendChild(p);
+        }
+        trow("No.", s.ref);
+        trow("Date", when(s.made_at));
+        trow("Customer", s.fields.customer_name || snap.business.walk_in);
+        if (s.fields.customer_phone) trow("Phone", s.fields.customer_phone);
+        t.appendChild(el("hr", "t-rule"));
+        s.lines.forEach(function (l) {
+            const item = el("div", "t-item");
+            item.appendChild(el("p", "", l[0]));
+            const p = el("p", "t-row");
+            p.appendChild(el("span", "", l[1] + " x " + money(l[2])));
+            p.appendChild(el("span", "", money(l[3])));
+            item.appendChild(p);
+            t.appendChild(item);
+        });
+        t.appendChild(el("hr", "t-rule"));
+        trow("TOTAL", money(s.total), "t-total");
+        trow("Paid", money(s.paid));
+        if (s.total - s.paid > 0.005) trow("Owing", money(s.total - s.paid), "t-strong");
+        t.appendChild(el("hr", "t-rule"));
+        t.appendChild(el("p", "t-center", "Its invoice number is given when it uploads. Thank you!"));
+        c.appendChild(t);
+
         const row = el("div", "toolbar no-print");
         const print = el("button", "btn", "Print receipt");
         print.type = "button";
-        print.addEventListener("click", function () { window.print(); });
+        print.setAttribute("data-print", "");   // print.js: A4 or the receipt printer, as chosen on this device
+        if (!window.MSPrint) print.addEventListener("click", function () { window.print(); });
+        const options = el("button", "btn ghost", "Print options");
+        options.type = "button";
+        options.setAttribute("data-print", "choose");
+        row.appendChild(options);
         const next = el("button", "btn primary", "New sale");
         next.type = "button";
         next.addEventListener("click", function () { receipt = null; show(); });

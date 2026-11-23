@@ -6,14 +6,21 @@
         <a class="back" href="{{ url_for('history') }}">&larr; All invoices</a>
         <h1>{{ inv.invoice_no }}</h1>
     </div>
+    <div class="head-actions">
+    <span class="print-box">
+        <button type="button" class="btn success" data-print>Print</button>
+        <small class="muted" data-print-label></small>
+    </span>
     <details class="menu">
         <summary class="btn primary">Actions</summary>
         <div class="menu-panel">
-            <button type="button" class="menu-item" onclick="window.print()">Print / Save as PDF</button>
+            <button type="button" class="menu-item" data-print="choose">Print options (A4 or receipt printer)</button>
+            <button type="button" class="menu-item" onclick="window.print()">Save as PDF (A4)</button>
             <a class="menu-item" href="{{ url_for('pos') }}">New sale</a>
             {% if user.role == 'admin' and inv.customer_id %}<a class="menu-item" href="{{ url_for('customer_statement', customer_id=inv.customer_id) }}">Customer statement</a>{% endif %}
         </div>
     </details>
+    </div>
 </div>
 
 {% if inv.to_deliver %}
@@ -134,6 +141,50 @@
     </dl>
 
     <footer>Thank you for your business!</footer>
+</article>
+
+{# The same invoice for a receipt (thermal) printer: narrow, black on white, each item on its own lines so long names fit.
+   Only printed, never shown on screen (print.js). #}
+<article class="thermal" data-thermal aria-hidden="true">
+    <div class="t-center">
+        <h1>{{ user.business_name }}</h1>
+        {% if user.subtitle %}<p>{{ user.subtitle }}</p>{% endif %}
+        {% if user.contact %}<p>{{ user.contact }}</p>{% endif %}
+        <p class="t-strong">{{ 'FARM USE ISSUE NOTE' if inv.kind == 'FARM_USE' else 'RECEIPT' }}</p>
+    </div>
+    <hr class="t-rule">
+    <p class="t-row"><span>No.</span><span>{{ inv.invoice_no }}</span></p>
+    {% if inv.offline_ref %}<p class="t-row"><span>Offline no.</span><span>{{ inv.offline_ref }}</span></p>{% endif %}
+    <p class="t-row"><span>Date</span><span>{{ inv.created_at[:16] }}</span></p>
+    <p class="t-row"><span>Served by</span><span>{{ inv.created_by }}</span></p>
+    <p class="t-row"><span>{{ 'To' if inv.kind == 'FARM_USE' else 'Customer' }}</span><span>{{ inv.customer_name }}</span></p>
+    {% if inv.customer_phone %}<p class="t-row"><span>Phone</span><span>{{ inv.customer_phone }}</span></p>{% endif %}
+    <hr class="t-rule">
+    {% for line in lines %}
+    <div class="t-item">
+        <p>{{ line.item_name }}</p>
+        <p class="t-row"><span>{{ line.qty }} x {{ line.unit_price|money }}</span><span>{{ (line.qty * line.unit_price)|money }}</span></p>
+        {% if line.discount %}<p class="t-row t-sub"><span>Discount</span><span>- {{ line.discount|money }}</span></p>{% endif %}
+    </div>
+    {% endfor %}
+    <hr class="t-rule">
+    {% if inv.discount %}
+    <p class="t-row"><span>Subtotal</span><span>{{ inv.subtotal|money }}</span></p>
+    <p class="t-row"><span>Discount</span><span>- {{ inv.discount|money }}</span></p>
+    {% endif %}
+    <p class="t-row t-total"><span>TOTAL</span><span>{{ inv.total|money }}</span></p>
+    {% if inv.kind != 'FARM_USE' %}
+    <p class="t-row"><span>Paid</span><span>{{ inv.amount_paid|money }}</span></p>
+    {% set paid_with = paid_by|selectattr('direction', 'equalto', 'in')|selectattr('amount', 'gt', 0)|map(attribute='method')|reject('equalto', 'Not recorded')|unique|list %}
+    {% if paid_with %}<p class="t-row"><span>By</span><span>{{ paid_with|join(', ') }}</span></p>{% endif %}
+    {% if inv.balance_due > 0.005 %}<p class="t-row t-strong"><span>Balance due</span><span>{{ inv.balance_due|money }}</span></p>{% endif %}
+    <p class="t-row"><span>Status</span><span>{{ inv.payment_status }}</span></p>
+    {% endif %}
+    {% if inv.deliver_on %}<p class="t-row"><span>Delivery</span><span>{{ 'Delivered ' ~ inv.delivered_at[:10] if inv.delivered_at else inv.deliver_on }}</span></p>{% endif %}
+    {% if inv.collect_on %}<p class="t-row"><span>Collection</span><span>{{ 'Collected ' ~ inv.collected_at[:10] if inv.collected_at else inv.collect_on }}</span></p>{% endif %}
+    {% if inv.payment_status == 'Cancelled' %}<p class="t-center t-strong">CANCELLED</p>{% endif %}
+    <hr class="t-rule">
+    <p class="t-center">Thank you for your business!</p>
 </article>
 
 {% if user.role == 'admin' and inv.kind == 'SALE' %}

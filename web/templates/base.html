@@ -235,6 +235,7 @@
 {# In-place navigation (nav.js) swaps this page for the next one without a full reload; it re-runs only the
    scripts inside #page-main and #page-scripts on every page change, so it is loaded once, here, outside them. #}
 <script src="{{ asset('nav.js') }}"></script>
+<script src="{{ asset('print.js') }}"></script>
 <script src="{{ asset('dialog.js') }}"></script>
 <script src="{{ asset('tray.js') }}"></script>
 {# The assistant: a button and a chat panel on every page, for a signed-in person when it is on for the business (Settings). Loaded once, here. #}

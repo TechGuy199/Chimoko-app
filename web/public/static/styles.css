@@ -1714,3 +1714,47 @@ details.fold.no-print > summary { padding: 0 4px; }
 .receipt-discard { margin-top: 12px; text-align: right; }
 .receipt-shortcut { display: grid; gap: 2px; margin-bottom: 14px; color: var(--text); border-color: var(--primary); }
 .receipt-link { font-size: 12px; }
+
+/* ---------- Printing on a receipt (thermal) printer (print.js) ---------- */
+/* The receipt version of a page ([data-thermal]) is never shown on screen; it is measured off screen, then printed alone */
+.thermal { display: none; }
+.thermal.thermal-measuring { display: block; position: absolute; left: -10000px; top: 0; }
+html.print-thermal .thermal { width: 72mm; padding: 2mm 0 4mm; background: #fff; color: #000; font: 600 12px/1.35 "Helvetica Neue", Arial, sans-serif; letter-spacing: 0; }
+html.print-thermal-58 .thermal { width: 48mm; font-size: 10.5px; }
+.thermal p { margin: 0; }
+.thermal h1 { margin: 0 0 1mm; color: #000; font-size: 1.35em; font-weight: 800; line-height: 1.2; letter-spacing: 0; text-transform: none; }
+.thermal .t-center { text-align: center; }
+.thermal .t-strong { font-weight: 800; }
+.thermal .t-rule { margin: 2mm 0; border: 0; border-top: 1px dashed #000; }
+.thermal .t-row { display: flex; justify-content: space-between; gap: 2mm; }
+.thermal .t-row > span:first-child { min-width: 0; overflow-wrap: anywhere; }
+.thermal .t-row > span:last-child { flex: none; max-width: 62%; text-align: right; overflow-wrap: anywhere; }
+.thermal .t-item { margin: 0 0 1.5mm; }
+.thermal .t-item > p:first-child { overflow-wrap: anywhere; }
+.thermal .t-sub { font-weight: 500; }
+.thermal .t-total { margin: 1mm 0; font-size: 1.3em; font-weight: 800; }
+@media print {
+    html.print-thermal, html.print-thermal body { margin: 0 !important; padding: 0 !important; background: #fff !important; }
+    html.print-thermal main { padding: 0 !important; margin: 0 !important; }
+    /* Only the receipt: everything else on the page is left off the roll */
+    html.print-thermal #page-main > :not([data-thermal]):not(:has([data-thermal])),
+    html.print-thermal #off-view > :not([data-thermal]):not(:has([data-thermal])),
+    html.print-thermal .offline-receipt > :not([data-thermal]) { display: none !important; }
+    html.print-thermal .offline-receipt { padding: 0 !important; border: 0 !important; margin: 0 !important; }
+    html.print-thermal .thermal { display: block !important; margin: 0 auto; }
+    html.print-a4 .thermal { display: none !important; }
+}
+
+/* Print buttons, and the printer chooser */
+.print-box { display: inline-grid; justify-items: end; gap: 2px; }
+.print-box small { font-size: 11px; }
+.print-choose .modal-body { display: grid; gap: 10px; max-width: 380px; }
+.print-choose h2 { margin: 0; }
+.print-option { display: grid; gap: 2px; padding: 14px 16px; border: 1px solid var(--line-strong); border-radius: var(--radius-small); background: var(--surface);
+    color: var(--text); font: inherit; text-align: left; cursor: pointer; }
+.print-option:hover, .print-option:focus-visible { border-color: var(--primary); }
+.print-option.current { border-color: var(--primary); box-shadow: 0 0 0 1px var(--primary); }
+.print-option small { color: var(--text-muted); }
+
+/* Paper is white: the dark theme behind the page never reaches the printer (it would show in the page margins) */
+@media print { html { background: #ffffff !important; } }

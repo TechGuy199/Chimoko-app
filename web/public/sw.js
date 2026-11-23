@@ -16,11 +16,12 @@
 // v4: pages kept for offline viewing, and the offline screens
 // v5: the offline screens' files kept under their bare path, and refreshed while the app is online
 // v6: the icons redrawn with more room around them, under the same addresses; the offline screens can log plantings
+// v7: the offline screens print receipts on a regular or a receipt printer (print.js)
 // (Push notifications, below, change no caching.)
-const CACHE_NAME = "ms-pos-shell-v6";
+const CACHE_NAME = "ms-pos-shell-v7";
 const PAGES = "ms-pos-pages-v1";
 const OFFLINE_URL = "/static/offline.html";
-const PRECACHE = [OFFLINE_URL, "/static/offline-app.js", "/static/offline-store.js", "/static/styles.css", "/static/mobile.css",
+const PRECACHE = [OFFLINE_URL, "/static/offline-app.js", "/static/offline-store.js", "/static/print.js", "/static/styles.css", "/static/mobile.css",
                   "/static/icons/icon.svg", "/static/icons/icon-192.png", "/static/icons/icon-512.png"];
 const SLOW_MS = 6000;      // a page taking longer than this shows its saved copy, if there is one
 const KEEP_PAGES = 150;    // pages kept; the oldest go first
